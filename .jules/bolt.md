@@ -49,3 +49,9 @@
 **Learning:** `source_key` is computed repeatedly across all nodes and candidates during flake-tidy dedup and flattening analysis. While `_normalize_vcs_url` was memoized, `_canonicalize_url_authority` (which parses scheme, authority, IPv6 brackets, ports, and DNS root labels) and `_normalize_ref` (which strips git branch prefixes) were executed unmemoized on every invocation. Caching both pure string functions with `@functools.lru_cache(maxsize=512)` speeds up authority canonicalization by over 68x and ref normalization by ~2.3x.
 
 **Action:** Ensure all pure URL and reference canonicalization helper functions used by graph and grouping keys are decorated with `@functools.lru_cache`.
+
+## 2026-11-04 - Prune Git Object Payloads During Repo Discovery
+
+**Learning:** `git-discover-repos` looks for `.git` markers but recursively entered opaque `.git/objects` trees; a warm scan of `/home/user/git/code` with a 1.6 GB object store took 0.592s. Pruning top-level and submodule object stores cut the same scan to 0.156s (~74%) without changing the discovered repo/worktree count, while `.git/worktrees` still needs traversal.
+
+**Action:** When a filesystem walk only needs Git repository markers, prune object databases (`.git/objects` and `.git/modules/*/objects`) but leave administrative paths such as `.git/worktrees` visible.

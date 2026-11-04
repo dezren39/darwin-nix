@@ -229,6 +229,7 @@ build_name_expr PRUNE_EXPR "${ALL_ARTIFACT_NAMES[@]}"
 # separate artifact find that used to re-walk the whole tree.
 #
 #   \( artifacts \) -prune -print   ->  an artifact dir; do not descend
+#   -o git object stores -prune      ->  skip opaque, potentially huge payloads
 #   -o -name .git -print            ->  a repo or worktree marker
 #
 # Consumers tell them apart by basename. .git and .worktrees are deliberately
@@ -246,7 +247,11 @@ scan_deep() {
   # failure stays quiet there.
   local err_file find_status
   err_file="$(mktemp)"
-  find -H "$1" "${DEPTH_ARGS[@]}" \( "${PRUNE_EXPR[@]}" \) -prune -print -o -name .git -print 2>"$err_file" |
+  # Object stores contain no repo/worktree markers; avoid walking their often
+  # enormous loose-object trees, while leaving .git/worktrees discoverable.
+  find -H "$1" "${DEPTH_ARGS[@]}" \( "${PRUNE_EXPR[@]}" \) -prune -print \
+    -o \( -path '*/.git/objects' -o -path '*/.git/modules/*/objects' \) -prune \
+    -o -name .git -print 2>"$err_file" |
     while IFS= read -r hit; do
       # Fast parameter expansion avoids subshell execution of basename in discovery loop
       case "${hit##*/}" in

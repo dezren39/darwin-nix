@@ -91,6 +91,24 @@ run --path "$VALID"
 [ "$STATUS" -eq 0 ] || fail "all-valid --path exited $STATUS"
 case "$OUT" in *"repo"$'\t'"$VALID_CANON/repo1"*) echo "ok: all-valid run lists the repo and exits 0" ;; *) fail "all-valid run output changed (got: $OUT)" ;; esac
 
+# Object databases are opaque payloads, not discovery roots; pruning them
+# keeps large .git/objects trees out of filesystem walks. Keep traversing
+# .git/worktrees, where callers may store linked worktrees.
+mkdir -p "$VALID/repo1/.git/objects/aa/.git" \
+  "$VALID/repo1/.git/modules/submodule/objects/aa/.git" \
+  "$VALID/repo1/.git/worktrees/nested"
+: > "$VALID/repo1/.git/worktrees/nested/.git"
+run --path "$VALID"
+case "$OUT" in *"worktree"$'\t'"$VALID_CANON/repo1/.git/worktrees/nested"*)
+  echo "ok: worktree under .git/worktrees remains discoverable" ;;
+  *) fail "worktree under .git/worktrees was missed (got: $OUT)" ;;
+esac
+case "$OUT" in
+  *"$VALID_CANON/repo1/.git/objects/aa"*|*"$VALID_CANON/repo1/.git/modules/submodule/objects/aa"*)
+  fail "object-store contents were treated as discovery roots (got: $OUT)" ;;
+  *) echo "ok: object-store contents are pruned" ;;
+esac
+
 # ─── --count follows the same verdict ───────────────────────────────────────
 group_start=$failures
 run --path "$VALID" --count

@@ -400,6 +400,23 @@ function utcDayDir(base: string): string {
   const d = new Date();
   const day = d.toISOString().slice(0, 10);
   const dir = path.join(base, day);
+  // lstat, not stat (#1603): a symlinked day-directory must not be
+  // written through - its target lives outside the backup dir, where
+  // the backup would be invisible to listBackups and every cleanup
+  // pass (the read side was hardened in #1524; this is the write
+  // side). lstat also sees a dangling link, which mkdirSync would
+  // otherwise surface as a raw ENOENT out of backupDoc.
+  let isLink = false;
+  try {
+    isLink = fs.lstatSync(dir).isSymbolicLink();
+  } catch {
+    isLink = false;
+  }
+  if (isLink) {
+    throw new Error(
+      `buffer-backup: refusing to write through symlinked day directory: ${dir}`
+    );
+  }
   fs.mkdirSync(dir, { recursive: true });
   return dir;
 }
@@ -562,7 +579,17 @@ function backupDoc(
   const name = doc.uri.path.replace(/[^a-zA-Z0-9]/g, "_") || "untitled";
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
   const ext = langToExtension(doc.languageId || "txt");
-  const dayDir = utcDayDir(dir);
+  let dayDir: string;
+  try {
+    dayDir = utcDayDir(dir);
+  } catch {
+    // Contained (#1603): a symlinked day directory must not throw out
+    // of backupDoc - its callers are event handlers, backupAll, and
+    // activate(), and one bad day directory must not stop the other
+    // documents in the same backupAll pass. The hash stays unset, so
+    // a later trigger retries this document.
+    return;
+  }
 
   const meta = buildMeta(doc, text, h, trigger);
   const content = formatMetaLine(meta) + "\n" + text;

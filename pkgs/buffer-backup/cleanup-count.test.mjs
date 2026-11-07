@@ -687,4 +687,56 @@ for (const bad of [NaN, Infinity, -Infinity]) {
   console.log("pass: getConfig clamps debounceMs to the timer-safe range (#1594)");
 }
 
+// 24. Live symlinked day-directory, write side (#1603): utcDayDir must
+//     refuse a day dir that is a symlink to a live outside directory -
+//     writing through it would put the only backup copy outside the
+//     backup dir, invisible to listBackups and every cleanup pass.
+// 25. Dangling symlinked day-directory (#1603): utcDayDir must fail
+//     with the same named refusal, not the raw ENOENT mkdirSync throws
+//     for a dangling link.
+// 26. Normal day-directory (#1603 control): utcDayDir creates a real
+//     directory, a file written there is listed by listBackups.
+{
+  const dayDirFactory = new Function(
+    "fs",
+    "path",
+    `${stripTypes(extractFunction("utcDayDir"))}
+     return { utcDayDir };`,
+  );
+  const { utcDayDir } = dayDirFactory(fs, path);
+  const today = new Date().toISOString().slice(0, 10);
+  {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), "buffer-backup-test-"));
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "buffer-backup-outside-"));
+    fs.symlinkSync(outside, path.join(base, today), "dir");
+    assert.throws(() => utcDayDir(base), /symlinked day directory/);
+    assert.deepStrictEqual(fs.readdirSync(outside), [], "nothing may be created in the link target");
+    fs.rmSync(base, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+    console.log("pass: utcDayDir refuses a live symlinked day directory (#1603)");
+  }
+  {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), "buffer-backup-test-"));
+    const missing = path.join(base, "no-such-target");
+    fs.symlinkSync(missing, path.join(base, today), "dir");
+    assert.throws(
+      () => utcDayDir(base),
+      (e) => /symlinked day directory/.test(e.message) && e.code !== "ENOENT",
+    );
+    assert.ok(!fs.existsSync(missing), "the dangling target must not be created");
+    fs.rmSync(base, { recursive: true, force: true });
+    console.log("pass: utcDayDir refuses a dangling symlinked day directory with a named error (#1603)");
+  }
+  {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), "buffer-backup-test-"));
+    const dir = utcDayDir(base);
+    assert.strictEqual(dir, path.join(base, today));
+    assert.ok(fs.lstatSync(dir).isDirectory() && !fs.lstatSync(dir).isSymbolicLink());
+    fs.writeFileSync(path.join(dir, "note.txt"), "hello");
+    assert.deepStrictEqual(remainingNames(base), ["note.txt"]);
+    fs.rmSync(base, { recursive: true, force: true });
+    console.log("pass: utcDayDir normal day directory is created and listed (#1603)");
+  }
+}
+
 console.log("cleanup-count.test.mjs: all assertions passed");

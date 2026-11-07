@@ -5,7 +5,7 @@
 // real ~/.config/nix/tool-definitions and never spawns the CLI.
 
 import assert from "node:assert/strict"
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -138,6 +138,36 @@ await test("missing definitions dir registers nothing and does not throw", async
   assert.equal(rec.transforms, 0)
   assert.equal(rec.hooks.size, 0)
   assert.equal(rec.updates.size, 0)
+})
+
+await test("a dangling-symlink .txt entry is skipped; its valid neighbours still load (#1622)", async () => {
+  const dir = await fixtureDir("dangling", [
+    ["aaa.txt", "AAA BODY"],
+    ["zzz.txt", "ZZZ BODY"],
+  ])
+  await symlink(join(dir, "no-such-target.txt"), join(dir, "broken.txt"))
+  const plugin = await loadPlugin(dir)
+  const { ctx, rec } = makeCtx()
+  await plugin.setup(ctx)
+  assert.equal(rec.updates.get("aaa"), "AAA BODY")
+  assert.equal(rec.updates.get("zzz"), "ZZZ BODY")
+  assert.equal(rec.updates.has("broken"), false)
+  assert.equal(rec.updates.size, 2)
+})
+
+await test("a directory named *.txt is skipped; its valid neighbours still load (#1622)", async () => {
+  const dir = await fixtureDir("dir-entry", [
+    ["aaa.txt", "AAA BODY"],
+    ["zzz.txt", "ZZZ BODY"],
+  ])
+  await mkdir(join(dir, "mid.txt"))
+  const plugin = await loadPlugin(dir)
+  const { ctx, rec } = makeCtx()
+  await plugin.setup(ctx)
+  assert.equal(rec.updates.get("aaa"), "AAA BODY")
+  assert.equal(rec.updates.get("zzz"), "ZZZ BODY")
+  assert.equal(rec.updates.has("mid"), false)
+  assert.equal(rec.updates.size, 2)
 })
 
 console.log("\n# tool-definitions: session reapply hooks")

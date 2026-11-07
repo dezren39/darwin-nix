@@ -153,13 +153,21 @@ function nonEmptyStringOr(value: unknown, fallback: string): string {
 
 function getDuration(section: string): number {
   const c = vscode.workspace.getConfiguration(section);
+  // A negative component is treated as 0, its documented default
+  // (#1620): finiteNumberOr alone passes negatives through, so one
+  // hand-edited negative component could cancel the positive ones in
+  // the sum below — days=1 with hours=-25 summed to -3600, and
+  // cleanupAge reads maxAgeSec <= 0 as "disabled", so the configured
+  // retention silently never ran.
+  const component = (key: string): number =>
+    Math.max(0, finiteNumberOr(c.get(key, 0), 0));
   return durationToSeconds({
-    years: finiteNumberOr(c.get("years", 0), 0),
-    months: finiteNumberOr(c.get("months", 0), 0),
-    days: finiteNumberOr(c.get("days", 0), 0),
-    hours: finiteNumberOr(c.get("hours", 0), 0),
-    minutes: finiteNumberOr(c.get("minutes", 0), 0),
-    seconds: finiteNumberOr(c.get("seconds", 0), 0),
+    years: component("years"),
+    months: component("months"),
+    days: component("days"),
+    hours: component("hours"),
+    minutes: component("minutes"),
+    seconds: component("seconds"),
   });
 }
 

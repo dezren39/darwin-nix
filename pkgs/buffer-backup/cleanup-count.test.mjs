@@ -589,6 +589,55 @@ for (const bad of [NaN, Infinity, -Infinity]) {
   console.log("pass: getInterval clamps a 30-day interval to the Node timer ceiling (#1588)");
 }
 
+// 23. Negative maxAge components are treated as 0 (#1620): one
+//     hand-edited negative component must not cancel the positive
+//     ones in getDuration's sum — days=1 with hours=-25 summed to
+//     -3600, and cleanupAge reads maxAgeSec <= 0 as disabled, so the
+//     configured retention silently never ran. Same extraction
+//     harness and stub vscode as block 18.
+{
+  let configValues = {};
+  const fakeVscode = {
+    workspace: {
+      getConfiguration: (section) => ({
+        get: (key, fallback) => {
+          const full = `${section}.${key}`;
+          return Object.prototype.hasOwnProperty.call(configValues, full)
+            ? configValues[full]
+            : fallback;
+        },
+      }),
+    },
+  };
+  const negFactory = new Function(
+    "vscode",
+    "DEFAULT_BACKUP_DIR",
+    `${stripTypes(extractFunction("finiteNumberOr"))}
+     ${stripTypes(extractFunction("nonEmptyStringOr"))}
+     ${stripTypes(extractFunction("durationToSeconds"))}
+     ${stripTypes(extractFunction("getDuration"))}
+     ${stripTypes(extractFunction("getInterval"))}
+     ${stripTypes(extractFunction("getConfig"))}
+     return { getConfig };`,
+  );
+  const { getConfig } = negFactory(fakeVscode, "/tmp/fallback-dir");
+  configValues = {
+    "bufferBackup.maxAge.days": 1,
+    "bufferBackup.maxAge.hours": -25,
+  };
+  assert.strictEqual(getConfig().maxAgeSec, 86400, "days=1 + hours=-25 must keep the 1-day retention");
+  configValues = {
+    "bufferBackup.maxAge.years": 1,
+    "bufferBackup.maxAge.months": -13,
+  };
+  assert.strictEqual(getConfig().maxAgeSec, 31536000, "years=1 + months=-13 must keep the 1-year retention");
+  configValues = { "bufferBackup.maxAge.seconds": -1 };
+  assert.strictEqual(getConfig().maxAgeSec, 0, "a negative-only duration is 0 (disabled), never negative");
+  configValues = { "bufferBackup.maxAge.days": 7 };
+  assert.strictEqual(getConfig().maxAgeSec, 604800, "a valid positive duration is unchanged");
+  console.log("pass: getDuration treats negative maxAge components as 0 (#1620)");
+}
+
 
 // 21. getConfig clamps debounceMs to the timer-safe range (#1594,
 //     oracle: the configured delay handed to setTimeout, not

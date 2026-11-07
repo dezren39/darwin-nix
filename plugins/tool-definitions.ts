@@ -52,7 +52,17 @@ function load() {
       if (!file.endsWith(".txt")) continue
       // Deliberately NOT trimmed. Upstream imports these files verbatim, so they
       // carry a trailing newline. Trimming here would silently reformat.
-      const body = readFileSync(join(DIR, file), "utf8")
+      // One entry that cannot be read as a file (a dangling symlink, a
+      // directory named *.txt, a permission error) is skipped on its own
+      // (#1622): the outer catch is for the directory itself being
+      // missing/unreadable, and letting a per-file throw escape the loop
+      // silently dropped every definition after the bad entry.
+      let body
+      try {
+        body = readFileSync(join(DIR, file), "utf8")
+      } catch {
+        continue
+      }
       if (!body.trim()) continue
       const name = file.slice(0, -4)
       const id = ALIASES[name] ?? name

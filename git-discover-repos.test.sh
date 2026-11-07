@@ -556,6 +556,32 @@ run --path "$COUNT_SCAN" --find trash
 [ "$STATUS" -eq 0 ] || fail "--find trash alone exited $STATUS (#1590)"
 case "$OUT" in *"FOUND"$'\t'"trash"*) echo "ok: --find alone still emits FOUND records" ;; *) fail "--find alone lost its FOUND record (got: $OUT) (#1590)" ;; esac
 
+# ─── --count with --no-bare / --follow is pinned (#1628) ───────────
+# The count section above pins the record filters, but two flags the
+# count branch does not implement itself went untested: --no-bare is
+# honoured only because consider() pre-filters OUT_FILE (filter_out
+# has no bare case), and --follow's verdict reaches the count branch
+# through an exit block duplicated from the non-count tail. Both are
+# correct today; these runs pin them so a refactor of either spot
+# fails loudly instead of silently miscounting.
+run --path "$COUNT_SCAN" --no-bare --count
+[ "$STATUS" -eq 0 ] || fail "--no-bare --count exited $STATUS (#1628)"
+[ "$OUT" = "repos=1 worktrees=1 total=2" ] || fail "--no-bare --count did not exclude the bare repo (got: $OUT) (#1628)"
+echo "ok: --no-bare --count excludes the bare repo"
+
+run --path "$FOLLOWED/repo" --follow --count
+[ "$STATUS" -eq 0 ] || fail "--follow --count exited $STATUS (#1628)"
+[ "$OUT" = "repos=1 worktrees=1 total=2" ] || fail "--follow --count did not count the followed worktree (got: $OUT) (#1628)"
+echo "ok: --follow --count counts the followed worktree"
+
+make_git_shim "worktree list"
+OUT="$(PATH="$git_shim_dir:$PATH" "$SCRIPT" --path "$FOLLOWED/repo" --follow --count 2>"$TMP_ROOT/err")"; STATUS=$?
+ERR="$(cat "$TMP_ROOT/err")"
+[ "$STATUS" -ne 0 ] || fail "failed worktree list under --follow --count exited 0 (#1628)"
+case "$OUT" in "repos=1 worktrees=0 total=1") echo "ok: --follow --count still prints the count when follow fails" ;; *) fail "--follow --count did not print the seed count when follow failed (got: $OUT) (#1628)" ;; esac
+case "$ERR" in *"failed to list worktrees for: $FOLLOWED_CANON/repo"*) echo "ok: follow failure under --count named on stderr" ;; *) fail "follow failure under --count not named on stderr (got: $ERR) (#1628)" ;; esac
+rm -f "$git_shim_dir/git"
+
 # ─── Shared conformance probe matrix (#1146, design #1145) ─────────
 # The matrix rows for git-discover-repos, driven through
 # lib/arg-probe.sh (the same helper every discovery suite uses):

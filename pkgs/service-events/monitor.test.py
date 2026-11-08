@@ -12,6 +12,9 @@ the parsing functions with crafted sampler output.
   event.py), so a superscript-digit pid field raised ValueError out
   of launchd_jobs() and aborted every monitor tick. processes() in
   the same file already guards with isascii() and isdigit().
+- #1659: sockets() applies the same ASCII-decimal guard to lsof p-fields
+  and skips malformed records without attributing their fields to the
+  previous pid.
 
 Run: python3 monitor.test.py  (exit 0 = all probes passed)
 """
@@ -125,6 +128,53 @@ check("1613 unwatched label still skipped",
 # (#1380), not as an empty job set.
 monitor.run = lambda argv: None
 check("1613 failed sampler still returns None", monitor.launchd_jobs() is None)
+
+# #1659: malformed lsof p-fields are skipped without attaching their n/T
+# records to the preceding valid pid; ordinary listener/connection parsing
+# still round-trips, and a failed lsof run remains a failed sample (#1380).
+monitor.run = lambda argv: (
+    "p123\n"
+    "n*:8000\nTST=LISTEN\n"
+    "p²\n"
+    "n*:9999\nTST=LISTEN\n"
+    "p\n"
+    "n*:7000\nTST=LISTEN\n"
+    "p456\n"
+    "n*:9000\nTST=LISTEN\n"
+)
+try:
+    malformed_sockets = monitor.sockets({123, 456})
+    raised = ""
+except ValueError as exc:
+    malformed_sockets, raised = None, str(exc)
+check("1659 malformed lsof p-fields do not raise", malformed_sockets is not None, raised)
+check(
+    "1659 malformed records do not attach to preceding pid",
+    malformed_sockets is not None
+    and malformed_sockets[123] == ({"8000"}, set())
+    and malformed_sockets[456] == ({"9000"}, set()),
+    repr(malformed_sockets),
+)
+
+monitor.run = lambda argv: (
+    "p123\n"
+    "n*:3000\nTST=LISTEN\n"
+    "n127.0.0.1:3000->127.0.0.1:51324\nTST=ESTABLISHED\n"
+)
+round_trip = monitor.sockets({123})
+check(
+    "1659 ordinary lsof listener and connection round-trip",
+    round_trip == {
+        123: (
+            {"3000"},
+            {"127.0.0.1:3000->127.0.0.1:51324"},
+        )
+    },
+    repr(round_trip),
+)
+
+monitor.run = lambda argv: None
+check("1659 failed lsof sampler still returns None", monitor.sockets({123}) is None)
 
 _rotate_probes()
 

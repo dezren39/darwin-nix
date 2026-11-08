@@ -21,6 +21,16 @@
 #     The invocation must exit 0 (a valid invocation the contract must
 #     not disturb).
 #
+# The mode-effectiveness rows (design #1722, #1723) every migrated
+# script drives through probe_mode_refused / probe_mode_accepted
+# below, on top of its own --system sections:
+#   accumulation in both flag orders (mode flag first and last);
+#   positional-target recording (a positional is recorded under its
+#   option name and judged like the option form);
+#   the judge fires only in the named mode (the same class flags are
+#   accepted in another mode);
+#   the judge names every offending flag, not just the first.
+#
 # The matrix rows every family member drives (with its own options):
 #   unknown option; missing value; flag-shaped value; empty value;
 #   repeated single-value option; both orders of each conflict pair;
@@ -51,4 +61,23 @@ probe_accepted() {
     return
   fi
   echo "ok: probe: $* accepted"
+}
+
+# probe_mode_refused <stderr-substring> <args...>
+#   Mode-effectiveness row (design #1722): the invocation's class
+#   flags have no live consumer in the named mode, so the shared
+#   arg_refuse_in_mode judge in lib/common.sh must refuse it at
+#   parse time -- exit 2, stderr naming the mode, the class and
+#   every offending flag (the substring pins that shape).
+probe_mode_refused() {
+  local _probe_want="$1"; shift
+  probe_rejected "$_probe_want" "$@"
+}
+
+# probe_mode_accepted <args...>
+#   The control row for the mode judge: the same class flags in a
+#   mode where they ARE effective must be accepted (exit 0) -- the
+#   judge fires only in the named mode.
+probe_mode_accepted() {
+  probe_accepted "$@"
 }

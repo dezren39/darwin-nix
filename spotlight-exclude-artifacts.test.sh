@@ -291,6 +291,18 @@ for bad in abc 0 2147483648 99999999999999999999999999; do
 done
 probe_accepted --no-system --path "$VALID" --depth 08 --dry-run
 
+# Mode-effectiveness rows (#1723, design #1722), driven through the
+# shared probes: accumulation in both orders, a positional target
+# recorded as --path and judged like the option form, every
+# offending flag named, and the judge firing only under --system
+# (the --no-system control with the same class flags is accepted).
+probe_mode_refused "spotlight-exclude-artifacts: --system conflicts with discovery flags: --depth" --system --dry-run --depth 3
+probe_mode_refused "spotlight-exclude-artifacts: --system conflicts with discovery flags: --depth" --dry-run --depth 3 --system
+probe_mode_refused "spotlight-exclude-artifacts: --system conflicts with discovery flags: --path" --system --dry-run "$VALID"
+probe_mode_refused "spotlight-exclude-artifacts: --system conflicts with discovery flags: --path" --dry-run "$VALID" --system
+probe_mode_refused "spotlight-exclude-artifacts: --system conflicts with discovery flags: --path --depth --follow" --system --dry-run --path "$VALID" --depth 3 --follow
+probe_mode_accepted --no-system --dry-run --path "$VALID" --depth 3
+
 
 # ─── Failed marker writes exit non-zero (#1333) ─────────────────────
 # mark() counted a failed touch in the summary ("N failed") but the

@@ -1107,4 +1107,46 @@ for (const bad of [NaN, Infinity, -Infinity]) {
   }
 }
 
+// 34. getFirstLine 120-unit cut must never split a surrogate pair
+//     (#1735): the cut backs off one code unit when a pair straddles
+//     it, so BackupMeta.firstLine never carries a lone surrogate into
+//     the JSON meta line. Pinned shapes: straddle / fully inside /
+//     fully outside / plain long ASCII unchanged.
+{
+  const firstLineFactory = new Function(
+    `${stripTypes(extractFunction("getFirstLine"))}\n     return { getFirstLine };`,
+  );
+  const { getFirstLine } = firstLineFactory();
+  const loneSurrogate = (str) => {
+    for (let i = 0; i < str.length; i++) {
+      const c = str.charCodeAt(i);
+      if (c >= 0xd800 && c <= 0xdbff) {
+        const n = str.charCodeAt(i + 1);
+        if (!(n >= 0xdc00 && n <= 0xdfff)) return true;
+        i++;
+      } else if (c >= 0xdc00 && c <= 0xdfff) return true;
+    }
+    return false;
+  };
+  const emoji = "\u{1F600}";
+  // Straddle: 119 ASCII + emoji occupies units 119-120, cut backs off.
+  const straddle = getFirstLine("a".repeat(119) + emoji + "tail");
+  assert.strictEqual(straddle, "a".repeat(119) + "...", "straddling pair must back the cut off to 119 units (#1735)");
+  assert.ok(!loneSurrogate(straddle), "straddle output must contain no lone surrogate (#1735)");
+  assert.ok(!JSON.stringify({ firstLine: straddle }).includes("\\ud83d"), "meta JSON must not contain a lone high surrogate (#1735)");
+  // Fully inside: pair ends before the cut and survives intact.
+  const inside = getFirstLine("b".repeat(100) + emoji + "c".repeat(30));
+  assert.strictEqual(inside, "b".repeat(100) + emoji + "c".repeat(18) + "...", "pair fully inside the cut stays intact (#1735)");
+  assert.ok(!loneSurrogate(inside));
+  // Fully outside: pair starts after the cut and is simply dropped.
+  const outside = getFirstLine("d".repeat(120) + emoji + "tail");
+  assert.strictEqual(outside, "d".repeat(120) + "...", "pair fully outside the cut is dropped whole (#1735)");
+  assert.ok(!loneSurrogate(outside));
+  // Plain long ASCII: unchanged 120 + ellipsis.
+  assert.strictEqual(getFirstLine("e".repeat(130)), "e".repeat(120) + "...", "plain >120 ASCII line unchanged (#1735)");
+  // Short line with emoji: returned verbatim, no ellipsis.
+  assert.strictEqual(getFirstLine("hi " + emoji), "hi " + emoji, "short emoji line unchanged (#1735)");
+  console.log("pass: getFirstLine cut is surrogate-pair safe - straddle backs off, inside intact, outside dropped, plain long unchanged (#1735)");
+}
+
 console.log("cleanup-count.test.mjs: all assertions passed");

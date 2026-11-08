@@ -24,6 +24,10 @@
 #      (#1561: scenario L covered only the relative-target branch of
 #      the chain loop in adopt.sh)
 #   O  a two-hop symlink chain resolves to the real flake (#1561)
+#   P  a digit-leading host name is written as a quoted attribute name
+#      (#1746): a bare 3DPrinter key makes the whole flake fail to
+#      parse, so adopt writes "3DPrinter", a second run is a no-op,
+#      and copying the quoted entry under an ordinary name works
 set -uo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -283,6 +287,20 @@ ln -s "$TMP_ROOT/o/hop.nix" "$TMP_ROOT/o/flake.nix"
 [[ "$(readlink "$TMP_ROOT/o/flake.nix")" == "$TMP_ROOT/o/hop.nix" && "$(readlink "$TMP_ROOT/o/hop.nix")" == "real-flake.nix" ]] && ok "O: chain targets unchanged" || fail "O: a chain target changed"
 grep -q '^      CHAINMAC = {$' "$TMP_ROOT/o/real-flake.nix" && ok "O: entry written into the chain's real flake" || fail "O: entry missing from the chain's real flake"
 [[ "$(mode_of "$TMP_ROOT/o/real-flake.nix")" == "600" ]] && ok "O: target mode 600 preserved" || fail "O: target mode is $(mode_of "$TMP_ROOT/o/real-flake.nix"), want 600"
+
+# P: a digit-leading host name gets a quoted attribute name (#1746)
+new_flake "$TMP_ROOT/p"
+(cd "$TMP_ROOT/p" && bash "$SCRIPT" --host 3DPrinter >/dev/null) || fail "P: adopt of a digit-leading host exited non-zero"
+grep -q '^      "3DPrinter" = {$' "$TMP_ROOT/p/flake.nix" && ok "P: digit-leading host written quoted" || fail "P: digit-leading host not written as a quoted attribute name"
+grep -q '^      3DPrinter = ' "$TMP_ROOT/p/flake.nix" && fail "P: digit-leading host also written bare (unparseable)" || ok "P: no bare digit-leading key written"
+cp "$TMP_ROOT/p/flake.nix" "$TMP_ROOT/p/before"
+out="$(cd "$TMP_ROOT/p" && bash "$SCRIPT" --host 3DPrinter)" || fail "P: second digit-leading run exited non-zero"
+[[ "$out" == *"already a host"* ]] && ok "P: second run reports already adopted" || fail "P: second run did not report already adopted"
+diff -q "$TMP_ROOT/p/before" "$TMP_ROOT/p/flake.nix" >/dev/null && ok "P: second run changed nothing" || fail "P: second run changed the flake"
+(cd "$TMP_ROOT/p" && bash "$SCRIPT" 3DPrinter --host COPYMAC >/dev/null) || fail "P: copying the quoted entry exited non-zero"
+grep -q '^      COPYMAC = {$' "$TMP_ROOT/p/flake.nix" && ok "P: quoted entry copied under an ordinary name" || fail "P: quoted entry copy missing"
+out="$(cd "$TMP_ROOT/p" && bash "$SCRIPT" --host 9LIVES --dry-run)" || fail "P: digit-leading dry-run exited non-zero"
+[[ "$out" == *'"9LIVES" = {'* ]] && ok "P: dry-run shows the quoted form" || fail "P: dry-run does not show the quoted form: $out"
 
 if (( failures )); then
   echo "$failures failure(s)" >&2

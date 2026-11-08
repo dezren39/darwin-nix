@@ -59,6 +59,20 @@ await test("ambiguous title returns every candidate and does not guess", () => {
   )
 })
 
+await test("ambiguous title over the cap keeps the true total (#1604)", () => {
+  const many = Array.from({ length: 15 }, (_, i) => ({
+    id: `ses_m${String(i).padStart(2, "0")}`,
+    title: `Warp dup ${i}`,
+    updated: 1_700_000_000_000 + i * 1000,
+    directory: "/repo",
+  }))
+  const r = resolveSession(many, "warp dup")
+  assert.equal(r.status, "ambiguous")
+  assert.equal(r.total, 15)
+  assert.equal(r.candidates.length, 10)
+  assert.equal(r.candidates[0].id, "ses_m14", "candidates stay most-recent-first")
+})
+
 await test("no match returns recent candidates + a reason", () => {
   const r = resolveSession(SESSIONS, "nothing matches this")
   assert.equal(r.status, "none")
@@ -148,6 +162,21 @@ await test("ambiguous selector short-circuits before any side effect", async () 
   assert.match(out, /matches 2 sessions/)
   assert.match(out, /ses_aaa/)
   assert.match(out, /ses_ccc/)
+  assert.equal(calls.length, 0, "must not create a workspace or select a session")
+})
+
+await test("ambiguous selector over the cap reports the total and the truncation (#1604)", async () => {
+  const many = Array.from({ length: 15 }, (_, i) => ({
+    id: `ses_m${String(i).padStart(2, "0")}`,
+    title: `Warp dup ${i}`,
+    updated: 1_700_000_000_000 + i * 1000,
+    directory: "/repo",
+  }))
+  const { env, calls } = makeEnv({ sessions: many })
+  const out = await buildTool(env).execute({ session: "warp dup" }, ctx)
+  assert.match(out, /matches 15 sessions \(showing the 10 most recent\)/)
+  assert.match(out, /truncated/)
+  assert.equal((out.match(/  - /g) || []).length, 10, "exactly the capped candidate list is shown")
   assert.equal(calls.length, 0, "must not create a workspace or select a session")
 })
 

@@ -509,8 +509,18 @@ for (const bad of [NaN, Infinity, -Infinity]) {
   assert.strictEqual(fractionalCfg.debounceMs, 3000, "fractional debounceMs must floor at getConfig");
   assert.strictEqual(fractionalCfg.maxAgeSec, 86400, "fractional maxAge days must floor at getDuration");
   assert.strictEqual(fractionalCfg.ageCleanupMs, 1500, "fractional interval seconds retain duration semantics");
+  // Reconciliation (#1650): this block originally expected the floored
+  // rollout 0 to delete nothing (11 remain) — the pre-#1612 semantics
+  // this fixture was written against on a branch predating that change.
+  // #1612 governs: a finite rollout 0 is zero headroom, not disabled
+  // (block 30), and a rollout that floors to 0 from 0.5 is the 0 it
+  // floors to — production does not (and must not) distinguish it from
+  // an explicit 0. So the pass enforces the floored limit: the oldest
+  // file is deleted and exactly 10 remain.
   cleanupCount(fractionalCfg);
-  assert.strictEqual(remainingNames(fractionalDir).length, 11, "fractional rollout flooring to 0 must not delete a backup");
+  const fractionalRemaining = remainingNames(fractionalDir);
+  assert.strictEqual(fractionalRemaining.length, 10, "fractional rollout flooring to 0 must enforce the floored limit (#1650: #1612 semantics govern)");
+  assert.strictEqual(fractionalRemaining[0], "f01.txt", "fractional rollout flooring to 0 must delete oldest first (#1650)");
   fs.rmSync(fractionalDir, { recursive: true, force: true });
   console.log("pass: integer-declared counts, debounce, and maxAge are floored at read time; fractional interval seconds stay supported (#1624)");
   configValues = { "bufferBackup.ageCleanupIntervalSeconds": NaN };

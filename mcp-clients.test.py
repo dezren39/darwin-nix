@@ -42,6 +42,12 @@ Covers the two PR #904 fallout bugs:
   (never a raw AttributeError), file byte-for-byte unchanged, other
   clients still enforced, exit 1.
 
+- #1608: the Codex skipping branch tracks bracket depth for a
+  dropped table's values -- a header-shaped line inside a dropped
+  server's multi-line array or inline table (e.g. a nested-array
+  element line) is value content, never a table header, so the
+  dropped table is removed whole and the result parses as TOML.
+
 - #1133: any argument other than the single optional --dry-run is
   rejected before any file is read or written -- usage on stderr naming
   the offending argument, exit 2, seeded files byte-unchanged, no backup.
@@ -864,6 +870,59 @@ check("990rrr escaped-delimiter real server removed", "removed: old" in r.stdout
 check("990rrr escaped-delimiter result parses with only mcpx", codex_server_names(out) == {"mcpx"}, out)
 r2 = run(home)
 check("990rrr escaped-delimiter second run no-op", r2.returncode == 0 and read(codex_path) == out and r2.stdout == "",
+      f"stdout={r2.stdout!r}")
+shutil.rmtree(home)
+
+# #1608: a header-shaped line inside a dropped server's multi-line
+# array -- the skipping branch never tracked bracket depth, so the
+# nested-array element line '[1, 2]' was read as a table header, ended
+# the skip, and leaked it, the closing ']' and the following dropped
+# key into the rewritten config as invalid TOML while reporting the
+# server removed.
+home = fresh_home()
+codex_path = seed(home, ".codex/config.toml",
+                  "[mcp_servers.foo]\n"
+                  "command = \"foo\"\n"
+                  "args = [\n"
+                  "[1, 2]\n"
+                  "]\n"
+                  "other = \"keepme-not\"\n"
+                  "\n"
+                  "[profiles.demo]\n"
+                  "model = \"gpt-5-mini\"\n")
+r = run(home)
+out = read(codex_path)
+check("1608 dropped multi-line array removed whole",
+      "[mcp_servers.foo]" not in out and "keepme-not" not in out and "[1, 2]" not in out, out)
+check("1608 report names the dropped server", "removed: foo" in r.stdout, r.stdout)
+check("1608 following table survives", "[profiles.demo]" in out and 'model = "gpt-5-mini"' in out, out)
+check("1608 result parses with only mcpx", codex_server_names(out) == {"mcpx"}, out)
+r2 = run(home)
+check("1608 second run no-op", r2.returncode == 0 and read(codex_path) == out and r2.stdout == "",
+      f"stdout={r2.stdout!r}")
+shutil.rmtree(home)
+
+# #1608: the same for a dropped multi-line inline table -- a
+# header-shaped line inside it must not end the skip either.
+home = fresh_home()
+codex_path = seed(home, ".codex/config.toml",
+                  "[mcp_servers.bar]\n"
+                  "command = \"bar\"\n"
+                  "env = {\n"
+                  "[1, 2]\n"
+                  "}\n"
+                  "other = \"keepme-not\"\n"
+                  "\n"
+                  "[profiles.demo]\n"
+                  "model = \"gpt-5-mini\"\n")
+r = run(home)
+out = read(codex_path)
+check("1608 dropped multi-line inline table removed whole",
+      "[mcp_servers.bar]" not in out and "keepme-not" not in out and "[1, 2]" not in out, out)
+check("1608 inline-table report names the dropped server", "removed: bar" in r.stdout, r.stdout)
+check("1608 inline-table result parses with only mcpx", codex_server_names(out) == {"mcpx"}, out)
+r2 = run(home)
+check("1608 inline-table second run no-op", r2.returncode == 0 and read(codex_path) == out and r2.stdout == "",
       f"stdout={r2.stdout!r}")
 shutil.rmtree(home)
 

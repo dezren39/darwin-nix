@@ -498,12 +498,29 @@ def codex(path):
         if skipping:
             _sp, eq = _dotted_assignment(line)
             if eq >= 0:
-                ml = _ml_string_scan(line[eq + 1 :], None)[0]
+                # Track bracket depth for the dropped value (#1608):
+                # the value_depth check near the top of the loop then
+                # consumes the value's continuation lines before the
+                # header check can see them -- without it a
+                # header-shaped line inside a multi-line array or
+                # inline table (e.g. a nested-array element line) ends
+                # the skip early and leaks the rest of the dropped
+                # table into the kept output as invalid TOML. The
+                # in_parent and at_root dropped values already track
+                # value_depth this way; the skipping branch did not.
+                ml, value_depth = _scan_depth(line[eq + 1 :])
+                if value_depth < 0:
+                    value_depth = 0
+                ml_drop = ml is not None
             else:
                 # Continuation line of a dropped multi-line value
                 # (array element, table entry): a multi-line string
-                # may open here even though the line is no assignment.
-                ml = _ml_string_scan(line, None)[0]
+                # may open here even though the line is no assignment,
+                # and a bracket may open here too.
+                ml, depth = _scan_depth(line)
+                if depth > 0:
+                    value_depth = depth
+                ml_drop = ml is not None
             continue
         if in_parent:
             stripped = line.strip()

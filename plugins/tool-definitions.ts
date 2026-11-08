@@ -60,7 +60,10 @@ function load() {
       let body
       try {
         body = readFileSync(join(DIR, file), "utf8")
-      } catch {
+      } catch (err) {
+        // Signal the skip (#1660): a present-but-unreadable override that
+        // fails silently is indistinguishable from a missing file.
+        console.warn(`tool-definitions: skipping unreadable ${file}: ${err instanceof Error ? err.message : String(err)}`)
         continue
       }
       if (!body.trim()) continue

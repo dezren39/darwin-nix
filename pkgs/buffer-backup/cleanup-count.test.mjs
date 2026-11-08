@@ -513,9 +513,10 @@ for (const bad of [NaN, Infinity, -Infinity]) {
   // rollout 0 to delete nothing (11 remain) — the pre-#1612 semantics
   // this fixture was written against on a branch predating that change.
   // #1612 governs: a finite rollout 0 is zero headroom, not disabled
-  // (block 30), and a rollout that floors to 0 from 0.5 is the 0 it
-  // floors to — production does not (and must not) distinguish it from
-  // an explicit 0. So the pass enforces the floored limit: the oldest
+  // (block 30, the rollout-0 block), and a rollout that floors to 0
+  // from 0.5 is the 0 it floors to — production does not (and must
+  // not) distinguish it from an explicit 0. So the pass enforces the
+  // floored limit: the oldest
   // file is deleted and exactly 10 remain.
   cleanupCount(fractionalCfg);
   const fractionalRemaining = remainingNames(fractionalDir);
@@ -912,7 +913,7 @@ for (const bad of [NaN, Infinity, -Infinity]) {
   console.log("pass: negative rollout clamps to 0 for both passes (#1612)");
 }
 
-// 30. langToExtension's fallback never carries a path separator
+// 31. langToExtension's fallback never carries a path separator
 //     (#1649): the extension is spliced into the backup filename, so
 //     a separator-bearing languageId ("a/b", "../../../evil") used
 //     to break out of the day directory — ENOENT at write time, or a

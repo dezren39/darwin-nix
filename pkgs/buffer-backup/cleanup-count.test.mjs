@@ -902,4 +902,38 @@ for (const bad of [NaN, Infinity, -Infinity]) {
   console.log("pass: negative rollout clamps to 0 for both passes (#1612)");
 }
 
+// 30. langToExtension's fallback never carries a path separator
+//     (#1649): the extension is spliced into the backup filename, so
+//     a separator-bearing languageId ("a/b", "../../../evil") used
+//     to break out of the day directory — ENOENT at write time, or a
+//     backup written where listBackups never sees it. Known ids keep
+//     their mapped extension; unknown ids are sanitized to a single
+//     safe filename segment.
+{
+  const mapStart = src.indexOf("const LANG_TO_EXT");
+  assert.notStrictEqual(mapStart, -1, "LANG_TO_EXT not found in extension.ts");
+  const mapOpen = src.indexOf("{", mapStart);
+  let depth = 0, mapEnd = -1;
+  for (let i = mapOpen; i < src.length; i++) {
+    if (src[i] === "{") depth++;
+    else if (src[i] === "}") { depth--; if (depth === 0) { mapEnd = i + 1; break; } }
+  }
+  assert.notStrictEqual(mapEnd, -1, "LANG_TO_EXT unterminated in extension.ts");
+  const langFactory = new Function(
+    `${src.slice(mapStart, mapEnd).replace(": Record<string, string>", "")};
+     ${stripTypes(extractFunction("langToExtension"))}
+     return { langToExtension };`,
+  );
+  const { langToExtension } = langFactory();
+  assert.strictEqual(langToExtension("python"), ".py", "known id keeps its mapped extension (#1649)");
+  assert.strictEqual(langToExtension("some-new-lang"), ".some-new-lang", "unknown plain id becomes its own extension (#1649)");
+  for (const bad of ["a/b", "../evil", "../../../evil", "a\\b", "..", ".", ""]) {
+    const ext = langToExtension(bad);
+    assert.ok(!ext.includes("/") && !ext.includes("\\"), `extension for ${JSON.stringify(bad)} must not contain a path separator, got ${ext}`);
+    const composed = path.join("/backups", "2026-01-01", `untitled_X_2026-01-01T00-00-00-000Z${ext}`);
+    assert.strictEqual(path.dirname(composed), path.join("/backups", "2026-01-01"), `composed backup path for ${JSON.stringify(bad)} must stay in the day dir, got ${composed}`);
+  }
+  console.log("pass: langToExtension fallback is separator-safe; composed backup path stays in the day dir (#1649)");
+}
+
 console.log("cleanup-count.test.mjs: all assertions passed");

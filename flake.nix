@@ -1118,6 +1118,25 @@ rec {
               bash ./mcp-clients-activation.test.sh
               touch $out
             '';
+        # #1454: activation must durably record failures from the root and
+        # primary-user helper runs without hiding helper output or blocking
+        # later activation entries when the event write succeeds.
+        system-activation-helper-tests =
+          pkgs.runCommandLocal "system-activation-helper-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.coreutils
+                pkgs.gnugrep
+              ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/system-activation-helper.sh $src/system-activation-helper.test.sh ./
+              chmod u+w ./system-activation-helper.test.sh
+              bash ./system-activation-helper.test.sh
+              touch $out
+            '';
         # #907: opencode-share.test.sh drives the real opencode-share.sh
         # in --dry-run mode through [good, missing, good], all-good, and
         # all-fail target lists — the post-increment error counter used
@@ -1182,7 +1201,9 @@ rec {
             ''
               cp ${./code-install-extensions.sh} code-install-extensions.sh
               cp ${./code-install-extensions.test.sh} code-install-extensions.test.sh
-              chmod u+w code-install-extensions.sh code-install-extensions.test.sh
+              cp ${./config.toml} config.toml
+              cp ${./vsc-extensions.txt} vsc-extensions.txt
+              chmod u+w code-install-extensions.sh code-install-extensions.test.sh config.toml vsc-extensions.txt
               export HOME="$TMPDIR/home"
               mkdir -p "$HOME"
               bash ./code-install-extensions.test.sh
@@ -1213,36 +1234,10 @@ rec {
               bash ./pm-dispatch-launch.test.sh
               touch $out
             '';
-        # #478: archive/skills/plannotator-setup-goal/SKILL.test.ts (the
-        # repo's only *.test.ts suite) was run by nothing — no check,
-        # workflow, or recipe referenced it, unlike the flake-tidy,
-        # warp-import, and opencode-db-pids suites (#397/#414/#472). It is
-        # self-contained (bun:test content pins on the sibling SKILL.md),
-        # so run every archived skill suite here.
-        skill-tests =
-          pkgs.runCommandLocal "skill-tests"
-            {
-              nativeBuildInputs = [ pkgs.bun ];
-              src = inputs.self;
-            }
-            ''
-              cp -r $src/archive ./archive
-              chmod -R u+w ./archive
-              export HOME="$TMPDIR/home"
-              mkdir -p "$HOME"
-              found=0
-              for t in archive/skills/*/SKILL.test.ts; do
-                [ -e "$t" ] || continue
-                found=1
-                echo "== $t"
-                bun test "$t"
-              done
-              if [ "$found" -eq 0 ]; then
-                echo "no archive/skills/*/SKILL.test.ts suites found" >&2
-                exit 1
-              fi
-              touch $out
-            '';
+        # skill-tests (the archive/skills/*/SKILL.test.ts suites, #478)
+        # retired 2026-11-07: the vendored skills moved to dezren39/cairn
+        # (.agents/skills-examples/) per developing-today/code#5982, and
+        # their suites moved with them.
       }
       // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
         sidepulse = (mkPackages pkgs).sidepulse;

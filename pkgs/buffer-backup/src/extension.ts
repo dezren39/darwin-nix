@@ -120,35 +120,83 @@ interface Duration {
 }
 
 function durationToSeconds(d: Duration): number {
-  return (
-    d.years * 365 * 86400 +
-    d.months * 30 * 86400 +
-    d.days * 86400 +
-    d.hours * 3600 +
-    d.minutes * 60 +
-    d.seconds
-  );
+  // Keep both maxAgeSec and cleanupAge's milliseconds/cutoff arithmetic
+  // finite. At this cap (about 253,000 years), even multiplying by 1000
+  // stays below JavaScript Date's representable range; larger configured
+  // durations saturate and therefore do not expire real backup timestamps.
+  const maxSeconds = 8_000_000_000_000;
+  const components = [
+    [d.years, 365 * 86400],
+    [d.months, 30 * 86400],
+    [d.days, 86400],
+    [d.hours, 3600],
+    [d.minutes, 60],
+    [d.seconds, 1],
+  ];
+  let total = 0;
+  for (const [value, secondsPerUnit] of components) {
+    const safeValue = Number.isFinite(value) ? Math.max(0, value) : 0;
+    if (safeValue > (maxSeconds - total) / secondsPerUnit) {
+      return maxSeconds;
+    }
+    total += safeValue * secondsPerUnit;
+  }
+  return total;
+}
+
+// VS Code returns a hand-edited settings.json value verbatim even when
+// it violates the package.json schema, so a numeric setting can arrive
+// as a string/object and its arithmetic yields NaN -- and NaN fails
+// open in the cleanup passes (#1574). Validate where settings are read:
+// anything that is not a finite number falls back to the setting's
+// documented default, so a Config can never carry NaN/Infinity.
+function finiteNumberOr(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+// Same validate-where-read rule for the one string setting (#1580):
+// backupDir's old `|| DEFAULT` guard caught only falsy values, so a
+// truthy non-string (123, true, {}, ["x"]) reached fs.mkdirSync in
+// activate() and threw TypeError -- the extension never started and
+// no backups were taken. Anything that is not a non-empty string
+// falls back to the documented default, so Config.backupDir is
+// always a string.
+function nonEmptyStringOr(value: unknown, fallback: string): string {
+  return typeof value === "string" && value !== "" ? value : fallback;
 }
 
 function getDuration(section: string): number {
   const c = vscode.workspace.getConfiguration(section);
+  // A negative component is treated as 0, its documented default
+  // (#1620): finiteNumberOr alone passes negatives through, so one
+  // hand-edited negative component could cancel the positive ones in
+  // the sum below — days=1 with hours=-25 summed to -3600, and
+  // cleanupAge reads maxAgeSec <= 0 as "disabled", so the configured
+  // retention silently never ran.
+  // Components are integer-declared; floor finite fractional edits as
+  // well as keeping negative values at their documented 0 default.
+  const component = (key: string): number =>
+    Math.floor(Math.max(0, finiteNumberOr(c.get(key, 0), 0)));
   return durationToSeconds({
-    years: c.get<number>("years", 0),
-    months: c.get<number>("months", 0),
-    days: c.get<number>("days", 0),
-    hours: c.get<number>("hours", 0),
-    minutes: c.get<number>("minutes", 0),
-    seconds: c.get<number>("seconds", 0),
+    years: component("years"),
+    months: component("months"),
+    days: component("days"),
+    hours: component("hours"),
+    minutes: component("minutes"),
+    seconds: component("seconds"),
   });
 }
 
 function getInterval(key: string): number {
   const c = vscode.workspace.getConfiguration("bufferBackup");
-  const v = c.get<number | null>(key, null);
-  if (v === null || v === undefined || v === 0) {
+  const v: unknown = c.get(key, null);
+  if (typeof v !== "number" || !Number.isFinite(v) || v === 0) {
     return 5000;
   }
-  return Math.max(1, v) * 1000;
+  // Clamp to Node's 32-bit timer ceiling (#1588): a delay above
+  // 2,147,483,647 ms is clamped by Node itself to 1 ms, so a
+  // ~25-day-or-longer interval would become a 1 ms cleanup loop.
+  return Math.min(Math.max(1, v) * 1000, 2147483647);
 }
 
 interface Config {
@@ -167,13 +215,19 @@ interface Config {
 function getConfig(): Config {
   const c = vscode.workspace.getConfiguration("bufferBackup");
   return {
-    backupDir: c.get("backupDir", "") || DEFAULT_BACKUP_DIR,
+    backupDir: nonEmptyStringOr(c.get("backupDir", ""), DEFAULT_BACKUP_DIR),
     maxAgeSec: getDuration("bufferBackup.maxAge"),
-    maxTotalMb: c.get("maxTotalMb", 0),
-    rolloutMb: c.get("rolloutMb", 0),
-    maxFileCount: c.get("maxFileCount", 0),
-    rolloutFileCount: c.get("rolloutFileCount", 0),
-    debounceMs: c.get("debounceMs", 3000),
+    maxTotalMb: finiteNumberOr(c.get("maxTotalMb", 0), 0),
+    rolloutMb: finiteNumberOr(c.get("rolloutMb", 0), 0),
+    // File counts are integer-declared; don't let fractions alter the
+    // cleanup threshold or count as part of a rollout.
+    maxFileCount: Math.floor(finiteNumberOr(c.get("maxFileCount", 0), 0)),
+    rolloutFileCount: Math.floor(finiteNumberOr(c.get("rolloutFileCount", 0), 0)),
+    // Clamp to the timer-safe range [0, 2^31-1] (#1594): Node
+    // collapses a negative or overflowing setTimeout delay to
+    // ~1 ms, which would defeat the debounce entirely. Floor schema-
+    // violating fractions to the integer milliseconds the setting declares.
+    debounceMs: Math.min(Math.max(0, Math.floor(finiteNumberOr(c.get("debounceMs", 3000), 3000))), 2147483647),
     ageCleanupMs: getInterval("ageCleanupIntervalSeconds"),
     sizeCleanupMs: getInterval("sizeCleanupIntervalSeconds"),
     countCleanupMs: getInterval("countCleanupIntervalSeconds"),
@@ -201,7 +255,10 @@ function listBackups(dir: string): BackupEntry[] {
   for (const sub of subs) {
     const subFull = path.join(dir, sub);
     try {
-      if (!fs.statSync(subFull).isDirectory()) {
+      // lstat, not stat (#1524): a symlinked day-directory must not be
+      // descended into — its target lives outside the backup dir, and
+      // the cleanup passes unlink whatever listBackups returns.
+      if (!fs.lstatSync(subFull).isDirectory()) {
         continue;
       }
     } catch {
@@ -216,7 +273,9 @@ function listBackups(dir: string): BackupEntry[] {
     for (const name of files) {
       const full = path.join(subFull, name);
       try {
-        const st = fs.statSync(full);
+        // lstat, not stat (#1524): a symlinked file is not a backup
+        // entry; returning it would let cleanup delete its target.
+        const st = fs.lstatSync(full);
         if (st.isFile()) {
           results.push({ name, full, mtimeMs: st.mtimeMs, size: st.size });
         }
@@ -268,9 +327,23 @@ function cleanupAge(cfg: Config): void {
 }
 
 function cleanupSize(cfg: Config): void {
-  if (cfg.maxTotalMb <= 0 || cfg.rolloutMb <= 0) {
+  // Defence in depth (#1574): a non-finite limit/rollout is disabled,
+  // never unbounded deletion -- NaN comparisons are all false, so an
+  // unguarded NaN target makes every loop guard fail open.
+  if (
+    !Number.isFinite(cfg.maxTotalMb) ||
+    !Number.isFinite(cfg.rolloutMb) ||
+    cfg.maxTotalMb <= 0
+  ) {
     return;
   }
+  // A finite rollout of 0 is the documented default (#1612): it means
+  // zero headroom, not disabled - a limit set on its own must still
+  // enforce, deleting down to exactly the limit. A negative rollout
+  // is clamped to 0 (zero headroom), mirroring the negative-component
+  // handling in getDuration (#1620); only the limit documents 0 as
+  // disabled, and only a non-finite rollout disables the pass above.
+  const rolloutMb = Math.max(0, cfg.rolloutMb);
   const entries = listBackups(cfg.backupDir);
   let total = entries.reduce((s, e) => s + e.size, 0);
   const maxB = cfg.maxTotalMb * 1024 * 1024;
@@ -279,11 +352,16 @@ function cleanupSize(cfg: Config): void {
   // can only reach by emptying the directory — it deleted every
   // backup, newest included. The newest backup always survives.
   const newestB = entries.length ? entries[entries.length - 1].size : 0;
-  const targetB = Math.max(maxB - cfg.rolloutMb * 1024 * 1024, newestB);
+  const targetB = Math.max(maxB - rolloutMb * 1024 * 1024, newestB);
   if (total <= maxB) {
     return;
   }
-  for (const e of entries) {
+  // Iterate all but the newest entry (#1530): the arithmetic floor
+  // alone does not protect the newest backup, because a failed unlink
+  // (#1014 accounting) leaves the budget unchanged and the loop walks
+  // one entry further — far enough to reach and delete the newest.
+  // cleanupAge has always excluded it structurally via slice(0, -1).
+  for (const e of entries.slice(0, -1)) {
     if (total <= targetB) {
       break;
     }
@@ -300,9 +378,17 @@ function cleanupSize(cfg: Config): void {
 }
 
 function cleanupCount(cfg: Config): void {
-  if (cfg.maxFileCount <= 0 || cfg.rolloutFileCount <= 0) {
+  // Defence in depth (#1574): as in cleanupSize, a non-finite
+  // limit/rollout disables the pass instead of deleting everything.
+  if (
+    !Number.isFinite(cfg.maxFileCount) ||
+    !Number.isFinite(cfg.rolloutFileCount) ||
+    cfg.maxFileCount <= 0
+  ) {
     return;
   }
+  // Finite rollout 0 = zero headroom, not disabled (#1612, as in
+  // cleanupSize); a negative rollout clamps to 0. See cleanupSize.
   const entries = listBackups(cfg.backupDir);
   if (entries.length <= cfg.maxFileCount) {
     return;
@@ -315,9 +401,13 @@ function cleanupCount(cfg: Config): void {
   // Floor the target at 1 (#1211): with rolloutFileCount >=
   // maxFileCount the raw target is 0 and the pass deleted every
   // backup, newest included. The newest backup always survives.
-  const target = Math.max(cfg.maxFileCount - cfg.rolloutFileCount, 1);
+  const target = Math.max(cfg.maxFileCount - Math.max(0, cfg.rolloutFileCount), 1);
   let remaining = entries.length;
-  for (const e of entries) {
+  // All but the newest entry, as in cleanupSize (#1530): with #1014
+  // accounting a failed unlink does not decrement `remaining`, so an
+  // unguarded loop that started over target walks into the newest
+  // entry and deletes the backup the floor exists to protect.
+  for (const e of entries.slice(0, -1)) {
     if (remaining <= target) {
       break;
     }
@@ -336,6 +426,23 @@ function utcDayDir(base: string): string {
   const d = new Date();
   const day = d.toISOString().slice(0, 10);
   const dir = path.join(base, day);
+  // lstat, not stat (#1603): a symlinked day-directory must not be
+  // written through - its target lives outside the backup dir, where
+  // the backup would be invisible to listBackups and every cleanup
+  // pass (the read side was hardened in #1524; this is the write
+  // side). lstat also sees a dangling link, which mkdirSync would
+  // otherwise surface as a raw ENOENT out of backupDoc.
+  let isLink = false;
+  try {
+    isLink = fs.lstatSync(dir).isSymbolicLink();
+  } catch {
+    isLink = false;
+  }
+  if (isLink) {
+    throw new Error(
+      `buffer-backup: refusing to write through symlinked day directory: ${dir}`
+    );
+  }
   fs.mkdirSync(dir, { recursive: true });
   return dir;
 }
@@ -498,7 +605,17 @@ function backupDoc(
   const name = doc.uri.path.replace(/[^a-zA-Z0-9]/g, "_") || "untitled";
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
   const ext = langToExtension(doc.languageId || "txt");
-  const dayDir = utcDayDir(dir);
+  let dayDir: string;
+  try {
+    dayDir = utcDayDir(dir);
+  } catch {
+    // Contained (#1603): a symlinked day directory must not throw out
+    // of backupDoc - its callers are event handlers, backupAll, and
+    // activate(), and one bad day directory must not stop the other
+    // documents in the same backupAll pass. The hash stays unset, so
+    // a later trigger retries this document.
+    return;
+  }
 
   const meta = buildMeta(doc, text, h, trigger);
   const content = formatMetaLine(meta) + "\n" + text;

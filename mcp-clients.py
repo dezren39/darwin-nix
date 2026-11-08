@@ -58,19 +58,39 @@ def write(path, text, what):
     backup = os.path.join(BACKUP_DIR, path.replace("/", "%"))
     if not os.path.exists(backup):
         shutil.copy2(path, backup)
-    tmp = f"{path}.mcp-clients.tmp"
+    # Write through a symlinked path to its target (#1562): a rename
+    # onto the symlink would replace the link itself with a detached
+    # regular file, leaving the real config unchanged while reporting
+    # success (the same shape as adopt's #1557 fix). Resolve the link
+    # chain and temp+rename in the target's directory instead; the link
+    # stays intact. An unresolvable or unwritable target raises here
+    # and is reported through the #906 per-client failure path.
+    dest = os.path.realpath(path) if os.path.islink(path) else path
+    tmp = f"{dest}.mcp-clients.tmp"
     with open(tmp, "w") as fh:
         fh.write(text)
-    shutil.copymode(path, tmp)
-    os.replace(tmp, path)
+    shutil.copymode(dest, tmp)
+    os.replace(tmp, dest)
 
 
 def json_client(path, entry):
     """A JSON file whose top-level mcpServers holds the servers (Copilot CLI, Claude Code)."""
-    if not os.path.exists(path):
+    # #1591: lexists, not exists — a dangling symlink is a present but
+    # broken config, not an absent one. Letting it past the guard makes
+    # the open below fail through the #906 per-client path (named,
+    # non-zero) instead of silently skipping enforcement for that client.
+    if not os.path.lexists(path):
         return
     with open(path) as fh:
         data = json.load(fh)
+    if not isinstance(data, dict):
+        # Valid JSON, wrong shape (#1570): the document itself is not
+        # an object, so data.get would raise a raw AttributeError that
+        # reads as a bug in mcp-clients itself. Name the actual shape
+        # instead, in the #1217 house form: a #906 per-client failure
+        # (main names the client and file, leaves this file unchanged,
+        # exits non-zero).
+        raise ValueError(f"top-level value is a {type(data).__name__}, not an object; not changed")
     want = {"mcpx": entry}
     servers = data.get("mcpServers")
     if servers is not None and not isinstance(servers, dict):
@@ -400,7 +420,11 @@ def codex(path):
     spellings: dotted keys mcp_servers.<name>... and a bare
     mcp_servers = { ... } inline table at the TOML root, #956), then add
     [mcp_servers.mcpx]."""
-    if not os.path.exists(path):
+    # #1591: lexists, not exists — a dangling symlink is a present but
+    # broken config, not an absent one. Letting it past the guard makes
+    # the open below fail through the #906 per-client path (named,
+    # non-zero) instead of silently skipping enforcement for that client.
+    if not os.path.lexists(path):
         return
     with open(path) as fh:
         lines = fh.read().splitlines()
@@ -474,12 +498,29 @@ def codex(path):
         if skipping:
             _sp, eq = _dotted_assignment(line)
             if eq >= 0:
-                ml = _ml_string_scan(line[eq + 1 :], None)[0]
+                # Track bracket depth for the dropped value (#1608):
+                # the value_depth check near the top of the loop then
+                # consumes the value's continuation lines before the
+                # header check can see them -- without it a
+                # header-shaped line inside a multi-line array or
+                # inline table (e.g. a nested-array element line) ends
+                # the skip early and leaks the rest of the dropped
+                # table into the kept output as invalid TOML. The
+                # in_parent and at_root dropped values already track
+                # value_depth this way; the skipping branch did not.
+                ml, value_depth = _scan_depth(line[eq + 1 :])
+                if value_depth < 0:
+                    value_depth = 0
+                ml_drop = ml is not None
             else:
                 # Continuation line of a dropped multi-line value
                 # (array element, table entry): a multi-line string
-                # may open here even though the line is no assignment.
-                ml = _ml_string_scan(line, None)[0]
+                # may open here even though the line is no assignment,
+                # and a bracket may open here too.
+                ml, depth = _scan_depth(line)
+                if depth > 0:
+                    value_depth = depth
+                ml_drop = ml is not None
             continue
         if in_parent:
             stripped = line.strip()
@@ -766,7 +807,11 @@ def zed(path):
     any opening-brace shape ({} , single-line, '{ // comment'); a file with
     no locatable top-level object raises instead of silently skipping
     enforcement (#950)."""
-    if not os.path.exists(path):
+    # #1591: lexists, not exists — a dangling symlink is a present but
+    # broken config, not an absent one. Letting it past the guard makes
+    # the open below fail through the #906 per-client path (named,
+    # non-zero) instead of silently skipping enforcement for that client.
+    if not os.path.lexists(path):
         return
     with open(path) as fh:
         text = fh.read()

@@ -16,6 +16,14 @@
 #      ended (#1269): copying one copies exactly that entry, even as last host
 #   K  a template file whose read fails (sed stub exits 1) fails loudly:
 #      non-zero exit naming the template, flake.nix unchanged (#1361)
+#   L  a symlinked --flake is written through to its target (#1557):
+#      entry lands in the target, the symlink stays a symlink, and the
+#      target's mode is preserved
+#   M  a non-644 regular flake keeps its mode after an edit (#1557)
+#   N  a symlinked --flake with an ABSOLUTE target is written through
+#      (#1561: scenario L covered only the relative-target branch of
+#      the chain loop in adopt.sh)
+#   O  a two-hop symlink chain resolves to the real flake (#1561)
 set -uo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -232,6 +240,49 @@ out="$(cd "$TMP_ROOT/k" && PATH="$TMP_ROOT/kbin:$PATH" bash "$SCRIPT" ./template
   && ok "K: error names the template file" || fail "K: error does not name the template file: $out"
 cmp -s "$TMP_ROOT/k/flake.before" "$TMP_ROOT/k/flake.nix" \
   && ok "K: flake.nix unchanged" || fail "K: flake.nix changed"
+
+
+# L: a symlinked --flake is written through to its target (#1557)
+mode_of() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
+new_flake "$TMP_ROOT/l"
+mv "$TMP_ROOT/l/flake.nix" "$TMP_ROOT/l/real-flake.nix"
+chmod 600 "$TMP_ROOT/l/real-flake.nix"
+ln -s real-flake.nix "$TMP_ROOT/l/flake.nix"
+(cd "$TMP_ROOT/l" && bash "$SCRIPT" --host LINKMAC --flake ./flake.nix >/dev/null) || fail "L: adopt through a symlink exited non-zero"
+[[ -L "$TMP_ROOT/l/flake.nix" ]] && ok "L: flake.nix is still a symlink" || fail "L: flake.nix symlink was replaced"
+[[ "$(readlink "$TMP_ROOT/l/flake.nix")" == "real-flake.nix" ]] && ok "L: symlink target unchanged" || fail "L: symlink target changed"
+grep -q '^      LINKMAC = {$' "$TMP_ROOT/l/real-flake.nix" && ok "L: entry written into the symlink target" || fail "L: entry missing from the symlink target"
+[[ "$(mode_of "$TMP_ROOT/l/real-flake.nix")" == "600" ]] && ok "L: target mode 600 preserved" || fail "L: target mode is $(mode_of "$TMP_ROOT/l/real-flake.nix"), want 600"
+
+# M: a non-644 regular flake keeps its mode after an edit (#1557)
+new_flake "$TMP_ROOT/m"
+chmod 640 "$TMP_ROOT/m/flake.nix"
+(cd "$TMP_ROOT/m" && bash "$SCRIPT" --host MODEMAC >/dev/null) || fail "M: adopt exited non-zero"
+grep -q '^      MODEMAC = {$' "$TMP_ROOT/m/flake.nix" && ok "M: MODEMAC added" || fail "M: MODEMAC missing"
+[[ "$(mode_of "$TMP_ROOT/m/flake.nix")" == "640" ]] && ok "M: mode 640 preserved" || fail "M: mode is $(mode_of "$TMP_ROOT/m/flake.nix"), want 640"
+
+# N: a symlinked --flake with an absolute target is written through (#1561)
+new_flake "$TMP_ROOT/n"
+mv "$TMP_ROOT/n/flake.nix" "$TMP_ROOT/n/real-flake.nix"
+chmod 600 "$TMP_ROOT/n/real-flake.nix"
+ln -s "$TMP_ROOT/n/real-flake.nix" "$TMP_ROOT/n/flake.nix"
+(cd "$TMP_ROOT/n" && bash "$SCRIPT" --host ABSMAC --flake ./flake.nix >/dev/null) || fail "N: adopt through an absolute symlink exited non-zero"
+[[ -L "$TMP_ROOT/n/flake.nix" ]] && ok "N: flake.nix is still a symlink" || fail "N: flake.nix symlink was replaced"
+[[ "$(readlink "$TMP_ROOT/n/flake.nix")" == "$TMP_ROOT/n/real-flake.nix" ]] && ok "N: symlink target unchanged" || fail "N: symlink target changed"
+grep -q '^      ABSMAC = {$' "$TMP_ROOT/n/real-flake.nix" && ok "N: entry written into the absolute symlink target" || fail "N: entry missing from the absolute symlink target"
+[[ "$(mode_of "$TMP_ROOT/n/real-flake.nix")" == "600" ]] && ok "N: target mode 600 preserved" || fail "N: target mode is $(mode_of "$TMP_ROOT/n/real-flake.nix"), want 600"
+
+# O: a two-hop symlink chain resolves to the real flake (#1561)
+new_flake "$TMP_ROOT/o"
+mv "$TMP_ROOT/o/flake.nix" "$TMP_ROOT/o/real-flake.nix"
+chmod 600 "$TMP_ROOT/o/real-flake.nix"
+ln -s real-flake.nix "$TMP_ROOT/o/hop.nix"
+ln -s "$TMP_ROOT/o/hop.nix" "$TMP_ROOT/o/flake.nix"
+(cd "$TMP_ROOT/o" && bash "$SCRIPT" --host CHAINMAC --flake ./flake.nix >/dev/null) || fail "O: adopt through a symlink chain exited non-zero"
+[[ -L "$TMP_ROOT/o/flake.nix" && -L "$TMP_ROOT/o/hop.nix" ]] && ok "O: both chain links are still symlinks" || fail "O: a chain link was replaced"
+[[ "$(readlink "$TMP_ROOT/o/flake.nix")" == "$TMP_ROOT/o/hop.nix" && "$(readlink "$TMP_ROOT/o/hop.nix")" == "real-flake.nix" ]] && ok "O: chain targets unchanged" || fail "O: a chain target changed"
+grep -q '^      CHAINMAC = {$' "$TMP_ROOT/o/real-flake.nix" && ok "O: entry written into the chain's real flake" || fail "O: entry missing from the chain's real flake"
+[[ "$(mode_of "$TMP_ROOT/o/real-flake.nix")" == "600" ]] && ok "O: target mode 600 preserved" || fail "O: target mode is $(mode_of "$TMP_ROOT/o/real-flake.nix"), want 600"
 
 if (( failures )); then
   echo "$failures failure(s)" >&2

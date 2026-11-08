@@ -30,7 +30,10 @@ openchamber.nix        OpenChamber server launchd agent + desktop client (§5)
 docs/                  services.md (how OpenChamber, OpenCode and mcpx run, are replaced
                        on a switch, checked and debugged), mcp.md (every MCP server, its
                        auth and credentials), dated reviews, sidepulse docs
+                       (canonical copies of services.md, mcp.md and the dated reviews:
+                       developing-today/code doc/fleet/)
 instructions/          OpenCode instruction files (worktrees, recordings, work-strategies; archive/)
+                       (canonical copies: developing-today/code doc/platform/)
 commands/              OpenCode slash commands (/gha-fix, /gha-why)
 .agents/skills/        Repo-local agent skills (see §7)
 opencode-global.jsonc  OpenCode v2 global config, meant to be linked as ~/.config/opencode/opencode.jsonc (currently not; see §5)
@@ -42,7 +45,7 @@ rebuild.sh r / simple-rebuild.sh s / clean(.sh) / path.sh   Rebuild + cleanup sc
 symlinker.sh           Large bash symlink manager (source for pkgs/symlinker)
 .aerospace.toml        AeroSpace tiling WM config
 mcpx.config.nix        Every MCP server, and how mcpx pools it
-config.toml            VSCode extension source-of-truth list (used by code-install-extensions.sh)
+config.toml            One of three copies of the VSCode extension list (with code-install-extensions.sh's hardcoded lines and vsc-extensions.txt); the installer never reads it — the copies are kept identical by the drift check in code-install-extensions-tests (#1547)
 .github/workflows/     opencode.yml (/oc comment bot), mcpx-nixbuild.yml (mcpx package build)
 ```
 
@@ -85,8 +88,7 @@ flake.nix → ./configuration.nix
   `npm-mcp-servers`, `opencode-share`, `symlinker`.
 - **checks:** `formatting` (treefmt), `tidy` (flake-tidy `--check`),
   `flake-tidy-tests` (the flake-tidy pytest suite), `plugins-tests`
-  (plugins/*.test.mjs), `opencode-db-pids-tests` and `skill-tests`
-  (archive/skills/*/SKILL.test.ts) on every supported system; the Sidepulse
+  (plugins/*.test.mjs), `opencode-db-pids-tests` on every supported system; the Sidepulse
   package build/test and setup smoke test run on Darwin only.
 - **apps:** `flake-tidy`, `mcpx`, `opencode`, `openchamber`, `opencode-share`,
   `symlinker`, `adopt`; Sidepulse apps are Darwin-only.

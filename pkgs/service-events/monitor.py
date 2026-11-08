@@ -183,7 +183,7 @@ def sockets(pids):
             name = None
         elif tag == "n":
             name = value
-        elif tag == "T" and value.startswith("ST=") and pid in result:
+        elif tag == "T" and value.startswith("ST=") and pid in result and name is not None:
             state = value[3:]
             if state == "LISTEN":
                 result[pid][0].add(name.rsplit(":", 1)[-1])

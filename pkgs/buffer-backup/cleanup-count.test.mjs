@@ -488,6 +488,31 @@ for (const bad of [NaN, Infinity, -Infinity]) {
   for (const [k, v] of Object.entries(cfg)) {
     if (typeof v === "number") assert.ok(Number.isFinite(v), `Config.${k} must be finite, got ${v}`);
   }
+  // Integer-declared settings are still returned verbatim for finite
+  // fractional values unless the read site normalizes them. The count
+  // fields, debounce, and maxAge components must be integers in Config.
+  // Fractional interval seconds are intentionally supported as durations
+  // (the existing 1.5s pin below); conversion to milliseconds preserves
+  // that behavior.
+  const fractionalDir = fixture(11);
+  configValues = {
+    "bufferBackup.backupDir": fractionalDir,
+    "bufferBackup.maxFileCount": 10.5,
+    "bufferBackup.rolloutFileCount": 0.5,
+    "bufferBackup.debounceMs": 3000.75,
+    "bufferBackup.maxAge.days": 1.5,
+    "bufferBackup.ageCleanupIntervalSeconds": 1.5,
+  };
+  const fractionalCfg = getConfig();
+  assert.strictEqual(fractionalCfg.maxFileCount, 10, "fractional maxFileCount must floor at getConfig");
+  assert.strictEqual(fractionalCfg.rolloutFileCount, 0, "fractional rolloutFileCount must floor at getConfig");
+  assert.strictEqual(fractionalCfg.debounceMs, 3000, "fractional debounceMs must floor at getConfig");
+  assert.strictEqual(fractionalCfg.maxAgeSec, 86400, "fractional maxAge days must floor at getDuration");
+  assert.strictEqual(fractionalCfg.ageCleanupMs, 1500, "fractional interval seconds retain duration semantics");
+  cleanupCount(fractionalCfg);
+  assert.strictEqual(remainingNames(fractionalDir).length, 11, "fractional rollout flooring to 0 must not delete a backup");
+  fs.rmSync(fractionalDir, { recursive: true, force: true });
+  console.log("pass: integer-declared counts, debounce, and maxAge are floored at read time; fractional interval seconds stay supported (#1624)");
   configValues = { "bufferBackup.ageCleanupIntervalSeconds": NaN };
   assert.strictEqual(getInterval("ageCleanupIntervalSeconds"), 5000, "NaN interval must yield 5000 ms");
   console.log("pass: getConfig/getDuration/getInterval validate numeric settings (#1574)");

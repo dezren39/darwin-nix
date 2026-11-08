@@ -120,9 +120,7 @@ UNDO
     --dry-run             Preview what undo would do
     --force               Force restore even if paths are occupied (removes them)
     --verbose             Show full paths
-    --simple              Omit details
     --strict              Stop on first error
-    --no-input, --yes     Skip confirmation
 
   Undo generates its own undo file, so you can undo an undo:
     symlinker.sh --undo <original-timestamp>         # undo a run
@@ -236,7 +234,7 @@ while [[ $# -gt 0 ]]; do
     --dry-run)           DRY_RUN=true;       shift ;;
     --force)             FORCE=true;         shift ;;
     --verbose)           VERBOSE=true;       shift ;;
-    --simple)            SIMPLE=true;        shift ;;
+    --simple)            reject_forward_only_in_undo "$1"; SIMPLE=true; shift ;;
     --no-input|--yes|-y) reject_forward_only_in_undo "$1"; NO_INPUT=true;      shift ;;
     --skip-backup)       reject_forward_only_in_undo "$1"; SKIP_BACKUP=true;   shift ;;
     --skip-conflict)     reject_forward_only_in_undo "$1"; SKIP_CONFLICT=true; shift ;;

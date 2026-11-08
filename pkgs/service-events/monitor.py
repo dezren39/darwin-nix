@@ -177,7 +177,10 @@ def sockets(pids):
     for line in out.splitlines():
         tag, value = line[:1], line[1:]
         if tag == "p":
-            pid = int(value)
+            # Skip malformed lsof records; clearing pid prevents their n/T
+            # fields from being attributed to the preceding valid process.
+            pid = int(value) if value.isascii() and value.isdigit() else None
+            name = None
         elif tag == "n":
             name = value
         elif tag == "T" and value.startswith("ST=") and pid in result:

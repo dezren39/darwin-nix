@@ -682,6 +682,35 @@ run --path "$COUNT_SCAN" --find trash --status
 [ "$STATUS" -eq 0 ] || fail "--find trash --status exited $STATUS (#1657)"
 case "$OUT" in *"FOUND"$'\t'"trash"$'\t'"-"$'\t'*) fail "--find trash --status kept the '-' status field (got: $OUT) (#1657)" ;; *"FOUND"$'\t'"trash"$'\t'*) echo "ok: --find with --status emits a real status field" ;; *) fail "--find trash --status lost its FOUND record (got: $OUT) (#1657)" ;; esac
 
+# ─── --user with --path is judged, not silently ignored (#1710) ───
+# --user only resolves SCAN_HOME, which seed_auto() alone consumes;
+# seed_path() never read it, so --path DIR --user USER exited 0 with
+# output byte-identical to not asking, and --dry-run printed the
+# ignored home as the plan. The pair is now judged after parsing
+# (exit 2, both flags named) in either order and for a positional
+# path; --user alone (with --auto) is unchanged.
+for pair in "--path $VALID --user alice" "--user alice --path $VALID" "$VALID --user alice" "--user alice $VALID" "--path $VALID --dry-run --user alice"; do
+  # shellcheck disable=SC2086
+  run $pair
+  [ "$STATUS" -eq 2 ] || fail "--user/--path pair '$pair' exited $STATUS (want 2) (#1710)"
+  case "$ERR" in
+    *"git-discover-repos: --user may not be combined with --path"*) echo "ok: pair '$pair' rejected, both flags named" ;;
+    *) fail "pair '$pair' was not named on stderr (got: $ERR) (#1710)" ;;
+  esac
+  [ -z "$OUT" ] || fail "pair '$pair' printed stdout: $OUT (#1710)"
+done
+
+# --user alone control: the --auto form still works and the dry-run
+# plan still names the resolved home.
+control_user="$(id -un)"
+control_home="$(eval echo "~$control_user")"
+run --dry-run --user "$control_user"
+[ "$STATUS" -eq 0 ] || fail "--user alone (dry-run) exited $STATUS (#1710)"
+case "$OUT" in *"home:       $control_home"*) echo "ok: --user alone still resolves its home in the plan" ;; *) fail "--user alone dry-run plan changed (got: $OUT) (#1710)" ;; esac
+run --auto --user "$control_user" --dry-run
+[ "$STATUS" -eq 0 ] || fail "--auto --user (dry-run) exited $STATUS (#1710)"
+echo "ok: --auto --user still accepted"
+
 # ─── --count with --no-bare / --follow is pinned (#1628) ───────────
 # The count section above pins the record filters, but two flags the
 # count branch does not implement itself went untested: --no-bare is

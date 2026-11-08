@@ -173,6 +173,59 @@ check(
     repr(round_trip),
 )
 
+# #1728: every p record begins a new file record and resets its n-field.
+# A T record without a current n-field is ignored, and must not prevent
+# valid records after it from contributing to the same sample.
+monitor.run = lambda argv: (
+    "p123\n"
+    "n*:8000\nTST=LISTEN\n"
+    "p123\nTST=LISTEN\n"
+    "p123\n"
+    "n127.0.0.1:8000->127.0.0.1:51324\nTST=ESTABLISHED\n"
+)
+try:
+    missing_listen_name = monitor.sockets({123})
+    raised = ""
+except Exception as exc:
+    missing_listen_name, raised = None, f"{type(exc).__name__}: {exc}"
+check("1728 missing-name LISTEN record does not raise", missing_listen_name is not None, raised)
+check(
+    "1728 missing-name LISTEN does not hide surrounding valid records",
+    missing_listen_name == {
+        123: (
+            {"8000"},
+            {"127.0.0.1:8000->127.0.0.1:51324"},
+        )
+    },
+    repr(missing_listen_name),
+)
+
+monitor.run = lambda argv: (
+    "p123\n"
+    "n*:8000\nTST=LISTEN\n"
+    "p123\n"
+    "n127.0.0.1:8000->127.0.0.1:51324\nTST=ESTABLISHED\n"
+    "p123\nTST=ESTABLISHED\n"
+    "p123\n"
+    "n*:9000\nTST=LISTEN\n"
+)
+try:
+    missing_established_name = monitor.sockets({123})
+    raised = ""
+except Exception as exc:
+    missing_established_name, raised = None, f"{type(exc).__name__}: {exc}"
+check("1728 missing-name ESTABLISHED record does not raise", missing_established_name is not None, raised)
+check(
+    "1728 missing-name ESTABLISHED does not hide surrounding valid records",
+    missing_established_name == {
+        123: (
+            {"8000", "9000"},
+            {"127.0.0.1:8000->127.0.0.1:51324"},
+        )
+    },
+    repr(missing_established_name),
+)
+
 monitor.run = lambda argv: None
 check("1659 failed lsof sampler still returns None", monitor.sockets({123}) is None)
 

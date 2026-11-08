@@ -15,6 +15,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
+import { createHash } from "crypto";
 import assert from "node:assert";
 import { fileURLToPath } from "url";
 
@@ -736,7 +737,8 @@ for (const bad of [NaN, Infinity, -Infinity]) {
   const dayDirFactory = new Function(
     "fs",
     "path",
-    `${stripTypes(extractFunction("utcDayDir"))}
+    `${stripTypes(extractFunction("utcDayDirPath"))}
+     ${stripTypes(extractFunction("utcDayDir"))}
      return { utcDayDir };`,
   );
   const { utcDayDir } = dayDirFactory(fs, path);
@@ -978,7 +980,8 @@ for (const bad of [NaN, Infinity, -Infinity]) {
   const swapFactory = new Function(
     "fs",
     "path",
-    `${stripTypes(extractFunction("utcDayDir"))}
+    `${stripTypes(extractFunction("utcDayDirPath"))}
+     ${stripTypes(extractFunction("utcDayDir"))}
      return { utcDayDir };`,
   );
   const { utcDayDir: swappingUtcDayDir } = swapFactory(swappingFs, path);
@@ -998,6 +1001,244 @@ for (const bad of [NaN, Infinity, -Infinity]) {
   fs.rmSync(base, { recursive: true, force: true });
   fs.rmSync(outside, { recursive: true, force: true });
   console.log("pass: utcDayDir rechecks the day directory after mkdir and refuses a swapped-in symlink (#1709)");
+}
+
+// 33. backupDoc's day-directory containment is not silent (#1658): every
+//     contained failure is reported once per day directory, naming the
+//     directory, the trigger and the underlying error, and the pass keeps
+//     going for the rest of the documents. A close/will-save failure is
+//     the last-chance snapshot - there is no later trigger for that
+//     document - so it is reported as a lost final snapshot instead of
+//     relying on a retry that cannot happen.
+// 34. Containment keeps a backupAll pass alive and a later pass recovers
+//     (#1603, unchanged contract): one bad day directory must not throw
+//     out of the pass, and once the obstacle is removed a change trigger
+//     retries and writes, because the hash was never set.
+{
+  // backupDoc reaches for the whole vscode surface through buildMeta, so
+  // this block extracts the real functions (backupDoc, backupAll,
+  // resolveDayDirForWrite, utcDayDir, the signal helpers and their
+  // metadata neighbours) and supplies a fake host. A fresh factory per
+  // scenario gives fresh module state - the reported-failure set is per
+  // activation, exactly as in the extension.
+  const stripForFactory = (code) =>
+    code
+      .replace(/\(input as \{[^}]*\}\)/g, "(input)")
+      .replace(/: DayDirFailure/g, "")
+      .replace(/: TabInfo/g, "")
+      .replace(/: BackupMeta/g, "")
+      .replace(/: Set<string>/g, "")
+      .replace(/: BackupTrigger/g, "")
+      .replace(/: string \| null/g, "")
+      .replace(/: string\[\]/g, "")
+      .replace(/: vscode\.TextDocument/g, "")
+      .replace(/: vscode\.Uri/g, "")
+      .replace(/: string/g, "")
+      .replace(/: boolean/g, "")
+      .replace(/: number/g, "")
+      .replace(/: void/g, "")
+      .replace(/: Config/g, "")
+      .replace(/: unknown/g, "")
+      .replace(/new Set<string>\(\)/g, "new Set()")
+      .replace(/new Map<string, string>\(\)/g, "new Map()");
+
+  const mapStart = src.indexOf("const LANG_TO_EXT");
+  assert.notStrictEqual(mapStart, -1, "LANG_TO_EXT not found in extension.ts");
+  const mapOpen = src.indexOf("{", mapStart);
+  let mapDepth = 0;
+  let mapEnd = -1;
+  for (let i = mapOpen; i < src.length; i++) {
+    if (src[i] === "{") mapDepth++;
+    else if (src[i] === "}") {
+      mapDepth--;
+      if (mapDepth === 0) {
+        mapEnd = i + 1;
+        break;
+      }
+    }
+  }
+  assert.notStrictEqual(mapEnd, -1, "LANG_TO_EXT unterminated in extension.ts");
+  const langTable = src.slice(mapStart, mapEnd).replace(": Record<string, string>", "");
+
+  const FUNCTIONS = [
+    "utcDayDirPath",
+    "utcDayDir",
+    "contentHash",
+    "dayDirErrorMessage",
+    "dayDirErrorCode",
+    "describeDayDirFailure",
+    "formatDayDirFailure",
+    "shouldReportDayDirFailure",
+    "resolveDayDirForWrite",
+    "getFirstLine",
+    "getTabInfo",
+    "getTerminalNames",
+    "getWindowTitle",
+    "getWorkspacePath",
+    "buildMeta",
+    "formatMetaLine",
+    "langToExtension",
+    "backupDoc",
+    "backupAll",
+  ];
+
+  const factorySource = `${langTable}
+    const META_PREFIX = "// BUFFER-BACKUP-META: ";
+    const DAY_DIR_FAILURE_PREFIX = "buffer-backup: contained day-directory failure";
+    ${FUNCTIONS.map((f) => stripForFactory(extractFunction(f))).join("\n")}
+    return { backupDoc, backupAll, describeDayDirFailure, formatDayDirFailure, shouldReportDayDirFailure };`;
+
+  function backupFactory() {
+    return new Function(
+      "vscode",
+      "fs",
+      "path",
+      "crypto",
+      "os",
+      "console",
+      `const reportedDayDirFailures = new Set();
+       const lastHash = new Map();
+       const lastBackupPath = new Map();
+       ${factorySource}`,
+    );
+  }
+
+  function fakeHost() {
+    const logged = [];
+    const document = (n, text) => ({
+      uri: {
+        scheme: "untitled",
+        path: `/Untitled-${n}`,
+        toString: () => `untitled:Untitled-${n}`,
+      },
+      getText: () => text,
+      languageId: "txt",
+      lineCount: text.split("\n").length,
+    });
+    const documents = [];
+    const vscode = {
+      version: "1.99.0",
+      env: { appName: "VS Code", appHost: "desktop" },
+      window: {
+        tabGroups: { all: [] },
+        terminals: [],
+        activeTextEditor: undefined,
+      },
+      workspace: { workspaceFolders: undefined, textDocuments: documents },
+    };
+    const consoleSpy = { error: (line) => logged.push(line) };
+    return { vscode, documents, document, logged, consoleSpy };
+  }
+
+  const today = new Date().toISOString().slice(0, 10);
+
+  // 33a. A pre-planted symlinked day directory: reported once, naming the
+  //      directory and trigger, and the pass survives.
+  {
+    const { vscode, documents, document, logged, consoleSpy } = fakeHost();
+    const { backupAll } = backupFactory()(vscode, fs, path, { createHash: (algorithm) => createHash(algorithm) }, os, consoleSpy);
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), "buffer-backup-test-"));
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "buffer-backup-outside-"));
+    fs.symlinkSync(outside, path.join(base, today), "dir");
+    let textReads = 0;
+    for (const n of [1, 2]) {
+      const d = document(n, `buffer ${n}`);
+      const original = d.getText;
+      d.getText = () => {
+        textReads++;
+        return original();
+      };
+      documents.push(d);
+    }
+    assert.doesNotThrow(
+      () => backupAll({ backupDir: base }, "change"),
+      "containment must not throw out of the pass (#1603)",
+    );
+    assert.strictEqual(textReads, 2, "every document in the pass must still be attempted (containment, #1603)");
+    assert.deepStrictEqual(fs.readdirSync(outside), [], "nothing may be written into the link target (#1603)");
+    assert.strictEqual(logged.length, 1, `exactly one signal per day directory, got ${logged.length}: ${logged.join(" | ")}`);
+    assert.match(logged[0], /buffer-backup: contained day-directory failure/, "the signal must name the extension");
+    assert.ok(logged[0].includes(path.join(base, today)), "the signal must name the day directory");
+    assert.ok(logged[0].includes("trigger=change"), "the signal must name the trigger");
+    assert.ok(/symlinked day directory/.test(logged[0]), "the signal must carry the underlying refusal (#1603/#1709)");
+    assert.ok(!logged[0].includes("final-snapshot-lost"), "a change failure is retried, so it is not a lost final snapshot");
+    // Once per day directory: a retry storm must not flood the log.
+    backupAll({ backupDir: base }, "change");
+    assert.strictEqual(logged.length, 1, "repeat failures for the same day directory must not re-report");
+    fs.rmSync(base, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+    console.log("pass: a contained symlink refusal is reported once per day directory and the pass survives (#1658)");
+  }
+
+  // 33b. A plain mkdir failure (the day dir path is a regular file) is
+  //      reported too, with its errno, and is distinguishable from the
+  //      symlink refusal.
+  {
+    const { vscode, documents, document, logged, consoleSpy } = fakeHost();
+    const { backupAll } = backupFactory()(vscode, fs, path, { createHash: (algorithm) => createHash(algorithm) }, os, consoleSpy);
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), "buffer-backup-test-"));
+    fs.writeFileSync(path.join(base, today), "not a directory");
+    documents.push(document(1, "buffer 1"));
+    assert.doesNotThrow(() => backupAll({ backupDir: base }, "change"));
+    assert.strictEqual(logged.length, 1, "a mkdir failure must also be reported");
+    assert.ok(logged[0].includes("code=EEXIST"), `the signal must carry the errno, got: ${logged[0]}`);
+    assert.ok(!/symlinked day directory/.test(logged[0]), "a mkdir failure is not reported as the symlink refusal");
+    fs.rmSync(base, { recursive: true, force: true });
+    console.log("pass: a contained mkdir failure is reported with its errno (#1658)");
+  }
+
+  // 33c. close / will-save are the last-chance triggers: a failure there
+  //      is a lost final snapshot, and the signal says so.
+  {
+    const { vscode, documents, document, logged, consoleSpy } = fakeHost();
+    const { backupDoc, describeDayDirFailure, formatDayDirFailure } = backupFactory()(vscode, fs, path, { createHash: (algorithm) => createHash(algorithm) }, os, consoleSpy);
+    assert.strictEqual(describeDayDirFailure("/b/2026-01-01", "change", new Error("x")).finalSnapshotLost, false);
+    assert.ok(!formatDayDirFailure(describeDayDirFailure("/b/2026-01-01", "focus", new Error("x"))).includes("final-snapshot-lost"));
+    for (const trigger of ["close", "will-save"]) {
+      const f = describeDayDirFailure("/b/2026-01-01", trigger, new Error("x"));
+      assert.strictEqual(f.finalSnapshotLost, true, `${trigger} is a last-chance trigger (#1658)`);
+      assert.ok(formatDayDirFailure(f).includes("final-snapshot-lost=true"), `${trigger} must be reported as a lost final snapshot (#1658)`);
+    }
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), "buffer-backup-test-"));
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "buffer-backup-outside-"));
+    fs.symlinkSync(outside, path.join(base, today), "dir");
+    documents.push(document(1, "last words"));
+    backupDoc(documents[0], base, "close");
+    assert.strictEqual(logged.length, 1, "a close-trigger failure must be reported");
+    assert.ok(logged[0].includes("trigger=close"), `got: ${logged[0]}`);
+    assert.ok(logged[0].includes("final-snapshot-lost=true"), `the close signal must say the snapshot was lost, got: ${logged[0]}`);
+    assert.deepStrictEqual(fs.readdirSync(outside), [], "nothing may be written into the link target");
+    fs.rmSync(base, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+    console.log("pass: close/will-save day-directory failures are reported as lost final snapshots (#1658)");
+  }
+
+  // 34. Containment contract unchanged (#1603): the obstacle is removed and
+  //     a later change-triggered pass writes, because the hash was never
+  //     set on the failure.
+  {
+    const { vscode, documents, document, logged, consoleSpy } = fakeHost();
+    const { backupAll } = backupFactory()(vscode, fs, path, { createHash: (algorithm) => createHash(algorithm) }, os, consoleSpy);
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), "buffer-backup-test-"));
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "buffer-backup-outside-"));
+    const dayPath = path.join(base, today);
+    fs.symlinkSync(outside, dayPath, "dir");
+    documents.push(document(1, "kept"));
+    backupAll({ backupDir: base }, "change");
+    assert.strictEqual(logged.length, 1, "the first pass reports the failure");
+    assert.deepStrictEqual(listBackups(base), [], "a failed pass writes nothing");
+    fs.rmSync(dayPath, { recursive: true, force: true });
+    backupAll({ backupDir: base }, "change");
+    const entries = listBackups(base);
+    assert.strictEqual(entries.length, 1, "after the obstacle is removed, a later pass must write the backup");
+    assert.ok(
+      entries[0].name.startsWith("_Untitled_1_"),
+      `the recovered backup must be the document's, got ${entries[0].name}`,
+    );
+    fs.rmSync(base, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+    console.log("pass: containment keeps the pass alive and a later change-triggered pass recovers (#1603, #1658)");
+  }
 }
 
 console.log("cleanup-count.test.mjs: all assertions passed");

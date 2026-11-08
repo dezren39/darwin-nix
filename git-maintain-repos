@@ -176,39 +176,42 @@ RECURSIVE=1
 DEPTH_LIMIT=""
 FOLLOW=""
 FILTER="--repos-only"
+# Repository-scoped flags recorded as they are parsed, so the --system judge
+# below can name them (#1718). clean.sh keeps the same accumulator (#1711).
+REPO_FLAGS_USED=""
 
 [ $# -eq 0 ] && { usage; exit 0; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --auto) AUTO_SET=1 ;;                        # names the default scope; conflicts with --system/--no-system
-    --path) { arg_require_value "$1" "${2:-}"; [ -z "$ROOT" ] || arg_die "unexpected argument: $1 (target already set to $ROOT)"; ROOT="$2"; shift; } ;;
-    --quick) { [ -z "$MODE_FLAG" ] || arg_die "$1 may not be combined with $MODE_FLAG (only one mode option may be given)"; DEPTH="quick"; MODE_FLAG="$1"; } ;;
-    --deep) { [ -z "$MODE_FLAG" ] || arg_die "$1 may not be combined with $MODE_FLAG (only one mode option may be given)"; DEPTH="deep"; MODE_FLAG="$1"; } ;;
-    --safe) { [ -z "$MODE_FLAG" ] || arg_die "$1 may not be combined with $MODE_FLAG (only one mode option may be given)"; DEPTH="safe"; MODE_FLAG="$1"; } ;;
+    --path) { arg_require_value "$1" "${2:-}"; [ -z "$ROOT" ] || arg_die "unexpected argument: $1 (target already set to $ROOT)"; ROOT="$2"; REPO_FLAGS_USED="$REPO_FLAGS_USED --path"; shift; } ;;
+    --quick) { [ -z "$MODE_FLAG" ] || arg_die "$1 may not be combined with $MODE_FLAG (only one mode option may be given)"; DEPTH="quick"; MODE_FLAG="$1"; REPO_FLAGS_USED="$REPO_FLAGS_USED --quick"; } ;;
+    --deep) { [ -z "$MODE_FLAG" ] || arg_die "$1 may not be combined with $MODE_FLAG (only one mode option may be given)"; DEPTH="deep"; MODE_FLAG="$1"; REPO_FLAGS_USED="$REPO_FLAGS_USED --deep"; } ;;
+    --safe) { [ -z "$MODE_FLAG" ] || arg_die "$1 may not be combined with $MODE_FLAG (only one mode option may be given)"; DEPTH="safe"; MODE_FLAG="$1"; REPO_FLAGS_USED="$REPO_FLAGS_USED --safe"; } ;;
     --system) { arg_conflict --system --no-system "$NO_SYSTEM_SET"; SCOPE="system"; SCOPE_SET=1; SYSTEM_SET=1; } ;;
     --no-system) { arg_conflict --system --no-system "$SYSTEM_SET"; SCOPE="walk"; SCOPE_SET=1; NO_SYSTEM_SET=1; } ;;
-    --recursive|--walk) { arg_conflict --recursive --no-recursive "$RECURSIVE_NO_SET"; arg_conflict --depth --recursive "$DEPTH_LIMIT_SET"; RECURSIVE=1; DEPTH_LIMIT=""; RECURSIVE_YES_SET=1; } ;;
-    --no-recursive|--no-walk) { arg_conflict --recursive --no-recursive "$RECURSIVE_YES_SET"; arg_conflict --depth --no-recursive "$DEPTH_LIMIT_SET"; RECURSIVE=0; RECURSIVE_NO_SET=1; } ;;
-    --depth) { arg_require_value "$1" "${2:-}"; arg_conflict --depth --recursive "$RECURSIVE_YES_SET"; arg_conflict --depth --no-recursive "$RECURSIVE_NO_SET"; arg_once "$1" DEPTH_LIMIT_SET; DEPTH_LIMIT="$2"; shift; } ;;
-    --follow) { arg_conflict --follow --no-follow "$FOLLOW_NO_SET"; FOLLOW=1; FOLLOW_YES_SET=1; } ;;
-    --no-follow) { arg_conflict --follow --no-follow "$FOLLOW_YES_SET"; FOLLOW=0; FOLLOW_NO_SET=1; } ;;
-    --repos-only) { [ -z "$FILTER_FLAG" ] || arg_die "$1 may not be combined with $FILTER_FLAG (only one filter option may be given)"; FILTER="--repos-only"; FILTER_FLAG="$1"; } ;;
-    --worktrees-only) { [ -z "$FILTER_FLAG" ] || arg_die "$1 may not be combined with $FILTER_FLAG (only one filter option may be given)"; FILTER="--worktrees-only"; FILTER_FLAG="$1"; } ;;
-    --fsck) FSCK=1 ;;
-    --clean-orphans) CLEAN_ORPHANS=1 ;;
-    --expire-reflog) EXPIRE_REFLOG=1 ;;
-    --jobs) { arg_require_value "$1" "${2:-}"; arg_once "$1" JOBS_SET; JOBS="$2"; shift; } ;;
-    --pack-threads) { arg_require_value "$1" "${2:-}"; arg_once "$1" PACK_THREADS_SET; PACK_THREADS="$2"; shift; } ;;
-    --reflog-expire) { arg_require_value "$1" "${2:-}"; arg_once "$1" REFLOG_EXPIRE_SET; REFLOG_EXPIRE="$2"; shift; } ;;
-    --no-register) REGISTER=0 ;;
+    --recursive|--walk) { arg_conflict --recursive --no-recursive "$RECURSIVE_NO_SET"; arg_conflict --depth --recursive "$DEPTH_LIMIT_SET"; RECURSIVE=1; DEPTH_LIMIT=""; RECURSIVE_YES_SET=1; REPO_FLAGS_USED="$REPO_FLAGS_USED --recursive"; } ;;
+    --no-recursive|--no-walk) { arg_conflict --recursive --no-recursive "$RECURSIVE_YES_SET"; arg_conflict --depth --no-recursive "$DEPTH_LIMIT_SET"; RECURSIVE=0; RECURSIVE_NO_SET=1; REPO_FLAGS_USED="$REPO_FLAGS_USED --no-recursive"; } ;;
+    --depth) { arg_require_value "$1" "${2:-}"; arg_conflict --depth --recursive "$RECURSIVE_YES_SET"; arg_conflict --depth --no-recursive "$RECURSIVE_NO_SET"; arg_once "$1" DEPTH_LIMIT_SET; DEPTH_LIMIT="$2"; REPO_FLAGS_USED="$REPO_FLAGS_USED --depth"; shift; } ;;
+    --follow) { arg_conflict --follow --no-follow "$FOLLOW_NO_SET"; FOLLOW=1; FOLLOW_YES_SET=1; REPO_FLAGS_USED="$REPO_FLAGS_USED --follow"; } ;;
+    --no-follow) { arg_conflict --follow --no-follow "$FOLLOW_YES_SET"; FOLLOW=0; FOLLOW_NO_SET=1; REPO_FLAGS_USED="$REPO_FLAGS_USED --no-follow"; } ;;
+    --repos-only) { [ -z "$FILTER_FLAG" ] || arg_die "$1 may not be combined with $FILTER_FLAG (only one filter option may be given)"; FILTER="--repos-only"; FILTER_FLAG="$1"; REPO_FLAGS_USED="$REPO_FLAGS_USED --repos-only"; } ;;
+    --worktrees-only) { [ -z "$FILTER_FLAG" ] || arg_die "$1 may not be combined with $FILTER_FLAG (only one filter option may be given)"; FILTER="--worktrees-only"; FILTER_FLAG="$1"; REPO_FLAGS_USED="$REPO_FLAGS_USED --worktrees-only"; } ;;
+    --fsck) FSCK=1; REPO_FLAGS_USED="$REPO_FLAGS_USED --fsck" ;;
+    --clean-orphans) CLEAN_ORPHANS=1; REPO_FLAGS_USED="$REPO_FLAGS_USED --clean-orphans" ;;
+    --expire-reflog) EXPIRE_REFLOG=1; REPO_FLAGS_USED="$REPO_FLAGS_USED --expire-reflog" ;;
+    --jobs) { arg_require_value "$1" "${2:-}"; arg_once "$1" JOBS_SET; JOBS="$2"; REPO_FLAGS_USED="$REPO_FLAGS_USED --jobs"; shift; } ;;
+    --pack-threads) { arg_require_value "$1" "${2:-}"; arg_once "$1" PACK_THREADS_SET; PACK_THREADS="$2"; REPO_FLAGS_USED="$REPO_FLAGS_USED --pack-threads"; shift; } ;;
+    --reflog-expire) { arg_require_value "$1" "${2:-}"; arg_once "$1" REFLOG_EXPIRE_SET; REFLOG_EXPIRE="$2"; REPO_FLAGS_USED="$REPO_FLAGS_USED --reflog-expire"; shift; } ;;
+    --no-register) REGISTER=0; REPO_FLAGS_USED="$REPO_FLAGS_USED --no-register" ;;
     --dry-run) DRY_RUN=1 ;;
     -h|--help) usage; exit 0 ;;
     --one) shift; break ;;                       # internal single-repo mode
     -*) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
     *)
       [ -n "$1" ] || arg_die "empty positional argument (target must not be empty)"
-      if [ -z "$ROOT" ]; then ROOT="$1"; else echo "unexpected argument: $1" >&2; exit 2; fi
+      if [ -z "$ROOT" ]; then ROOT="$1"; REPO_FLAGS_USED="$REPO_FLAGS_USED --path"; else echo "unexpected argument: $1" >&2; exit 2; fi
       ;;
   esac
   shift
@@ -433,7 +436,17 @@ ensure_scheduler() {
   # the scheduler as root would create plists that never fire. Config checks below
   # still apply -- root reads /etc/gitconfig and /var/root/.gitconfig.
   local install_failed=0
-  if [ "$(id -u)" -eq 0 ]; then
+  # --dry-run must perform no install (#1718): the system branch used to reach
+  # here and run `git maintenance start` for real, so a preview altered the
+  # machine. Report what would happen instead; the config checks below are
+  # read-only and still run.
+  if [ "$DRY_RUN" = "1" ]; then
+    if [ "$(id -u)" -eq 0 ]; then
+      echo "  dry-run: would skip scheduler install (running as root)"
+    else
+      echo "  dry-run: would run git maintenance start"
+    fi
+  elif [ "$(id -u)" -eq 0 ]; then
     echo "  running as root: skipping scheduler install (launchd agents need a GUI session)"
   else
     # A failed install must not be swallowed (#1402): let git's own error
@@ -457,6 +470,20 @@ ensure_scheduler() {
 if [ "$AUTO_SET" = "1" ] && [ "$SCOPE_SET" = "1" ]; then
   echo "git-maintain-repos: --auto conflicts with --system/--no-system" >&2
   echo "                    (--auto just names the default scope: system + walk)" >&2
+  exit 2
+fi
+
+# --system installs the machine-wide scheduler and touches no repository, so
+# repository-scoped flags are meaningless alongside it: they were recorded
+# above and then silently dropped at exit 0 (#1718), including a --path
+# naming a nonexistent target and a --dry-run that still installed the
+# scheduler. Judge the pair here, at parse time, in the clean.sh shape
+# (#1711): exit 2 naming the offending flag(s), in either flag order.
+# --dry-run is NOT a repository flag: ensure_scheduler honours it in the
+# system half, so plain --system and --system --dry-run are unchanged.
+if [ "$SYSTEM_SET" = "1" ] && [ -n "$REPO_FLAGS_USED" ]; then
+  echo "git-maintain-repos: --system conflicts with repository-scoped flags:$REPO_FLAGS_USED" >&2
+  echo "                   (--system installs the machine-wide scheduler and opens no repository)"
   exit 2
 fi
 

@@ -70,6 +70,7 @@ REAL_GIT="$(command -v git)"
 cat > "$STUB_DIR/git" <<EOF
 #!$(command -v bash)
 if [ "\${1:-}" = "maintenance" ] && [ "\${2:-}" = "start" ]; then
+  [ -n "\${GIT_STUB_MAINT_START_LOG:-}" ] && echo "maintenance start" >> "\$GIT_STUB_MAINT_START_LOG"
   if [ "\${GIT_STUB_MAINT_START_RC:-0}" != "0" ]; then
     echo "stub git: maintenance start failed" >&2
     exit "\$GIT_STUB_MAINT_START_RC"
@@ -194,9 +195,64 @@ for pair in "--system --no-system" "--no-system --system"; do
     *) fail "scope pair '$pair' was not named as a conflict on stderr (got: $ERR)" ;;
   esac
 done
-run --dry-run --path "$VALID" --system
-[ "$STATUS" -eq 0 ] || fail "single --system exited $STATUS (want 0)"
-echo "ok: single --system still accepted"
+# --- --system judges repository-scoped flags at parse time (#1718) ---
+# The system branch used to exit via ensure_scheduler before DRY_RUN was
+# ever read, and never consulted the repository flags, so every such
+# combination exited 0 silently ignored -- and --system --dry-run ran the
+# real `git maintenance start`. Each flag class is judged in both orders.
+STUB_LOG="$TMP_ROOT/maint-start.log"
+export GIT_STUB_MAINT_START_LOG="$STUB_LOG"
+for pair in \
+  "--quick" "--deep" "--safe" \
+  "--fsck" "--clean-orphans" "--expire-reflog" \
+  "--jobs 2" "--pack-threads 2" "--reflog-expire 2weeks.ago" \
+  "--path $VALID" "$VALID" \
+  "--recursive" "--no-recursive" "--depth 2" \
+  "--follow" "--no-follow" "--repos-only" "--worktrees-only" \
+  "--no-register"; do
+  for order in "before" "after"; do
+    if [ "$order" = "before" ]; then
+      # shellcheck disable=SC2086
+      run --system $pair
+    else
+      # shellcheck disable=SC2086
+      run $pair --system
+    fi
+    [ "$STATUS" -eq 2 ] || fail "--system $pair ($order) exited $STATUS (want 2)"
+    case "$ERR" in
+      *"git-maintain-repos: --system conflicts with repository-scoped flags:"*) echo "ok: --system $pair ($order) judged at parse time" ;;
+      *) fail "--system $pair ($order) was not judged on stderr (got: $ERR)" ;;
+    esac
+  done
+done
+if [ -s "$STUB_LOG" ]; then
+  fail "judged --system runs still installed the scheduler (log: $(cat "$STUB_LOG"))"
+else
+  echo "ok: judged --system runs performed no scheduler install"
+fi
+
+# --- --system --dry-run performs no install (#1718) ---
+run --system --dry-run
+[ "$STATUS" -eq 0 ] || fail "--system --dry-run exited $STATUS (want 0)"
+if [ -s "$STUB_LOG" ]; then
+  fail "--system --dry-run installed the scheduler (log: $(cat "$STUB_LOG"))"
+else
+  echo "ok: --system --dry-run performed no scheduler install"
+fi
+case "$OUT" in
+  *"dry-run: would run git maintenance start"*) echo "ok: --system --dry-run reports the skipped install" ;;
+  *) fail "--system --dry-run did not report the skipped install (got: $OUT)" ;;
+esac
+
+# --- plain --system still installs (#1718) ---
+run --system
+[ "$STATUS" -eq 0 ] || fail "plain --system exited $STATUS (want 0)"
+if [ -s "$STUB_LOG" ]; then
+  echo "ok: plain --system still installs the scheduler"
+else
+  fail "plain --system did not install the scheduler"
+fi
+unset GIT_STUB_MAINT_START_LOG
 
 # --- --follow/filter pairs are rejected at parse time (#1135) ---
 # git-discover-repos rejected these in #1123, but git-maintain-repos

@@ -443,10 +443,14 @@ function cleanupCount(cfg: Config): void {
   }
 }
 
-function utcDayDir(base: string): string {
-  const d = new Date();
-  const day = d.toISOString().slice(0, 10);
-  const dir = path.join(base, day);
+// The day directory's path, independent of whether it can be created or
+// safely used (#1658): the failure signal has to name the directory even
+// when utcDayDir refuses it or mkdir throws.
+function utcDayDirPath(base: string): string {
+  return path.join(base, new Date().toISOString().slice(0, 10));
+}
+
+function utcDayDir(base: string, dir: string = utcDayDirPath(base)): string {
   // lstat, not stat (#1603): a symlinked day-directory must not be
   // written through - its target lives outside the backup dir, where
   // the backup would be invisible to listBackups and every cleanup
@@ -486,6 +490,146 @@ function utcDayDir(base: string): string {
 
 function contentHash(s: string): string {
   return crypto.createHash("sha256").update(s).digest("hex");
+}
+
+// A contained day-directory failure (#1658): #1603 containment keeps a
+// bad day directory from throwing out of backupDoc into the event
+// handlers, but silent containment is data loss with no trace - the
+// extension has no logging surface at all. Every contained failure is
+// therefore reported once per day directory through the extension
+// host's console (VS Code: "Developer: Show Logs… > Extension Host",
+// and it lands in the per-window exthost log on disk).
+interface DayDirFailure {
+  dir: string;
+  trigger: BackupTrigger;
+  message: string;
+  code: string | null;
+  // close / will-save are the last-chance triggers: there is no later
+  // trigger for that document, so a failure there means the final
+  // snapshot was lost. That is judged here rather than claimed away in
+  // a comment: the old comment promised "a later trigger retries this
+  // document", which is false on exactly those two triggers.
+  finalSnapshotLost: boolean;
+}
+
+const DAY_DIR_FAILURE_PREFIX = "buffer-backup: contained day-directory failure";
+
+function dayDirErrorMessage(err: unknown): string {
+  if (err !== null && typeof err === "object" && "message" in err) {
+    const m = err.message;
+    if (typeof m === "string" && m.length > 0) {
+      return m;
+    }
+  }
+  return String(err);
+}
+
+function dayDirErrorCode(err: unknown): string | null {
+  if (err !== null && typeof err === "object" && "code" in err) {
+    const c = err.code;
+    if (typeof c === "string") {
+      return c;
+    }
+  }
+  return null;
+}
+
+function describeDayDirFailure(
+  dir: string,
+  trigger: BackupTrigger,
+  err: unknown
+): DayDirFailure {
+  return {
+    dir,
+    trigger,
+    message: dayDirErrorMessage(err),
+    code: dayDirErrorCode(err),
+    finalSnapshotLost: trigger === "close" || trigger === "will-save",
+  };
+}
+
+function formatDayDirFailure(f: DayDirFailure): string {
+  const parts = [
+    `${DAY_DIR_FAILURE_PREFIX}: dir=${f.dir}`,
+    `trigger=${f.trigger}`,
+    `error=${f.message}`,
+  ];
+  if (f.code !== null) {
+    parts.push(`code=${f.code}`);
+  }
+  if (f.finalSnapshotLost) {
+    parts.push("final-snapshot-lost=true");
+  }
+  return parts.join(" ");
+}
+
+// First failure per day directory, per activation: a retry storm (a
+// failing day directory is hit by every change event of every untitled
+// buffer) must not flood the log, but a new day directory - or a fresh
+// activation - must still report. One escalation is allowed on top of
+// that suppression: if the first reported failure for a directory was
+// non-final (a retryable change/focus/init failure), a later
+// close/will-save failure for the same directory is reported once
+// more, because it carries the distinct final-snapshot-lost signal -
+// without it, a document that closes unbacked-up would leave only the
+// earlier, retryable warning in the log (Codex review on PR #1717).
+function shouldReportDayDirFailure(
+  seen: Set<string>,
+  f: DayDirFailure
+): boolean {
+  const finalKey = f.dir + "::final-snapshot";
+  if (!seen.has(f.dir)) {
+    seen.add(f.dir);
+    if (f.finalSnapshotLost) {
+      seen.add(finalKey);
+    }
+    return true;
+  }
+  if (f.finalSnapshotLost && !seen.has(finalKey)) {
+    seen.add(finalKey);
+    return true;
+  }
+  return false;
+}
+
+const reportedDayDirFailures = new Set<string>();
+
+// Resolve the day directory for one write, containing any failure (#1603)
+// but reporting it once per day directory (#1658). Returns null when the
+// write must be skipped.
+function resolveDayDirForWrite(
+  base: string,
+  trigger: BackupTrigger
+): string | null {
+  const dir = utcDayDirPath(base);
+  try {
+    return utcDayDir(base, dir);
+  } catch (err) {
+    // Contained (#1603): a symlinked day directory must not throw out of
+    // backupDoc - its callers are event handlers, backupAll, and
+    // activate(), and one bad day directory must not stop the other
+    // documents in the same backupAll pass.
+    //
+    // But contained is not silent (#1658): every contained failure is
+    // reported once per day directory, naming the directory, the trigger
+    // and the underlying error, so a backup dir that cannot be written is
+    // discoverable instead of invisible. The catch covers the
+    // #1603/#1709 symlink refusal and every mkdir failure
+    // (EACCES/ENOSPC/EEXIST/ENOTDIR) alike; the reported `code` keeps
+    // those distinguishable.
+    //
+    // Retry semantics (#1658): on change/focus/tab-switch/init the hash
+    // stays unset, so a later trigger for the same document does retry.
+    // On close/will-save there is no later trigger - these are the
+    // last-chance snapshots - so a failure there is the final snapshot
+    // lost, which the signal states explicitly instead of letting the old
+    // comment imply a retry that cannot happen.
+    const failure = describeDayDirFailure(dir, trigger, err);
+    if (shouldReportDayDirFailure(reportedDayDirFailures, failure)) {
+      console.error(formatDayDirFailure(failure));
+    }
+    return null;
+  }
 }
 
 const lastHash = new Map<string, string>();
@@ -654,15 +798,8 @@ function backupDoc(
   const name = doc.uri.path.replace(/[^a-zA-Z0-9]/g, "_") || "untitled";
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
   const ext = langToExtension(doc.languageId || "txt");
-  let dayDir: string;
-  try {
-    dayDir = utcDayDir(dir);
-  } catch {
-    // Contained (#1603): a symlinked day directory must not throw out
-    // of backupDoc - its callers are event handlers, backupAll, and
-    // activate(), and one bad day directory must not stop the other
-    // documents in the same backupAll pass. The hash stays unset, so
-    // a later trigger retries this document.
+  const dayDir = resolveDayDirForWrite(dir, trigger);
+  if (dayDir === null) {
     return;
   }
 

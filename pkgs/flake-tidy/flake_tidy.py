@@ -5570,8 +5570,8 @@ def main() -> None:
     dry_run = args.dry_run
     check = args.check
 
-    # Step 0: Format first (unless check mode)
-    if not check:
+    # Step 0: Format first (unless check or dry-run mode)
+    if not dry_run and not check:
         print("formatting flake.nix...")
         run_nixfmt(flake_dir)
 

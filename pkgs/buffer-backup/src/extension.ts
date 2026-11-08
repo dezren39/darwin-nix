@@ -120,14 +120,28 @@ interface Duration {
 }
 
 function durationToSeconds(d: Duration): number {
-  return (
-    d.years * 365 * 86400 +
-    d.months * 30 * 86400 +
-    d.days * 86400 +
-    d.hours * 3600 +
-    d.minutes * 60 +
-    d.seconds
-  );
+  // Keep both maxAgeSec and cleanupAge's milliseconds/cutoff arithmetic
+  // finite. At this cap (about 253,000 years), even multiplying by 1000
+  // stays below JavaScript Date's representable range; larger configured
+  // durations saturate and therefore do not expire real backup timestamps.
+  const maxSeconds = 8_000_000_000_000;
+  const components = [
+    [d.years, 365 * 86400],
+    [d.months, 30 * 86400],
+    [d.days, 86400],
+    [d.hours, 3600],
+    [d.minutes, 60],
+    [d.seconds, 1],
+  ];
+  let total = 0;
+  for (const [value, secondsPerUnit] of components) {
+    const safeValue = Number.isFinite(value) ? Math.max(0, value) : 0;
+    if (safeValue > (maxSeconds - total) / secondsPerUnit) {
+      return maxSeconds;
+    }
+    total += safeValue * secondsPerUnit;
+  }
+  return total;
 }
 
 // VS Code returns a hand-edited settings.json value verbatim even when
@@ -314,11 +328,17 @@ function cleanupSize(cfg: Config): void {
   if (
     !Number.isFinite(cfg.maxTotalMb) ||
     !Number.isFinite(cfg.rolloutMb) ||
-    cfg.maxTotalMb <= 0 ||
-    cfg.rolloutMb <= 0
+    cfg.maxTotalMb <= 0
   ) {
     return;
   }
+  // A finite rollout of 0 is the documented default (#1612): it means
+  // zero headroom, not disabled - a limit set on its own must still
+  // enforce, deleting down to exactly the limit. A negative rollout
+  // is clamped to 0 (zero headroom), mirroring the negative-component
+  // handling in getDuration (#1620); only the limit documents 0 as
+  // disabled, and only a non-finite rollout disables the pass above.
+  const rolloutMb = Math.max(0, cfg.rolloutMb);
   const entries = listBackups(cfg.backupDir);
   let total = entries.reduce((s, e) => s + e.size, 0);
   const maxB = cfg.maxTotalMb * 1024 * 1024;
@@ -327,7 +347,7 @@ function cleanupSize(cfg: Config): void {
   // can only reach by emptying the directory — it deleted every
   // backup, newest included. The newest backup always survives.
   const newestB = entries.length ? entries[entries.length - 1].size : 0;
-  const targetB = Math.max(maxB - cfg.rolloutMb * 1024 * 1024, newestB);
+  const targetB = Math.max(maxB - rolloutMb * 1024 * 1024, newestB);
   if (total <= maxB) {
     return;
   }
@@ -358,11 +378,12 @@ function cleanupCount(cfg: Config): void {
   if (
     !Number.isFinite(cfg.maxFileCount) ||
     !Number.isFinite(cfg.rolloutFileCount) ||
-    cfg.maxFileCount <= 0 ||
-    cfg.rolloutFileCount <= 0
+    cfg.maxFileCount <= 0
   ) {
     return;
   }
+  // Finite rollout 0 = zero headroom, not disabled (#1612, as in
+  // cleanupSize); a negative rollout clamps to 0. See cleanupSize.
   const entries = listBackups(cfg.backupDir);
   if (entries.length <= cfg.maxFileCount) {
     return;
@@ -375,7 +396,7 @@ function cleanupCount(cfg: Config): void {
   // Floor the target at 1 (#1211): with rolloutFileCount >=
   // maxFileCount the raw target is 0 and the pass deleted every
   // backup, newest included. The newest backup always survives.
-  const target = Math.max(cfg.maxFileCount - cfg.rolloutFileCount, 1);
+  const target = Math.max(cfg.maxFileCount - Math.max(0, cfg.rolloutFileCount), 1);
   let remaining = entries.length;
   // All but the newest entry, as in cleanupSize (#1530): with #1014
   // accounting a failed unlink does not decrement `remaining`, so an

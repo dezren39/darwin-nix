@@ -228,7 +228,7 @@ function removeFixture(dir, oldDay) {
   console.log("pass: cleanupSize with rollout > max leaves the newest backup (#1211)");
 }
 
-// 14. Failed unlink must not cost the newest backup, cleanupCount
+// 11. Failed unlink must not cost the newest backup, cleanupCount
 //     (#1530): four 16-byte backups, the oldest in a read-only day dir
 //     so its unlink fails. maxFileCount 2, rollout 1 -> target 1. The
 //     #1014 accounting (a failed unlink is not a deletion) makes an
@@ -264,7 +264,7 @@ function fixtureUndeletableOldestFlat() {
   console.log("pass: cleanupCount failed unlink does not delete the newest backup (#1530)");
 }
 
-// 15. Failed unlink must not cost the newest backup, cleanupSize
+// 12. Failed unlink must not cost the newest backup, cleanupSize
 //     (#1530): same fixture (4x100B) with a 250-byte cap and 100-byte
 //     rollout -> target 150B. The unguarded loop deleted f01, f02 and
 //     then the newest f03 to get under target; the guarded pass stops
@@ -279,7 +279,7 @@ function fixtureUndeletableOldestFlat() {
   console.log("pass: cleanupSize failed unlink does not delete the newest backup (#1530)");
 }
 
-// 11. All backups expired, cleanupAge (#1375): the fixture mtimes are
+// 13. All backups expired, cleanupAge (#1375): the fixture mtimes are
 //     2026-01-01, so with maxAgeSec = 3600 every file is past the
 //     cutoff. The unguarded pass deleted all of them; the #1211-style
 //     floor leaves exactly the newest backup.
@@ -291,7 +291,7 @@ function fixtureUndeletableOldestFlat() {
   console.log("pass: cleanupAge with every backup expired leaves the newest backup (#1375)");
 }
 
-// 12. A single expired backup, cleanupAge (#1375): the newest-backup
+// 14. A single expired backup, cleanupAge (#1375): the newest-backup
 //     floor also protects a store with exactly one entry.
 {
   const dir = fixture(1);
@@ -301,7 +301,7 @@ function fixtureUndeletableOldestFlat() {
   console.log("pass: cleanupAge leaves a lone expired backup standing (#1375)");
 }
 
-// 13. Mixed ages, cleanupAge (#1375): mtimes relative to now -- two
+// 15. Mixed ages, cleanupAge (#1375): mtimes relative to now -- two
 //     expired (3h, 2h old) and one fresh (1 minute old), maxAgeSec
 //     3600. Only the expired non-newest entries are deleted.
 {
@@ -321,7 +321,7 @@ function fixtureUndeletableOldestFlat() {
   console.log("pass: cleanupAge deletes only the expired non-newest backups (#1375)");
 }
 
-// 14. Symlinked day-directory (#1524): a symlink inside the backup dir
+// 16. Symlinked day-directory (#1524): a symlink inside the backup dir
 //     pointing at a sibling directory outside it. listBackups must not
 //     descend into it, and none of the three cleanup passes may delete
 //     the outside files (they are old enough / numerous enough that
@@ -374,7 +374,7 @@ function fixtureSymlinkedDay() {
   console.log("pass: cleanupCount never follows a symlinked day-directory (#1524)");
 }
 
-// 15. Symlinked file inside a real day directory (#1524): the link is
+// 17. Symlinked file inside a real day directory (#1524): the link is
 //     not a backup entry and its outside target is never deleted.
 {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "buffer-backup-link-"));
@@ -397,7 +397,7 @@ function fixtureSymlinkedDay() {
 }
 
 
-// 16. Non-finite limit, cleanupSize (#1574): a NaN maxTotalMb deleted
+// 18. Non-finite limit, cleanupSize (#1574): a NaN maxTotalMb deleted
 //     every backup but the newest before the guard -- the disabled
 //     check (<= 0) is false for NaN and the loop guard never breaks.
 //     A non-finite limit or rollout must delete nothing.
@@ -415,7 +415,7 @@ for (const bad of [NaN, Infinity, -Infinity]) {
   console.log("pass: cleanupSize with a non-finite limit/rollout deletes nothing (#1574)");
 }
 
-// 17. Non-finite limit, cleanupCount (#1574): same fail-open shape as
+// 19. Non-finite limit, cleanupCount (#1574): same fail-open shape as
 //     cleanupSize -- NaN maxFileCount deleted all but the newest.
 for (const bad of [NaN, Infinity, -Infinity]) {
   const dir = fixture(10);
@@ -431,7 +431,7 @@ for (const bad of [NaN, Infinity, -Infinity]) {
   console.log("pass: cleanupCount with a non-finite limit/rollout deletes nothing (#1574)");
 }
 
-// 18. Config reading validates numeric settings (#1574): getConfig /
+// 20. Config reading validates numeric settings (#1574): getConfig /
 //     getDuration / getInterval are extracted with a stub vscode whose
 //     getConfiguration returns hand-edited (schema-violating) values
 //     verbatim, exactly as VS Code does. Non-number / non-finite values
@@ -494,8 +494,8 @@ for (const bad of [NaN, Infinity, -Infinity]) {
 }
 
 
-// 19. Config reading validates the backupDir string setting (#1580):
-//     getConfig is extracted with the same stub vscode as block 18,
+// 21. Config reading validates the backupDir string setting (#1580):
+//     getConfig is extracted with the same stub vscode as block 20,
 //     feeding hand-edited (schema-violating) backupDir values verbatim,
 //     exactly as VS Code returns them. A truthy non-string used to pass
 //     the `|| DEFAULT` guard unchanged into fs.mkdirSync in activate()
@@ -548,11 +548,11 @@ for (const bad of [NaN, Infinity, -Infinity]) {
   console.log("pass: getConfig validates the backupDir string setting (#1580)");
 }
 
-// 20. getInterval never exceeds Node's timer ceiling (#1588, oracle:
+// 22. getInterval never exceeds Node's timer ceiling (#1588, oracle:
 //     the 2,147,483,647 ms 32-bit signed timer limit): a cleanup
 //     interval of 2,592,000 s (30 days) used to multiply to
 //     2,592,000,000 ms, which Node clamps to a 1 ms setInterval loop.
-//     The extracted getInterval (same stub style as block 18) must
+//     The extracted getInterval (same stub style as block 20) must
 //     return a finite delay within the ceiling for that input.
 {
   let configValues = {};
@@ -594,7 +594,7 @@ for (const bad of [NaN, Infinity, -Infinity]) {
 //     ones in getDuration's sum — days=1 with hours=-25 summed to
 //     -3600, and cleanupAge reads maxAgeSec <= 0 as disabled, so the
 //     configured retention silently never ran. Same extraction
-//     harness and stub vscode as block 18.
+//     harness and stub vscode as block 20.
 {
   let configValues = {};
   const fakeVscode = {
@@ -639,7 +639,7 @@ for (const bad of [NaN, Infinity, -Infinity]) {
 }
 
 
-// 21. getConfig clamps debounceMs to the timer-safe range (#1594,
+// 24. getConfig clamps debounceMs to the timer-safe range (#1594,
 //     oracle: the configured delay handed to setTimeout, not
 //     wall-clock timing): a negative or >2^31-1 debounceMs used to
 //     reach setTimeout verbatim, where Node collapses it to ~1 ms
@@ -687,14 +687,14 @@ for (const bad of [NaN, Infinity, -Infinity]) {
   console.log("pass: getConfig clamps debounceMs to the timer-safe range (#1594)");
 }
 
-// 24. Live symlinked day-directory, write side (#1603): utcDayDir must
+// 25. Live symlinked day-directory, write side (#1603): utcDayDir must
 //     refuse a day dir that is a symlink to a live outside directory -
 //     writing through it would put the only backup copy outside the
 //     backup dir, invisible to listBackups and every cleanup pass.
-// 25. Dangling symlinked day-directory (#1603): utcDayDir must fail
+// 26. Dangling symlinked day-directory (#1603): utcDayDir must fail
 //     with the same named refusal, not the raw ENOENT mkdirSync throws
 //     for a dangling link.
-// 26. Normal day-directory (#1603 control): utcDayDir creates a real
+// 27. Normal day-directory (#1603 control): utcDayDir creates a real
 //     directory, a file written there is listed by listBackups.
 {
   const dayDirFactory = new Function(
@@ -739,14 +739,14 @@ for (const bad of [NaN, Infinity, -Infinity]) {
   }
 }
 
-// 27. getInterval pins negative and fractional sub-1 intervals to the
+// 28. getInterval pins negative and fractional sub-1 intervals to the
 //     documented minimum (#1629, triage decision by task 11356):
 //     package.json documents every cleanup interval as
 //     "null/0 = 5s, min 1s". The 5s default is only for the
 //     unset/invalid cases (null, 0, non-number, non-finite - blocks
-//     18/20). A finite number, however far below the minimum, is a
+//     20/22). A finite number, however far below the minimum, is a
 //     configured value and clamps UP to the documented 1s minimum,
-//     exactly as an over-ceiling value clamps DOWN (block 20). So
+//     exactly as an over-ceiling value clamps DOWN (block 22). So
 //     -3600 and 0.5 both yield 1000 ms, not 5000 ms. Decision recorded
 //     on issue #1629; no production change - this pins the existing
 //     Math.max(1, v) behaviour so a future refactor cannot silently
@@ -790,6 +790,91 @@ for (const bad of [NaN, Infinity, -Infinity]) {
   configValues = { "bufferBackup.ageCleanupIntervalSeconds": 1.5 };
   assert.strictEqual(getInterval("ageCleanupIntervalSeconds"), 1500, "a fractional interval above the minimum passes through unchanged");
   console.log("pass: getInterval pins negative and fractional sub-1 intervals to the 1s minimum (#1629)");
+}
+
+// 29. Huge-but-finite maxAge component (#1627): duration conversion
+//     saturates at a finite 8e12-second cap whose millisecond value is
+//     still finite. That retention is effectively non-expiring for real
+//     backup timestamps, so cleanupAge must leave every backup intact.
+{
+  let configValues = {};
+  const fakeVscode = {
+    workspace: {
+      getConfiguration: (section) => ({
+        get: (key, fallback) => {
+          const full = `${section}.${key}`;
+          return Object.prototype.hasOwnProperty.call(configValues, full)
+            ? configValues[full]
+            : fallback;
+        },
+      }),
+    },
+  };
+  const configFactory = new Function(
+    "vscode",
+    "DEFAULT_BACKUP_DIR",
+    `${stripTypes(extractFunction("finiteNumberOr"))}
+     ${stripTypes(extractFunction("nonEmptyStringOr"))}
+     ${stripTypes(extractFunction("durationToSeconds"))}
+     ${stripTypes(extractFunction("getDuration"))}
+     ${stripTypes(extractFunction("getInterval"))}
+     ${stripTypes(extractFunction("getConfig"))}
+     return { getConfig };`,
+  );
+  const { getConfig } = configFactory(fakeVscode, "/tmp/fallback-dir");
+  configValues = { "bufferBackup.maxAge.years": 1e303 };
+  const maxAgeSec = getConfig().maxAgeSec;
+  assert.ok(Number.isFinite(maxAgeSec), `maxAgeSec must be finite, got ${maxAgeSec}`);
+  assert.strictEqual(maxAgeSec, 8_000_000_000_000, "overflowing duration must saturate at the documented cap");
+  assert.ok(Number.isFinite(Date.now() - maxAgeSec * 1000), "the age cutoff must remain finite");
+
+  const dir = fixture(5);
+  cleanupAge({ backupDir: dir, maxAgeSec });
+  assert.deepStrictEqual(remainingNames(dir), ["f00.txt", "f01.txt", "f02.txt", "f03.txt", "f04.txt"]);
+  fs.rmSync(dir, { recursive: true, force: true });
+  console.log("pass: huge-but-finite maxAge saturates and keeps real backups (#1627)");
+}
+
+// 30. A limit set alone enforces: finite rollout 0 is zero headroom,
+//     not disabled (#1612). Both rollout settings default to 0 in
+//     package.json, and only the limits document 0 as disabled, so
+//     the natural configuration (set only maxFileCount / maxTotalMb)
+//     used to disable both passes entirely and the backup dir grew
+//     unbounded. With rollout 0 a pass deletes oldest-first down to
+//     exactly the limit. A negative rollout is deliberately clamped
+//     to 0 (zero headroom, mirroring #1620), pinned below; a
+//     non-finite rollout still disables the pass (blocks 18/19).
+{
+  const dir = fixture(30);
+  cleanupCount({ backupDir: dir, maxFileCount: 10, rolloutFileCount: 0 });
+  const names = remainingNames(dir);
+  assert.strictEqual(names.length, 10, "rollout 0 count pass must converge to the limit");
+  assert.strictEqual(names[0], "f20.txt", "rollout 0 count pass deletes oldest first");
+  assert.strictEqual(names[names.length - 1], "f29.txt", "newest backup must survive the rollout 0 count pass");
+  fs.rmSync(dir, { recursive: true, force: true });
+  console.log("pass: cleanupCount with rollout 0 converges to the limit (#1612)");
+}
+{
+  const dir = fixture(30, 1024);
+  cleanupSize({ backupDir: dir, maxTotalMb: 0.02, rolloutMb: 0 });
+  const entries = listBackups(dir);
+  const total = entries.reduce((sum, e) => sum + e.size, 0);
+  assert.ok(total <= 0.02 * 1024 * 1024, "rollout 0 size pass must converge to the cap");
+  assert.strictEqual(entries.length, 20, "rollout 0 size pass deletes exactly to the cap (20 x 1024 B)");
+  assert.strictEqual(entries[entries.length - 1].name, "f29.txt", "newest backup must survive the rollout 0 size pass");
+  fs.rmSync(dir, { recursive: true, force: true });
+  console.log("pass: cleanupSize with rollout 0 converges to the limit (#1612)");
+}
+{
+  const dir = fixture(30);
+  cleanupCount({ backupDir: dir, maxFileCount: 10, rolloutFileCount: -5 });
+  assert.strictEqual(remainingNames(dir).length, 10, "negative count rollout must clamp to 0 and still enforce the limit");
+  fs.rmSync(dir, { recursive: true, force: true });
+  const dir2 = fixture(30, 1024);
+  cleanupSize({ backupDir: dir2, maxTotalMb: 0.02, rolloutMb: -0.01 });
+  assert.strictEqual(listBackups(dir2).length, 20, "negative size rollout must clamp to 0 and still enforce the cap");
+  fs.rmSync(dir2, { recursive: true, force: true });
+  console.log("pass: negative rollout clamps to 0 for both passes (#1612)");
 }
 
 console.log("cleanup-count.test.mjs: all assertions passed");

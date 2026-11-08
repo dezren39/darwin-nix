@@ -96,6 +96,8 @@ FINDING ARTIFACTS TOO
 
 OTHER
   --user USER         Scan USER's home instead of the caller's (needs root).
+                      --auto only: may not be combined with --path or a
+                      positional path (in --path mode it has no effect).
   --print0            NUL-separate records instead of newline.
   --count             Print only a summary count, of the records the
                       chosen filter would print. May not be combined
@@ -201,6 +203,18 @@ fi
 if [ "$WANT_STATUS" = "1" ] && [ "$FIND_SET" = "0" ]; then
   echo "git-discover-repos: --status requires --find" >&2
   echo "                    (--status only annotates --find hits; without --find it has no effect)" >&2
+  exit 2
+fi
+
+# --user only resolves SCAN_HOME, which seed_auto() alone consumes;
+# seed_path() never reads it, so in --path mode (a positional path
+# counts too) the flag was silently ignored: the run exited 0 with
+# output byte-identical to not asking, and --dry-run printed the
+# ignored home as the plan (#1710). Judge the pair here, after
+# parsing, so both flag orders and the positional form are covered.
+if [ "$USER_SET" = "1" ] && [ "$PATH_SET" = "1" ]; then
+  echo "git-discover-repos: --user may not be combined with --path" >&2
+  echo "                    (--user sets the home scanned in --auto mode; a --path run scans only the given paths)" >&2
   exit 2
 fi
 

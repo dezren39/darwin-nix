@@ -127,28 +127,42 @@ RECURSIVE_YES_SET=0
 RECURSIVE_NO_SET=0
 FOLLOW=""
 FOLLOW_GIVEN=""
+DISCOVERY_FLAGS_USED=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --auto) AUTO_SET=1 ;;                        # names the default scope
     --no-system) { arg_conflict --system --no-system "$SYSTEM_SET"; DO_WALK=1; DO_SYSTEM=0; SCOPE_SET=1; NO_SYSTEM_SET=1; } ;;
     --system) { arg_conflict --system --no-system "$NO_SYSTEM_SET"; DO_WALK=0; DO_SYSTEM=1; SCOPE_SET=1; SYSTEM_SET=1; } ;;
-    --path) { arg_require_value "$1" "${2:-}"; [ "$ROOT_SET" -eq 0 ] || arg_die "unexpected argument: $2 (target already set to $ROOT)"; ROOT="$2"; ROOT_SET=1; shift; } ;;
-    --recursive|--walk) { arg_conflict --recursive --no-recursive "$RECURSIVE_NO_SET"; arg_conflict --depth --recursive "$DEPTH_SET"; DEPTH_LIMIT=""; RECURSIVE_SET=1; RECURSIVE_YES_SET=1; } ;;
-    --no-recursive|--no-walk) { arg_conflict --recursive --no-recursive "$RECURSIVE_YES_SET"; arg_conflict --depth --no-recursive "$DEPTH_SET"; DEPTH_LIMIT=1; RECURSIVE_SET=1; RECURSIVE_NO_SET=1; } ;;
-    --depth) { arg_require_value "$1" "${2:-}"; arg_conflict --depth --recursive "$RECURSIVE_YES_SET"; arg_conflict --depth --no-recursive "$RECURSIVE_NO_SET"; arg_once "$1" DEPTH_SET; DEPTH_LIMIT="$2"; RECURSIVE_SET=1; shift; } ;;
-    --follow) { [ -z "$FOLLOW_GIVEN" ] || [ "$FOLLOW_GIVEN" = "--follow" ] || arg_die "--follow conflicts with --no-follow"; FOLLOW=1; FOLLOW_GIVEN="--follow"; } ;;
-    --no-follow) { [ -z "$FOLLOW_GIVEN" ] || [ "$FOLLOW_GIVEN" = "--no-follow" ] || arg_die "--no-follow conflicts with --follow"; FOLLOW=0; FOLLOW_GIVEN="--no-follow"; } ;;
+    --path) { arg_require_value "$1" "${2:-}"; [ "$ROOT_SET" -eq 0 ] || arg_die "unexpected argument: $2 (target already set to $ROOT)"; ROOT="$2"; ROOT_SET=1; arg_used DISCOVERY_FLAGS_USED --path; shift; } ;;
+    --recursive|--walk) { arg_conflict --recursive --no-recursive "$RECURSIVE_NO_SET"; arg_conflict --depth --recursive "$DEPTH_SET"; DEPTH_LIMIT=""; RECURSIVE_SET=1; RECURSIVE_YES_SET=1; arg_used DISCOVERY_FLAGS_USED --recursive; } ;;
+    --no-recursive|--no-walk) { arg_conflict --recursive --no-recursive "$RECURSIVE_YES_SET"; arg_conflict --depth --no-recursive "$DEPTH_SET"; DEPTH_LIMIT=1; RECURSIVE_SET=1; RECURSIVE_NO_SET=1; arg_used DISCOVERY_FLAGS_USED --no-recursive; } ;;
+    --depth) { arg_require_value "$1" "${2:-}"; arg_conflict --depth --recursive "$RECURSIVE_YES_SET"; arg_conflict --depth --no-recursive "$RECURSIVE_NO_SET"; arg_once "$1" DEPTH_SET; DEPTH_LIMIT="$2"; RECURSIVE_SET=1; arg_used DISCOVERY_FLAGS_USED --depth; shift; } ;;
+    --follow) { [ -z "$FOLLOW_GIVEN" ] || [ "$FOLLOW_GIVEN" = "--follow" ] || arg_die "--follow conflicts with --no-follow"; FOLLOW=1; FOLLOW_GIVEN="--follow"; arg_used DISCOVERY_FLAGS_USED --follow; } ;;
+    --no-follow) { [ -z "$FOLLOW_GIVEN" ] || [ "$FOLLOW_GIVEN" = "--no-follow" ] || arg_die "--no-follow conflicts with --follow"; FOLLOW=0; FOLLOW_GIVEN="--no-follow"; arg_used DISCOVERY_FLAGS_USED --no-follow; } ;;
     --dry-run) DRY_RUN=1 ;;
     -h|--help) usage; exit 0 ;;
     -*) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
     *)
       [ -n "$1" ] || arg_die "empty positional argument (target must not be empty)"
-      if [ "$ROOT_SET" -eq 0 ]; then ROOT="$1"; ROOT_SET=1; else echo "unexpected argument: $1" >&2; exit 2; fi
+      if [ "$ROOT_SET" -eq 0 ]; then ROOT="$1"; ROOT_SET=1; arg_used DISCOVERY_FLAGS_USED --path; else echo "unexpected argument: $1" >&2; exit 2; fi
       ;;
   esac
   shift
 done
+# --system verifies the static path list only and runs no discovery, so
+# discovery flags are meaningless alongside it: they were recorded above
+# and then silently dropped at exit 0 (#1719), including a --path naming
+# a nonexistent target. Judge the pair here, at parse time, in the
+# clean.sh shape (#1711): exit 2 naming the offending flag(s), in either
+# flag order. --dry-run is NOT a discovery flag: mark() honours it in
+# the static half, so plain --system and --system --dry-run are unchanged.
+# The accumulator and the judge are the shared mode-effectiveness
+# mechanism in lib/common.sh (design #1722, #1723).
+if [ "$SYSTEM_SET" = "1" ]; then
+  arg_refuse_in_mode --system discovery "$DISCOVERY_FLAGS_USED" "--system verifies the static path list only; no discovery"
+fi
+
 # --depth is forwarded verbatim to find -maxdepth (via git-discover-repos),
 # where a non-numeric value fails mid-walk and 0 silently means "the path
 # itself only". Judge it whole, at parse time, with the shared arg_decimal

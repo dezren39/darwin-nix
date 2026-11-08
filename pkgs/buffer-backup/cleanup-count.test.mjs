@@ -940,13 +940,22 @@ for (const bad of [NaN, Infinity, -Infinity]) {
   const { langToExtension } = langFactory();
   assert.strictEqual(langToExtension("python"), ".py", "known id keeps its mapped extension (#1649)");
   assert.strictEqual(langToExtension("some-new-lang"), ".some-new-lang", "unknown plain id becomes its own extension (#1649)");
+  // #1721: prototype-named ids must take the sanitized fallback,
+  // never an inherited Object.prototype member.
+  for (const proto of ["toString", "constructor", "__proto__", "hasOwnProperty", "valueOf"]) {
+    const ext = langToExtension(proto);
+    assert.strictEqual(typeof ext, "string", `extension for ${proto} must be a string, got ${typeof ext} (#1721)`);
+    assert.strictEqual(ext, `.${proto.replace(/[^a-zA-Z0-9-]/g, "_")}`, `prototype-named id ${proto} must take the sanitized fallback (#1721)`);
+    const composed = path.join("/backups", "2026-01-01", `untitled_X_2026-01-01T00-00-00-000Z${ext}`);
+    assert.strictEqual(path.dirname(composed), path.join("/backups", "2026-01-01"), `composed backup path for ${proto} must stay in the day dir (#1721)`);
+  }
   for (const bad of ["a/b", "../evil", "../../../evil", "a\\b", "..", ".", ""]) {
     const ext = langToExtension(bad);
     assert.ok(!ext.includes("/") && !ext.includes("\\"), `extension for ${JSON.stringify(bad)} must not contain a path separator, got ${ext}`);
     const composed = path.join("/backups", "2026-01-01", `untitled_X_2026-01-01T00-00-00-000Z${ext}`);
     assert.strictEqual(path.dirname(composed), path.join("/backups", "2026-01-01"), `composed backup path for ${JSON.stringify(bad)} must stay in the day dir, got ${composed}`);
   }
-  console.log("pass: langToExtension fallback is separator-safe; composed backup path stays in the day dir (#1649)");
+  console.log("pass: langToExtension fallback is separator-safe and prototype-safe; composed backup path stays in the day dir (#1649, #1721)");
 }
 
 // 32. Symlinked day-directory swapped in after the pre-check (#1709):
@@ -1263,6 +1272,105 @@ for (const bad of [NaN, Infinity, -Infinity]) {
     fs.rmSync(base, { recursive: true, force: true });
     fs.rmSync(outside, { recursive: true, force: true });
     console.log("pass: containment keeps the pass alive and a later change-triggered pass recovers (#1603, #1658)");
+  }
+}
+
+
+// 33. backupDoc's write is contained per document (#1729): a
+//     writeFileSync failure (ENOSPC here) must not throw out of
+//     backupDoc or abort the backupAll pass - every later document is
+//     still backed up - the failed document's hash stays unset so a
+//     later trigger retries it (#1603 contract), and the failure
+//     leaves the discoverable console.error signal #1658 requires
+//     (same surface as the day-directory signal: path, trigger, error).
+{
+  const stripBackup = (code) =>
+    stripTypes(code)
+      .replace(/: vscode\.TextDocument/g, "")
+      .replace(/: BackupTrigger/g, "");
+  const makeBackup = ({ vscode, fsImpl, consoleImpl, lastHash, lastBackupPath }) =>
+    new Function(
+      "vscode", "fs", "path", "console", "lastHash", "lastBackupPath",
+      "contentHash", "utcDayDir", "resolveDayDirForWrite", "langToExtension", "buildMeta", "formatMetaLine",
+      `${stripBackup(extractFunction("backupDoc"))}
+       ${stripBackup(extractFunction("backupAll"))}
+       return { backupDoc, backupAll };`,
+    )(
+      vscode, fsImpl, path, consoleImpl, lastHash, lastBackupPath,
+      (text) => `h:${text}`,
+      (dir) => { const d = path.join(dir, "day"); fs.mkdirSync(d, { recursive: true }); return d; },
+      (dir) => { const d = path.join(dir, "day"); fs.mkdirSync(d, { recursive: true }); return d; },
+      () => ".txt",
+      () => ({}),
+      () => "//meta",
+    );
+  const doc = (n, text) => ({
+    uri: { scheme: "untitled", path: `/Untitled-${n}`, toString: () => `untitled:Untitled-${n}` },
+    getText: () => text, languageId: "txt", lineCount: 1,
+  });
+
+  // 33a. Throwing write for the first document: pass survives, second
+  //      document is backed up, first hash stays unset, signal logged.
+  {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), "buffer-backup-test-"));
+    const written = [];
+    const logged = [];
+    const failingFs = {
+      ...fs,
+      writeFileSync: (file, content) => {
+        if (String(file).includes("Untitled_1")) {
+          const e = new Error("ENOSPC: no space left on device");
+          e.code = "ENOSPC";
+          throw e;
+        }
+        written.push(String(file));
+        return fs.writeFileSync(file, content);
+      },
+    };
+    const docs = [doc(1, "first"), doc(2, "second")];
+    const lastHash = new Map();
+    const { backupAll } = makeBackup({
+      vscode: { workspace: { textDocuments: docs } },
+      fsImpl: failingFs,
+      consoleImpl: { error: (line) => logged.push(String(line)) },
+      lastHash, lastBackupPath: new Map(),
+    });
+    assert.doesNotThrow(
+      () => backupAll({ backupDir: base }, "change"),
+      "a failed write must not throw out of backupAll (#1729)",
+    );
+    assert.strictEqual(written.length, 1, "the healthy second document must still be backed up (#1729)");
+    assert.ok(written[0].includes("Untitled_2"), `second document written, got ${written[0]}`);
+    assert.ok(!lastHash.has("untitled:Untitled-1"), "failed document hash must stay unset for retry (#1603)");
+    assert.ok(lastHash.has("untitled:Untitled-2"), "healthy document hash must be set");
+    assert.strictEqual(logged.length, 1, `exactly one signal for the failed write, got ${logged.length}`);
+    assert.match(logged[0], /buffer-backup: contained write failure/, "signal must name the containment (#1658 surface)");
+    assert.ok(logged[0].includes("trigger=change"), "signal must name the trigger");
+    assert.ok(logged[0].includes("ENOSPC"), "signal must carry the underlying error");
+    fs.rmSync(base, { recursive: true, force: true });
+    console.log("pass: backupDoc write failure is contained per document, backupAll backs up later documents, hash unset, signal logged (#1729)");
+  }
+
+  // 33b. Normal write unchanged: a healthy document writes, hash set,
+  //      no signal.
+  {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), "buffer-backup-test-"));
+    const written = [];
+    const logged = [];
+    const healthyFs = { ...fs, writeFileSync: (file, content) => { written.push(String(file)); return fs.writeFileSync(file, content); } };
+    const lastHash = new Map();
+    const { backupDoc } = makeBackup({
+      vscode: { workspace: { textDocuments: [] } },
+      fsImpl: healthyFs,
+      consoleImpl: { error: (line) => logged.push(String(line)) },
+      lastHash, lastBackupPath: new Map(),
+    });
+    backupDoc(doc(3, "healthy"), base, "change");
+    assert.strictEqual(written.length, 1, "healthy document must be written");
+    assert.ok(lastHash.has("untitled:Untitled-3"), "healthy document hash must be set");
+    assert.strictEqual(logged.length, 0, "no failure signal on a healthy write");
+    fs.rmSync(base, { recursive: true, force: true });
+    console.log("pass: backupDoc normal write unchanged (#1729)");
   }
 }
 

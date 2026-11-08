@@ -233,23 +233,23 @@ while [ $# -gt 0 ]; do
     --auto)           AUTO_SET=1 ;;
     --system)         { arg_conflict --system --no-system "$NO_SYSTEM_SET"; SCOPE="system"; SCOPE_SET=1; SYSTEM_SET=1; } ;;
     --no-system)      { arg_conflict --system --no-system "$SYSTEM_SET"; SCOPE="no-system"; SCOPE_SET=1; NO_SYSTEM_SET=1; } ;;
-    --path)           { arg_require_value "$1" "${2:-}"; [ "$TARGET_SET" -eq 0 ] || arg_die "unexpected argument: $1 (target already set to $TARGET_PATH)"; TARGET_PATH="$2"; TARGET_SET=1; REPO_FLAGS_USED="$REPO_FLAGS_USED --path"; shift; } ;;
-    --recursive|--walk) { arg_conflict --recursive --no-recursive "$RECURSIVE_NO_SET"; arg_conflict --depth --recursive "$DEPTH_SET"; REPO_FLAGS_USED="$REPO_FLAGS_USED --recursive"; DEPTH_LIMIT=""; RECURSIVE_SET=1; RECURSIVE_YES_SET=1; } ;;
+    --path)           { arg_require_value "$1" "${2:-}"; [ "$TARGET_SET" -eq 0 ] || arg_die "unexpected argument: $1 (target already set to $TARGET_PATH)"; TARGET_PATH="$2"; TARGET_SET=1; arg_used REPO_FLAGS_USED --path; shift; } ;;
+    --recursive|--walk) { arg_conflict --recursive --no-recursive "$RECURSIVE_NO_SET"; arg_conflict --depth --recursive "$DEPTH_SET"; arg_used REPO_FLAGS_USED --recursive; DEPTH_LIMIT=""; RECURSIVE_SET=1; RECURSIVE_YES_SET=1; } ;;
     --no-recursive|--no-walk) { arg_conflict --recursive --no-recursive "$RECURSIVE_YES_SET"; arg_conflict --depth --no-recursive "$DEPTH_SET"; DEPTH_LIMIT=1; RECURSIVE_SET=1; RECURSIVE_NO_SET=1; } ;;
-    --depth)          { arg_require_value "$1" "${2:-}"; arg_conflict --depth --recursive "$RECURSIVE_YES_SET"; arg_conflict --depth --no-recursive "$RECURSIVE_NO_SET"; arg_once "$1" DEPTH_SET; DEPTH_LIMIT="$2"; RECURSIVE_SET=1; REPO_FLAGS_USED="$REPO_FLAGS_USED --depth"; shift; } ;;
-    --follow)         { arg_conflict --follow --no-follow "$FOLLOW_NO_SET"; FOLLOW=1; FOLLOW_YES_SET=1; REPO_FLAGS_USED="$REPO_FLAGS_USED --follow"; } ;;
-    --no-follow)      { arg_conflict --follow --no-follow "$FOLLOW_YES_SET"; FOLLOW=0; FOLLOW_NO_SET=1; REPO_FLAGS_USED="$REPO_FLAGS_USED --no-follow"; } ;;
+    --depth)          { arg_require_value "$1" "${2:-}"; arg_conflict --depth --recursive "$RECURSIVE_YES_SET"; arg_conflict --depth --no-recursive "$RECURSIVE_NO_SET"; arg_once "$1" DEPTH_SET; DEPTH_LIMIT="$2"; RECURSIVE_SET=1; arg_used REPO_FLAGS_USED --depth; shift; } ;;
+    --follow)         { arg_conflict --follow --no-follow "$FOLLOW_NO_SET"; FOLLOW=1; FOLLOW_YES_SET=1; arg_used REPO_FLAGS_USED --follow; } ;;
+    --no-follow)      { arg_conflict --follow --no-follow "$FOLLOW_YES_SET"; FOLLOW=0; FOLLOW_NO_SET=1; arg_used REPO_FLAGS_USED --no-follow; } ;;
     --sudo)           USE_SUDO=1 ;;
     --tmpdir)         CLEAN_TMPDIR=1 ;;
-    --expire-reflog)  { EXPIRE_REFLOG=1; REPO_FLAGS_USED="$REPO_FLAGS_USED --expire-reflog"; } ;;
+    --expire-reflog)  { EXPIRE_REFLOG=1; arg_used REPO_FLAGS_USED --expire-reflog; } ;;
     --docker-age)     { arg_require_value "$1" "${2:-}"; arg_once "$1" DOCKER_AGE_SET; DOCKER_AGE_DAYS="$2"; shift; } ;;
     --opencode-root-scratch) CLEAN_OPENCODE_ROOT=1 ;;
     --prune-unknown-scratch) PRUNE_UNKNOWN_SCRATCH=1 ;;
     --only-unknown-scratch) ONLY_UNKNOWN_SCRATCH=1 ;;
     --only-tmpdir)    ONLY_TMPDIR=1 ;;
     --no-sudo)        USE_SUDO=0 ;;
-    --no-git-maintenance|--no-maintenance|--no-git) { DO_MAINTENANCE=0; REPO_FLAGS_USED="$REPO_FLAGS_USED $1"; } ;;
-    --quick)          { MAINT_DEPTH="--quick"; REPO_FLAGS_USED="$REPO_FLAGS_USED --quick"; } ;;
+    --no-git-maintenance|--no-maintenance|--no-git) { DO_MAINTENANCE=0; arg_used REPO_FLAGS_USED "$1"; } ;;
+    --quick)          { MAINT_DEPTH="--quick"; arg_used REPO_FLAGS_USED --quick; } ;;
     --dry-run)        DRY_RUN=1 ;;
     -h|--help)        usage; exit 0 ;;
     -*)               echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -334,11 +334,12 @@ done
 unset _clean_nonnegative_vars _v _val
 
 # --system touches no repositories, so repository-scoped flags are meaningless
-# alongside it. Erroring beats silently ignoring them.
-if [ "$SCOPE" = "system" ] && [ -n "$REPO_FLAGS_USED" ]; then
-  echo "clean.sh: --system conflicts with repository-scoped flags:$REPO_FLAGS_USED" >&2
-  echo "          (--system does caches/logs only and opens no repository)" >&2
-  exit 2
+# alongside it. Erroring beats silently ignoring them. The accumulator
+# and the judge are the shared mode-effectiveness mechanism in
+# lib/common.sh (design #1722, #1723); the parser arms above declare
+# class membership with arg_used.
+if [ "$SCOPE" = "system" ]; then
+  arg_refuse_in_mode --system repository-scoped "$REPO_FLAGS_USED" "--system does caches/logs only and opens no repository"
 fi
 
 # --dry-run writes nothing, so it should not demand a password. --sudo forces

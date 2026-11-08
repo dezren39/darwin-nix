@@ -146,12 +146,67 @@ for pair in "--system --no-system" "--no-system --system"; do
     *) fail "scope pair '$pair' was not named as a conflict on stderr (got: $ERR)" ;;
   esac
 done
-run --dry-run --path "$VALID" --system
+run --dry-run --system
 [ "$STATUS" -eq 0 ] || fail "single --system exited $STATUS (want 0)"
 echo "ok: single --system still accepted"
 run --dry-run --path "$VALID" --no-system
 [ "$STATUS" -eq 0 ] || fail "single --no-system exited $STATUS (want 0)"
 echo "ok: single --no-system still accepted"
+
+# ─── --system silently dropping discovery flags is rejected (#1719) ──
+# --system sets DO_WALK=0, so --path/positional, --recursive/--no-recursive,
+# --depth and --follow/--no-follow had no consumer and were silently
+# dropped at exit 0, including a nonexistent --path target. Each flag
+# class must now exit 2 at parse time naming the flag, in either order,
+# in the clean.sh --system judge shape. --dry-run is not a discovery
+# flag (mark() honours it in the static half), so the plain --system
+# and --system --dry-run controls below stay exit 0.
+for spec in "--path|$VALID" "--recursive|" "--no-recursive|" "--depth|3" "--follow|" "--no-follow|"; do
+  flag="${spec%%|*}"; val="${spec#*|}"
+  for order in "sys-first" "flag-first"; do
+    if [ "$order" = "sys-first" ]; then
+      # shellcheck disable=SC2086
+      run --system --dry-run $flag $val
+    else
+      # shellcheck disable=SC2086
+      run --dry-run $flag $val --system
+    fi
+    [ "$STATUS" -eq 2 ] || fail "--system with $flag ($order) exited $STATUS (want 2)"
+    case "$ERR" in
+      *"spotlight-exclude-artifacts: --system conflicts with discovery flags:"*"$flag"*) echo "ok: --system with $flag ($order) rejected, flag named" ;;
+      *) fail "--system with $flag ($order) did not name the flag (got: $ERR)" ;;
+    esac
+  done
+done
+# Positional target is the --path form: rejected and named as --path.
+run --system --dry-run "$VALID"
+[ "$STATUS" -eq 2 ] || fail "--system with positional target exited $STATUS (want 2)"
+case "$ERR" in
+  *"conflicts with discovery flags: --path"*) echo "ok: --system with positional target rejected, named as --path" ;;
+  *) fail "--system with positional target was not named as --path (got: $ERR)" ;;
+esac
+run --dry-run "$VALID" --system
+[ "$STATUS" -eq 2 ] || fail "positional target then --system exited $STATUS (want 2)"
+case "$ERR" in
+  *"conflicts with discovery flags: --path"*) echo "ok: positional target then --system rejected, named as --path" ;;
+  *) fail "positional target then --system was not named as --path (got: $ERR)" ;;
+esac
+# Multiple discovery flags are all named.
+run --system --dry-run --path "$VALID" --depth 3 --follow
+[ "$STATUS" -eq 2 ] || fail "--system with three discovery flags exited $STATUS (want 2)"
+case "$ERR" in
+  *"conflicts with discovery flags: --path --depth --follow"*) echo "ok: --system with multiple discovery flags names them all" ;;
+  *) fail "--system with multiple discovery flags did not name them all (got: $ERR)" ;;
+esac
+# Controls: plain --system and --system --dry-run unchanged (exit 0,
+# static list only), and --no-system with discovery flags still works.
+run --system --dry-run
+[ "$STATUS" -eq 0 ] || fail "plain --system --dry-run control exited $STATUS (want 0)"
+case "$OUT" in
+  *"static paths"*) echo "ok: plain --system control still verifies the static list" ;;
+  *) fail "plain --system control output changed (got: $OUT)" ;;
+esac
+[ -z "$(markers)" ] && echo "ok: rejected --system runs wrote no markers" || fail "rejected --system runs wrote markers"
 
 # ─── No side effects from the rejected runs ────────────────────────────
 if [ -z "$(markers)" ]; then
@@ -235,6 +290,18 @@ for bad in abc 0 2147483648 99999999999999999999999999; do
   probe_rejected "spotlight-exclude-artifacts: --depth must be a positive integer" --no-system --dry-run --path "$VALID" --depth "$bad"
 done
 probe_accepted --no-system --path "$VALID" --depth 08 --dry-run
+
+# Mode-effectiveness rows (#1723, design #1722), driven through the
+# shared probes: accumulation in both orders, a positional target
+# recorded as --path and judged like the option form, every
+# offending flag named, and the judge firing only under --system
+# (the --no-system control with the same class flags is accepted).
+probe_mode_refused "spotlight-exclude-artifacts: --system conflicts with discovery flags: --depth" --system --dry-run --depth 3
+probe_mode_refused "spotlight-exclude-artifacts: --system conflicts with discovery flags: --depth" --dry-run --depth 3 --system
+probe_mode_refused "spotlight-exclude-artifacts: --system conflicts with discovery flags: --path" --system --dry-run "$VALID"
+probe_mode_refused "spotlight-exclude-artifacts: --system conflicts with discovery flags: --path" --dry-run "$VALID" --system
+probe_mode_refused "spotlight-exclude-artifacts: --system conflicts with discovery flags: --path --depth --follow" --system --dry-run --path "$VALID" --depth 3 --follow
+probe_mode_accepted --no-system --dry-run --path "$VALID" --depth 3
 
 
 # ─── Failed marker writes exit non-zero (#1333) ─────────────────────

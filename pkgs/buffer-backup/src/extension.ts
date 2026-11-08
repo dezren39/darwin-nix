@@ -107,7 +107,17 @@ const LANG_TO_EXT: Record<string, string> = {
 };
 
 function langToExtension(languageId: string): string {
-  const known = LANG_TO_EXT[languageId];
+  // #1721: judge the lookup by own property only. LANG_TO_EXT is a
+  // plain object literal, so a bare index walks the prototype chain:
+  // prototype-named languageIds (toString, constructor, __proto__,
+  // hasOwnProperty, valueOf) returned inherited functions/objects
+  // instead of a string, bypassing the #1649 sanitizer below and
+  // landing coerced garbage in the backup filename and fileExtension
+  // meta. (Object.hasOwn would do, but the ES2020 lib target predates
+  // its types; hasOwnProperty.call is the same own-property test.)
+  const known = Object.prototype.hasOwnProperty.call(LANG_TO_EXT, languageId)
+    ? LANG_TO_EXT[languageId]
+    : undefined;
   if (known) return known;
   // #1649: the fallback is spliced into the backup filename in
   // backupDoc, and a languageId is extension/user-supplied data
@@ -785,7 +795,22 @@ function backupDoc(
   const content = formatMetaLine(meta) + "\n" + text;
 
   const backupFilePath = path.join(dayDir, `${name}_${ts}${ext}`);
-  fs.writeFileSync(backupFilePath, content);
+  try {
+    fs.writeFileSync(backupFilePath, content);
+  } catch (err) {
+    // Contained (#1729, #1603 shape): a failed write (ENOSPC/EACCES/
+    // ENAMETOOLONG) must not throw out of backupDoc - its callers are
+    // event handlers and backupAll, and one failed write must not stop
+    // the other documents in the same backupAll pass. The hash stays
+    // unset, so a later trigger retries this document. The failure is
+    // not silent: it leaves the discoverable signal #1658 requires on
+    // the surface its fix chose (console.error naming the path, the
+    // trigger and the underlying error).
+    console.error(
+      `buffer-backup: contained write failure path=${backupFilePath} trigger=${trigger} error=${err instanceof Error ? err.message : String(err)}`
+    );
+    return;
+  }
   lastHash.set(key, h);
   lastBackupPath.set(key, backupFilePath);
 }

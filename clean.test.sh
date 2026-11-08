@@ -708,6 +708,16 @@ for bad in abc 0 2147483648 99999999999999999999999999; do
 done
 probe_accepted --path "$VALID" --depth 08 --docker-age 08 --only-unknown-scratch
 
+# Mode-effectiveness rows (#1723, design #1722), driven through the
+# shared probes: the arg_used accumulator records class flags in
+# either order, the arg_refuse_in_mode judge names every offending
+# flag, and it fires only under --system (the --no-system control
+# with the same class flags is accepted).
+probe_mode_refused "clean.sh: --system conflicts with repository-scoped flags: --depth" --dry-run --system --depth 3
+probe_mode_refused "clean.sh: --system conflicts with repository-scoped flags: --depth" --dry-run --depth 3 --system
+probe_mode_refused "clean.sh: --system conflicts with repository-scoped flags: --quick --expire-reflog" --dry-run --system --quick --expire-reflog
+probe_mode_accepted --dry-run --no-system --path "$VALID" --depth 3 --only-unknown-scratch
+
 # ─── Shared operation-outcome conformance matrix (#1339) ───────────────
 outcome_probe_matrix
 

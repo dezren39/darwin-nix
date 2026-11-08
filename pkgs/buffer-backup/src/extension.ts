@@ -648,7 +648,22 @@ function backupDoc(
   const content = formatMetaLine(meta) + "\n" + text;
 
   const backupFilePath = path.join(dayDir, `${name}_${ts}${ext}`);
-  fs.writeFileSync(backupFilePath, content);
+  try {
+    fs.writeFileSync(backupFilePath, content);
+  } catch (err) {
+    // Contained (#1729, #1603 shape): a failed write (ENOSPC/EACCES/
+    // ENAMETOOLONG) must not throw out of backupDoc - its callers are
+    // event handlers and backupAll, and one failed write must not stop
+    // the other documents in the same backupAll pass. The hash stays
+    // unset, so a later trigger retries this document. The failure is
+    // not silent: it leaves the discoverable signal #1658 requires on
+    // the surface its fix chose (console.error naming the path, the
+    // trigger and the underlying error).
+    console.error(
+      `buffer-backup: contained write failure path=${backupFilePath} trigger=${trigger} error=${err instanceof Error ? err.message : String(err)}`
+    );
+    return;
+  }
   lastHash.set(key, h);
   lastBackupPath.set(key, backupFilePath);
 }

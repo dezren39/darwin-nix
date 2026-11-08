@@ -739,4 +739,57 @@ for (const bad of [NaN, Infinity, -Infinity]) {
   }
 }
 
+// 27. getInterval pins negative and fractional sub-1 intervals to the
+//     documented minimum (#1629, triage decision by task 11356):
+//     package.json documents every cleanup interval as
+//     "null/0 = 5s, min 1s". The 5s default is only for the
+//     unset/invalid cases (null, 0, non-number, non-finite - blocks
+//     18/20). A finite number, however far below the minimum, is a
+//     configured value and clamps UP to the documented 1s minimum,
+//     exactly as an over-ceiling value clamps DOWN (block 20). So
+//     -3600 and 0.5 both yield 1000 ms, not 5000 ms. Decision recorded
+//     on issue #1629; no production change - this pins the existing
+//     Math.max(1, v) behaviour so a future refactor cannot silently
+//     change a 1-second cleanup loop into a different cadence.
+{
+  let configValues = {};
+  const fakeVscode = {
+    workspace: {
+      getConfiguration: (section) => ({
+        get: (key, fallback) => {
+          const full = `${section}.${key}`;
+          return Object.prototype.hasOwnProperty.call(configValues, full)
+            ? configValues[full]
+            : fallback;
+        },
+      }),
+    },
+  };
+  const intervalFactory = new Function(
+    "vscode",
+    "DEFAULT_BACKUP_DIR",
+    `${stripTypes(extractFunction("finiteNumberOr"))}
+     ${stripTypes(extractFunction("nonEmptyStringOr"))}
+     ${stripTypes(extractFunction("durationToSeconds"))}
+     ${stripTypes(extractFunction("getDuration"))}
+     ${stripTypes(extractFunction("getInterval"))}
+     ${stripTypes(extractFunction("getConfig"))}
+     return { getConfig, getInterval };`,
+  );
+  const { getConfig, getInterval } = intervalFactory(fakeVscode, "/tmp/fallback-dir");
+  configValues = { "bufferBackup.ageCleanupIntervalSeconds": -3600 };
+  assert.strictEqual(getInterval("ageCleanupIntervalSeconds"), 1000, "negative interval must clamp to the documented 1s minimum");
+  assert.strictEqual(getConfig().ageCleanupMs, 1000, "getConfig must carry the 1s-minimum interval for a negative value");
+  configValues = { "bufferBackup.ageCleanupIntervalSeconds": -5 };
+  assert.strictEqual(getInterval("ageCleanupIntervalSeconds"), 1000, "a small negative interval must also clamp to 1000 ms");
+  configValues = { "bufferBackup.ageCleanupIntervalSeconds": 0.5 };
+  assert.strictEqual(getInterval("ageCleanupIntervalSeconds"), 1000, "fractional sub-1 interval must clamp to the documented 1s minimum");
+  assert.strictEqual(getConfig().ageCleanupMs, 1000, "getConfig must carry the 1s-minimum interval for a fractional value");
+  configValues = { "bufferBackup.ageCleanupIntervalSeconds": 1 };
+  assert.strictEqual(getInterval("ageCleanupIntervalSeconds"), 1000, "an interval of exactly 1s is unchanged");
+  configValues = { "bufferBackup.ageCleanupIntervalSeconds": 1.5 };
+  assert.strictEqual(getInterval("ageCleanupIntervalSeconds"), 1500, "a fractional interval above the minimum passes through unchanged");
+  console.log("pass: getInterval pins negative and fractional sub-1 intervals to the 1s minimum (#1629)");
+}
+
 console.log("cleanup-count.test.mjs: all assertions passed");

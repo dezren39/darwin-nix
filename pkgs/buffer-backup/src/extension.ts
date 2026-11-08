@@ -159,8 +159,10 @@ function getDuration(section: string): number {
   // the sum below — days=1 with hours=-25 summed to -3600, and
   // cleanupAge reads maxAgeSec <= 0 as "disabled", so the configured
   // retention silently never ran.
+  // Components are integer-declared; floor finite fractional edits as
+  // well as keeping negative values at their documented 0 default.
   const component = (key: string): number =>
-    Math.max(0, finiteNumberOr(c.get(key, 0), 0));
+    Math.floor(Math.max(0, finiteNumberOr(c.get(key, 0), 0)));
   return durationToSeconds({
     years: component("years"),
     months: component("months"),
@@ -203,12 +205,15 @@ function getConfig(): Config {
     maxAgeSec: getDuration("bufferBackup.maxAge"),
     maxTotalMb: finiteNumberOr(c.get("maxTotalMb", 0), 0),
     rolloutMb: finiteNumberOr(c.get("rolloutMb", 0), 0),
-    maxFileCount: finiteNumberOr(c.get("maxFileCount", 0), 0),
-    rolloutFileCount: finiteNumberOr(c.get("rolloutFileCount", 0), 0),
+    // File counts are integer-declared; don't let fractions alter the
+    // cleanup threshold or count as part of a rollout.
+    maxFileCount: Math.floor(finiteNumberOr(c.get("maxFileCount", 0), 0)),
+    rolloutFileCount: Math.floor(finiteNumberOr(c.get("rolloutFileCount", 0), 0)),
     // Clamp to the timer-safe range [0, 2^31-1] (#1594): Node
     // collapses a negative or overflowing setTimeout delay to
-    // ~1 ms, which would defeat the debounce entirely.
-    debounceMs: Math.min(Math.max(0, finiteNumberOr(c.get("debounceMs", 3000), 3000)), 2147483647),
+    // ~1 ms, which would defeat the debounce entirely. Floor schema-
+    // violating fractions to the integer milliseconds the setting declares.
+    debounceMs: Math.min(Math.max(0, Math.floor(finiteNumberOr(c.get("debounceMs", 3000), 3000))), 2147483647),
     ageCleanupMs: getInterval("ageCleanupIntervalSeconds"),
     sizeCleanupMs: getInterval("sizeCleanupIntervalSeconds"),
     countCleanupMs: getInterval("countCleanupIntervalSeconds"),

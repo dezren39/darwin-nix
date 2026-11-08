@@ -235,20 +235,21 @@ is_numeric() { case "$1" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
 
 build_name_expr PRUNE_EXPR "${ALL_ARTIFACT_NAMES[@]}"
 
-# ONE traversal produces both results. The walk already has to stop at every
-# artifact directory (so a vendored node_modules/*/.git is not mistaken for a
-# repo); printing at that -prune costs nothing and removes the need for the
-# separate artifact find that used to re-walk the whole tree.
+# Two find passes: a candidate pass identifies bare repos from their objects
+# directories, then a discovery pass prints artifact directories and every
+# other directory and the read loop in scan_deep classifies the stream
+# against the candidate list. Checking every directory with find -exec would
+# launch a shell once per dir; the candidate pass only runs the shape checks
+# for directories named objects. Bare candidates are matched in the loop,
+# never in find's argument list, whose size the OS caps.
 #
-#   \( artifacts \) -prune -print                         -> artifact; do not descend
-#   -o \( bare repo shape \) -prune -print              -> bare repo; do not descend
-#   -o -name .git -print                                   -> repo/worktree marker
-#
-# Bare-repo shape matches is_bare_repo(). Its object store must not be walked.
-# .git directories are excluded from that prune and handled by the marker branch
-# below, so find still walks their contents. .worktrees are deliberately NOT
-# pruned: tools stash worktrees inside them.
+# The candidate pass looks one level deeper than --depth because a bare repo
+# at depth N has its objects directory at depth N+1. Artifact directories stay
+# pruned in both passes.
 ARTIFACTS_FILE="$(mktemp)"
+BARE_CANDIDATES_FILE="$(mktemp)"
+
+
 scan_deep() {
   [ -d "$1" ] || return 0
   # A failed find enumeration (e.g. an unreadable subdirectory) must not be
@@ -259,45 +260,168 @@ scan_deep() {
   # seed_path turns the status into the script's exit status. --auto is
   # best-effort by design, so seed_auto ignores the status and the
   # failure stays quiet there.
-  local status_file stderr_file find_status
+  local candidate_status_file candidate_stderr_file
+  local status_file stderr_file find_status bare_maxdepth
+  local hits_file candidate_list filtered_file err_line err_path cand_path keep
+  # shellcheck disable=SC2016
+  local bare_candidate_probe='
+parent="${1%/objects}"
+case "${parent##*/}" in
+  .git|.worktrees) exit 0 ;;
+esac
+case "$parent" in
+  */.git/modules/*) exit 0 ;;
+esac
+if [ -d "$1" ] && [ -f "$parent/HEAD" ] && [ -d "$parent/refs" ]; then
+  printf "%s\n" "$parent" >> "$2"
+else
+  exit 1
+fi
+'
+  local -a bare_depth_args=()
+  : > "$BARE_CANDIDATES_FILE"
+  if [ -n "$DEPTH_LIMIT" ]; then
+    if [ "$DEPTH_LIMIT" -lt 2147483647 ]; then
+      bare_maxdepth=$((DEPTH_LIMIT + 1))
+    else
+      # The deepest representable limit cannot have an additional child level
+      # on supported find implementations; avoid overflowing their depth type.
+      bare_maxdepth="$DEPTH_LIMIT"
+    fi
+    bare_depth_args=(-maxdepth "$bare_maxdepth")
+  fi
+
+  # Candidate pass (best-effort): probe only directories named objects. This
+  # pass walks one level deeper than the discovery pass and enters bare-repo
+  # interiors the old -exec implementation pruned at the bare root, so its
+  # own failures must never fail the scan — a directory it cannot read that
+  # the discovery pass also traverses is reported by the discovery pass, and
+  # the rest were never reported before. Status and stderr are discarded.
+  candidate_status_file="$(mktemp)"
+  candidate_stderr_file="$(mktemp)"
+  outcome_enumerate "$candidate_status_file" "$candidate_stderr_file" -- \
+    find -H "$1" "${bare_depth_args[@]}" \
+      \( "${PRUNE_EXPR[@]}" \) -prune -o \
+      \( -name objects -exec sh -c "$bare_candidate_probe" sh {} "$BARE_CANDIDATES_FILE" \; \) -prune
+  rm -f "$candidate_status_file" "$candidate_stderr_file"
+
+  candidate_list="$(mktemp)"
+  LC_ALL=C sort -u "$BARE_CANDIDATES_FILE" > "$candidate_list"
+
+  # Discovery pass: print artifact directories (pruned, as before) and every
+  # other directory, plus .git files (worktree markers). Bare candidates are
+  # classified in the read loop below, never in find's argument list — an
+  # argument per candidate exceeds the OS argument-size limit on scans with
+  # many bare repos and takes the whole scan down with it.
+  hits_file="$(mktemp)"
   status_file="$(mktemp)"
   stderr_file="$(mktemp)"
   outcome_enumerate "$status_file" "$stderr_file" -- \
     find -H "$1" "${DEPTH_ARGS[@]}" \
       \( "${PRUNE_EXPR[@]}" \) -prune -print -o \
-      \( -type d ! -name .git -exec sh -c "[ -f \"\$1/HEAD\" ] && [ -d \"\$1/objects\" ] && [ -d \"\$1/refs\" ]" sh {} \; \) -prune -print -o \
-      -name .git -print |
-    while IFS= read -r hit; do
-      # Fast parameter expansion avoids subshell execution of basename in discovery loop
-      case "${hit##*/}" in
-        .git) printf '%s\n' "${hit%/.git}" ;;
-        *)
-          if is_bare_repo "$hit"; then
-            printf '%s\n' "$hit"
-          else
-            printf '%s\n' "$hit" >> "$ARTIFACTS_FILE"
-          fi
-          ;;
+      -type d -print -o \
+      -name .git -print > "$hits_file"
+
+  # Classify the sorted hit stream against the sorted candidate list (both
+  # LC_ALL=C, so the cursor comparisons match the sort order). Output order
+  # does not matter here: every consumer of scan output sorts it. A hit
+  # beneath an emitted bare root is interior and dropped — the old find
+  # pruned bare roots, so nothing beneath them was ever reported.
+  (
+    LC_ALL=C
+    cand="" hit="" base="" root=""
+    declare -a bare_roots=()
+    exec 3< "$candidate_list"
+    IFS= read -r cand <&3 || cand=""
+    LC_ALL=C sort -u "$hits_file" | while IFS= read -r hit; do
+      while [ -n "$cand" ] && [[ "$cand" < "$hit" ]]; do
+        IFS= read -r cand <&3 || cand=""
+      done
+      # Drop bare roots whose subtree is exhausted: every descendant of a
+      # root R sorts below R0 (the '/' separator incremented), so once the
+      # stream passes that bound no later hit can be interior to R. Siblings
+      # such as a.git-other sort between a root and its descendants, so a
+      # single last-root variable is not enough — keep the open set.
+      open=()
+      for root in "${bare_roots[@]}"; do
+        [[ "$hit" < "${root}0" ]] && open+=("$root")
+      done
+      bare_roots=("${open[@]}")
+      for root in "${bare_roots[@]}"; do
+        case "$hit" in "$root"/*) continue 2 ;; esac
+      done
+      base="${hit##*/}"
+      if [ "$base" = ".git" ]; then
+        printf '%s\n' "${hit%/.git}"
+        continue
+      fi
+      if [ "$hit" = "$cand" ]; then
+        printf '%s\n' "$hit"
+        bare_roots+=("$hit")
+        IFS= read -r cand <&3 || cand=""
+        continue
+      fi
+      # The pre-candidate loop re-checked every hit with is_bare_repo; that
+      # is what reported bare repos the candidate search cannot see
+      # (artifact-named roots the passes prune, roots under .git/modules).
+      # Three builtin tests per directory is still far cheaper than the old
+      # shell launch per directory.
+      if is_bare_repo "$hit"; then
+        printf '%s\n' "$hit"
+        bare_roots+=("$hit")
+        continue
+      fi
+      case " ${ALL_ARTIFACT_NAMES[*]} " in
+        *" $base "*) printf '%s\n' "$hit" >> "$ARTIFACTS_FILE"; continue ;;
       esac
     done
+    exec 3<&-
+  )
+
   find_status=0
   IFS= read -r find_status < "$status_file" || find_status=0
   if [ "$find_status" -ne 0 ]; then
-    if [ "$MODE" = "path" ]; then
-      cat "$stderr_file" >&2
-      echo "git-discover-repos: failed to enumerate: $1" >&2
+    # The discovery find also descended into bare-repo interiors (it cannot
+    # prune them without the unbounded argument list above), where the old
+    # implementation never went. Drop error lines naming a bare candidate
+    # path; fail only if a genuine discovery error remains.
+    filtered_file="$(mktemp)"
+    while IFS= read -r err_line; do
+      keep=1
+      # Extract the pathname find is complaining about ("find: <path>: …",
+      # optionally quoted) and drop the line only when that path is a bare
+      # candidate or beneath one — a substring match would also silence
+      # siblings such as a.git-locked next to a bare a.git.
+      err_path="${err_line#find: }"
+      err_path="${err_path#\'}"
+      err_path="${err_path#‘}"
+      err_path="${err_path%%: *}"
+      err_path="${err_path%\'}"
+      err_path="${err_path%’}"
+      while IFS= read -r cand_path; do
+        if [ "$err_path" = "$cand_path" ]; then keep=0; break; fi
+        case "$err_path" in "$cand_path"/*) keep=0; break ;; esac
+      done < "$candidate_list"
+      [ "$keep" = "1" ] && printf '%s\n' "$err_line" >> "$filtered_file"
+    done < "$stderr_file"
+    if [ -s "$filtered_file" ]; then
+      if [ "$MODE" = "path" ]; then
+        cat "$filtered_file" >&2
+        echo "git-discover-repos: failed to enumerate: $1" >&2
+      fi
+      rm -f "$status_file" "$stderr_file" "$hits_file" "$candidate_list" "$filtered_file"
+      return 1
     fi
-    rm -f "$status_file" "$stderr_file"
-    return 1
+    rm -f "$filtered_file"
   fi
-  rm -f "$status_file" "$stderr_file"
+  rm -f "$status_file" "$stderr_file" "$hits_file" "$candidate_list"
   return 0
 }
 
 SEEN_FILE="$(mktemp)"
 OUT_FILE="$(mktemp)"
 QUEUE_FILE="$(mktemp)"
-trap 'rm -f "$SEEN_FILE" "$OUT_FILE" "$QUEUE_FILE" "$ARTIFACTS_FILE"' EXIT
+trap 'rm -f "$SEEN_FILE" "$OUT_FILE" "$QUEUE_FILE" "$ARTIFACTS_FILE" "$BARE_CANDIDATES_FILE"' EXIT
 
 seen() { grep -qxF "$1" "$SEEN_FILE" 2>/dev/null; }
 mark_seen() { printf '%s\n' "$1" >> "$SEEN_FILE"; }

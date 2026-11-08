@@ -1094,6 +1094,31 @@ rec {
               python3 ./mcp-clients.test.py
               touch $out
             '';
+        # #1648: pkgs/service-events/monitor.test.py — the direct-import
+        # probes for monitor.py's launchctl/ps parsers (the #1613
+        # Unicode-digit pid regression and the #1643 rotate symlink
+        # guard) — was run by nothing: the service-events package build
+        # copies only event.py and monitor.py and stubs launchd_jobs
+        # out of its own tick scenarios, and no check or workflow named
+        # the test file, so those regressions could recur with every
+        # automated check green. The test inserts its own directory
+        # into sys.path and imports monitor (which imports event), so
+        # copy the three files in their package layout.
+        service-events-tests =
+          pkgs.runCommandLocal "service-events-tests"
+            {
+              nativeBuildInputs = [ pkgs.python3 ];
+            }
+            ''
+              mkdir -p pkgs/service-events
+              cp ${./pkgs/service-events/event.py} pkgs/service-events/event.py
+              cp ${./pkgs/service-events/monitor.py} pkgs/service-events/monitor.py
+              cp ${./pkgs/service-events/monitor.test.py} pkgs/service-events/monitor.test.py
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              python3 pkgs/service-events/monitor.test.py
+              touch $out
+            '';
         # #1449: exercise the actual home-manager activation wrapper and
         # mcp-clients.py with a scratch HOME and a service-event stub. A
         # partial enforcement must be durably reported without blocking the

@@ -722,5 +722,76 @@ gate_colors() (
 [ -z "$(NO_COLOR=1 gate_colors 2>/dev/null)" ] || fail "color gate: NO_COLOR=1 still sets warn/info colors"
 rm -rf "$GATE_DIR"
 
+# ─── #1610: mark_dir's symlinked-marker guard (#1586) ──────────────────
+# PR #1602 added the -L guard to mark_dir but no test: neither this suite
+# nor full-clean.test.sh ever exercised mark_dir, so the guard could be
+# dropped or reordered below the [ -e ] check and every suite would stay
+# green. Extract the real mark_dir (the brew_cleanup pattern above) plus
+# the real spotlight_mark it delegates to, and drive it with poisoned
+# markers. Oracle: per-directory filesystem state after the call --
+# clean.sh's own warning line, no write at the symlink target, the
+# marker still a symlink, MARKED not incremented -- plus a clean sibling
+# in the same run still marked. Mutation check (verified when written):
+# deleting the -L guard makes the live case silent (the [ -e ] shortcut
+# counts it as already present) and degrades the dangling case to
+# spotlight_mark's differently-worded warning, so both fail below.
+MD_DIR="$TMP_ROOT/mark-dir"
+mkdir -p "$MD_DIR/outside"
+sed -n '/^mark_dir() {/,/^}/p' "$SCRIPT" > "$MD_DIR/mark_dir.sh"
+[ -s "$MD_DIR/mark_dir.sh" ] || fail "could not extract mark_dir from clean.sh"
+grep -q 'cannot write.*(symlink; not followed)' "$MD_DIR/mark_dir.sh" \
+  || fail "extracted mark_dir has no symlinked-marker guard to test"
+sed -n '/^spotlight_mark() {/,/^}/p' "$SELF_DIR/lib/common.sh" > "$MD_DIR/spotlight_mark.sh"
+[ -s "$MD_DIR/spotlight_mark.sh" ] || fail "could not extract spotlight_mark from lib/common.sh"
+SPOTLIGHT_MARKER=".metadata_never_index"
+DRY_RUN=0
+CALLER_USER=""
+MARKED=0
+# shellcheck disable=SC1091
+. "$MD_DIR/spotlight_mark.sh"
+# shellcheck disable=SC1091
+. "$MD_DIR/mark_dir.sh"
+
+# Live symlink: marker points at an existing file outside the directory.
+MD_LIVE="$MD_DIR/live"
+mkdir -p "$MD_LIVE"
+printf 'outside\n' > "$MD_DIR/outside/live-target"
+ln -s "$MD_DIR/outside/live-target" "$MD_LIVE/$SPOTLIGHT_MARKER"
+mark_dir "$MD_LIVE" 2> "$MD_DIR/live.err"
+case "$(cat "$MD_DIR/live.err")" in
+  *"  warning: cannot write $MD_LIVE/$SPOTLIGHT_MARKER (symlink; not followed)"*)
+    echo "ok: mark_dir warns with its own line on a live symlinked marker" ;;
+  *) fail "mark_dir live symlinked marker: wrong stderr (got: $(cat "$MD_DIR/live.err"))" ;;
+esac
+[ -L "$MD_LIVE/$SPOTLIGHT_MARKER" ] || fail "mark_dir live case: marker is no longer a symlink"
+[ "$(cat "$MD_DIR/outside/live-target")" = "outside" ] \
+  || fail "mark_dir live case: symlink target was modified"
+
+# Dangling symlink: marker points at a path that does not exist, in a
+# writable directory -- a followed write would create it.
+MD_DANGLING="$MD_DIR/dangling"
+mkdir -p "$MD_DANGLING"
+ln -s "$MD_DIR/outside/dangling-target" "$MD_DANGLING/$SPOTLIGHT_MARKER"
+mark_dir "$MD_DANGLING" 2> "$MD_DIR/dangling.err"
+case "$(cat "$MD_DIR/dangling.err")" in
+  *"  warning: cannot write $MD_DANGLING/$SPOTLIGHT_MARKER (symlink; not followed)"*)
+    echo "ok: mark_dir warns with its own line on a dangling symlinked marker" ;;
+  *) fail "mark_dir dangling symlinked marker: wrong stderr (got: $(cat "$MD_DIR/dangling.err"))" ;;
+esac
+[ -L "$MD_DANGLING/$SPOTLIGHT_MARKER" ] || fail "mark_dir dangling case: marker is no longer a symlink"
+[ ! -e "$MD_DIR/outside/dangling-target" ] \
+  || fail "mark_dir dangling case: a file was created at the symlink target"
+
+# Clean sibling in the same run: still marked, and it is the ONLY one of
+# the three that increments MARKED.
+MD_CLEAN="$MD_DIR/clean"
+mkdir -p "$MD_CLEAN"
+mark_dir "$MD_CLEAN" 2> "$MD_DIR/clean.err"
+[ -f "$MD_CLEAN/$SPOTLIGHT_MARKER" ] && [ ! -L "$MD_CLEAN/$SPOTLIGHT_MARKER" ] \
+  || fail "mark_dir clean sibling: marker was not created as a regular file"
+[ "$MARKED" -eq 1 ] || fail "mark_dir marked $MARKED directories (want exactly 1: the clean sibling)"
+[ -s "$MD_DIR/clean.err" ] && fail "mark_dir clean sibling warned unexpectedly: $(cat "$MD_DIR/clean.err")"
+echo "ok: mark_dir skips both symlinked markers and marks the clean sibling"
+
 [ "$failures" -eq 0 ] || { echo "$failures failure(s)" >&2; exit 1; }
 echo "all clean.sh flag-shaped-value checks passed"

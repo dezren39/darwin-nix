@@ -938,13 +938,22 @@ for (const bad of [NaN, Infinity, -Infinity]) {
   const { langToExtension } = langFactory();
   assert.strictEqual(langToExtension("python"), ".py", "known id keeps its mapped extension (#1649)");
   assert.strictEqual(langToExtension("some-new-lang"), ".some-new-lang", "unknown plain id becomes its own extension (#1649)");
+  // #1721: prototype-named ids must take the sanitized fallback,
+  // never an inherited Object.prototype member.
+  for (const proto of ["toString", "constructor", "__proto__", "hasOwnProperty", "valueOf"]) {
+    const ext = langToExtension(proto);
+    assert.strictEqual(typeof ext, "string", `extension for ${proto} must be a string, got ${typeof ext} (#1721)`);
+    assert.strictEqual(ext, `.${proto.replace(/[^a-zA-Z0-9-]/g, "_")}`, `prototype-named id ${proto} must take the sanitized fallback (#1721)`);
+    const composed = path.join("/backups", "2026-01-01", `untitled_X_2026-01-01T00-00-00-000Z${ext}`);
+    assert.strictEqual(path.dirname(composed), path.join("/backups", "2026-01-01"), `composed backup path for ${proto} must stay in the day dir (#1721)`);
+  }
   for (const bad of ["a/b", "../evil", "../../../evil", "a\\b", "..", ".", ""]) {
     const ext = langToExtension(bad);
     assert.ok(!ext.includes("/") && !ext.includes("\\"), `extension for ${JSON.stringify(bad)} must not contain a path separator, got ${ext}`);
     const composed = path.join("/backups", "2026-01-01", `untitled_X_2026-01-01T00-00-00-000Z${ext}`);
     assert.strictEqual(path.dirname(composed), path.join("/backups", "2026-01-01"), `composed backup path for ${JSON.stringify(bad)} must stay in the day dir, got ${composed}`);
   }
-  console.log("pass: langToExtension fallback is separator-safe; composed backup path stays in the day dir (#1649)");
+  console.log("pass: langToExtension fallback is separator-safe and prototype-safe; composed backup path stays in the day dir (#1649, #1721)");
 }
 
 // 32. Symlinked day-directory swapped in after the pre-check (#1709):

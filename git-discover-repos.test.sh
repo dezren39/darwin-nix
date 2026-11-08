@@ -664,6 +664,24 @@ run --path "$COUNT_SCAN" --find trash
 [ "$STATUS" -eq 0 ] || fail "--find trash alone exited $STATUS (#1590)"
 case "$OUT" in *"FOUND"$'\t'"trash"*) echo "ok: --find alone still emits FOUND records" ;; *) fail "--find alone lost its FOUND record (got: $OUT) (#1590)" ;; esac
 
+# ─── --status without --find is judged, not silently ignored (#1657) ───
+# --status only annotates --find hits (status_for runs solely from the
+# find sweep), so without --find the flag was never read: the run exited
+# 0 with output byte-identical to not asking. The pair is now judged
+# after parsing (exit 2, both flags named) in either order; the paired
+# form keeps its real status column and the unpaired find keeps "-".
+run --path "$COUNT_SCAN" --status
+[ "$STATUS" -eq 2 ] || fail "--status without --find exited $STATUS (want 2) (#1657)"
+case "$ERR" in *"git-discover-repos: --status requires --find"*) echo "ok: --status without --find rejected, both flags named" ;; *) fail "--status without --find was not named on stderr (got: $ERR) (#1657)" ;; esac
+[ -z "$OUT" ] || fail "--status without --find printed stdout: $OUT (#1657)"
+
+run --path "$COUNT_SCAN" --find trash
+case "$OUT" in *"FOUND"$'\t'"trash"$'\t'"-"$'\t'*) echo "ok: --find without --status keeps the '-' status field" ;; *) fail "--find without --status lost the '-' status field (got: $OUT) (#1657)" ;; esac
+
+run --path "$COUNT_SCAN" --find trash --status
+[ "$STATUS" -eq 0 ] || fail "--find trash --status exited $STATUS (#1657)"
+case "$OUT" in *"FOUND"$'\t'"trash"$'\t'"-"$'\t'*) fail "--find trash --status kept the '-' status field (got: $OUT) (#1657)" ;; *"FOUND"$'\t'"trash"$'\t'*) echo "ok: --find with --status emits a real status field" ;; *) fail "--find trash --status lost its FOUND record (got: $OUT) (#1657)" ;; esac
+
 # ─── --count with --no-bare / --follow is pinned (#1628) ───────────
 # The count section above pins the record filters, but two flags the
 # count branch does not implement itself went untested: --no-bare is
@@ -778,6 +796,10 @@ probe_rejected "git-discover-repos: --count and --print0 may not be combined" --
 probe_rejected "git-discover-repos: --count and --print0 may not be combined" --path "$VALID" --dry-run --print0 --count
 probe_accepted --path "$VALID" --dry-run --paths-only
 probe_accepted --path "$VALID" --dry-run --print0
+probe_rejected "git-discover-repos: --status requires --find" --path "$VALID" --dry-run --status
+probe_rejected "git-discover-repos: --status requires --find" --status --dry-run
+probe_accepted --path "$VALID" --dry-run --find trash --status
+probe_accepted --path "$VALID" --dry-run --status --find trash
 probe_accepted --path "$VALID" --dry-run --depth 08
 
 [ "$failures" -eq 0 ] || { echo "$failures failure(s)" >&2; exit 1; }

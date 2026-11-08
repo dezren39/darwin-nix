@@ -101,7 +101,11 @@ def launchd_jobs():
             continue
         pid, status, label = parts
         if label in LABELS or label.startswith(LABEL_PREFIXES):
-            jobs[label] = (int(pid) if pid.isdigit() else None, status)
+            # #1613: isascii() first, as in processes() below -- a bare
+            # isdigit() is also true for Unicode digits int() rejects
+            # (superscript/subscript digits, the #935 class), and the
+            # ValueError aborted every monitor tick.
+            jobs[label] = (int(pid) if pid.isascii() and pid.isdigit() else None, status)
     return jobs
 
 

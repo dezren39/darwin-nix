@@ -792,4 +792,47 @@ for (const bad of [NaN, Infinity, -Infinity]) {
   console.log("pass: getInterval pins negative and fractional sub-1 intervals to the 1s minimum (#1629)");
 }
 
+// 28. Huge-but-finite maxAge component (#1627): duration conversion
+//     saturates at a finite 8e12-second cap whose millisecond value is
+//     still finite. That retention is effectively non-expiring for real
+//     backup timestamps, so cleanupAge must leave every backup intact.
+{
+  let configValues = {};
+  const fakeVscode = {
+    workspace: {
+      getConfiguration: (section) => ({
+        get: (key, fallback) => {
+          const full = `${section}.${key}`;
+          return Object.prototype.hasOwnProperty.call(configValues, full)
+            ? configValues[full]
+            : fallback;
+        },
+      }),
+    },
+  };
+  const configFactory = new Function(
+    "vscode",
+    "DEFAULT_BACKUP_DIR",
+    `${stripTypes(extractFunction("finiteNumberOr"))}
+     ${stripTypes(extractFunction("nonEmptyStringOr"))}
+     ${stripTypes(extractFunction("durationToSeconds"))}
+     ${stripTypes(extractFunction("getDuration"))}
+     ${stripTypes(extractFunction("getInterval"))}
+     ${stripTypes(extractFunction("getConfig"))}
+     return { getConfig };`,
+  );
+  const { getConfig } = configFactory(fakeVscode, "/tmp/fallback-dir");
+  configValues = { "bufferBackup.maxAge.years": 1e303 };
+  const maxAgeSec = getConfig().maxAgeSec;
+  assert.ok(Number.isFinite(maxAgeSec), `maxAgeSec must be finite, got ${maxAgeSec}`);
+  assert.strictEqual(maxAgeSec, 8_000_000_000_000, "overflowing duration must saturate at the documented cap");
+  assert.ok(Number.isFinite(Date.now() - maxAgeSec * 1000), "the age cutoff must remain finite");
+
+  const dir = fixture(5);
+  cleanupAge({ backupDir: dir, maxAgeSec });
+  assert.deepStrictEqual(remainingNames(dir), ["f00.txt", "f01.txt", "f02.txt", "f03.txt", "f04.txt"]);
+  fs.rmSync(dir, { recursive: true, force: true });
+  console.log("pass: huge-but-finite maxAge saturates and keeps real backups (#1627)");
+}
+
 console.log("cleanup-count.test.mjs: all assertions passed");

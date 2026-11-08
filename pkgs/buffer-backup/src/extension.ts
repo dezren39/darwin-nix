@@ -120,14 +120,28 @@ interface Duration {
 }
 
 function durationToSeconds(d: Duration): number {
-  return (
-    d.years * 365 * 86400 +
-    d.months * 30 * 86400 +
-    d.days * 86400 +
-    d.hours * 3600 +
-    d.minutes * 60 +
-    d.seconds
-  );
+  // Keep both maxAgeSec and cleanupAge's milliseconds/cutoff arithmetic
+  // finite. At this cap (about 253,000 years), even multiplying by 1000
+  // stays below JavaScript Date's representable range; larger configured
+  // durations saturate and therefore do not expire real backup timestamps.
+  const maxSeconds = 8_000_000_000_000;
+  const components = [
+    [d.years, 365 * 86400],
+    [d.months, 30 * 86400],
+    [d.days, 86400],
+    [d.hours, 3600],
+    [d.minutes, 60],
+    [d.seconds, 1],
+  ];
+  let total = 0;
+  for (const [value, secondsPerUnit] of components) {
+    const safeValue = Number.isFinite(value) ? Math.max(0, value) : 0;
+    if (safeValue > (maxSeconds - total) / secondsPerUnit) {
+      return maxSeconds;
+    }
+    total += safeValue * secondsPerUnit;
+  }
+  return total;
 }
 
 // VS Code returns a hand-edited settings.json value verbatim even when

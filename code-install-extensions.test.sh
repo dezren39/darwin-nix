@@ -189,12 +189,21 @@ else
   : >"$TXT_LIST"
 fi
 
+# lists_agree <list-a> <list-b> <diff-file>: the one list-diff the
+# drift check is built on. Returns diff status (0 = the lists agree)
+# and leaves the unified diff in <diff-file> for the caller to quote.
+# check_copy and the mutation cases below both go through this, so a
+# broken diff cannot pass the mutation cases silently (#1740).
+lists_agree() { # lists_agree <list-a> <list-b> <diff-file>
+  diff -u "$1" "$2" >"$3"
+}
+
 check_copy() { # check_copy <label> <list-file>
   if [ ! -f "$2" ] && [ "$1" != "script" ]; then
     fail "drift: $1 list file is missing"
     return
   fi
-  if diff -u "$SCRIPT_LIST" "$2" >"$TMP_ROOT/drift-$1.diff"; then
+  if lists_agree "$SCRIPT_LIST" "$2" "$TMP_ROOT/drift-$1.diff"; then
     ok "drift: $1 list matches the script's list ($(wc -l <"$2" | tr -d ' ') entries, set and order)"
   else
     fail "drift: $1 list differs from the script's list (lines starting - are only in the script, + only in $1): $(grep '^[+-]' "$TMP_ROOT/drift-$1.diff" | grep -v '^[+-][+-]' | tr '\n' ' ')"
@@ -204,6 +213,28 @@ check_copy() { # check_copy <label> <list-file>
 [ -f "$SELF_DIR/vsc-extensions.txt" ] || fail "drift: vsc-extensions.txt is missing next to the test (it is one of the three copies of the list)"
 check_copy "config.toml" "$CONFIG_LIST"
 check_copy "vsc-extensions.txt" "$TXT_LIST"
+
+# --- The drift check detects a mutated copy (#1740) ----------------
+# One mutation per copy of the list: append queue.test-drift to a
+# mutated copy and assert the same lists_agree diff check_copy uses
+# refuses it and names queue.test-drift. Detection is the success
+# case here, so it must not increment the suite failure count.
+check_mutation() { # check_mutation <label> <list-file>
+  mut="$TMP_ROOT/mutant-$1.txt"
+  mut_diff="$TMP_ROOT/mutant-$1.diff"
+  cp "$2" "$mut"
+  echo "queue.test-drift" >>"$mut"
+  if lists_agree "$SCRIPT_LIST" "$mut" "$mut_diff"; then
+    fail "drift mutation: $1 list with queue.test-drift appended was not detected"
+  elif grep -q "queue.test-drift" "$mut_diff"; then
+    ok "drift mutation: $1 list with queue.test-drift appended is detected and names queue.test-drift"
+  else
+    fail "drift mutation: $1 drift was detected but the diff does not name queue.test-drift"
+  fi
+}
+check_mutation "script" "$SCRIPT_LIST"
+check_mutation "config.toml" "$CONFIG_LIST"
+check_mutation "vsc-extensions.txt" "$TXT_LIST"
 
 if [ "$failures" -gt 0 ]; then
   echo "$failures code-install-extensions check(s) failed" >&2

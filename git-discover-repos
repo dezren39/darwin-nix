@@ -100,7 +100,9 @@ OTHER
   --count             Print only a summary count, of the records the
                       chosen filter would print. May not be combined
                       with --find (the sweep's FOUND records are not
-                      counted; the pair is rejected at parse time).
+                      counted), --paths-only, or --print0 (the count
+                      line has no record shape for them to shape);
+                      those pairs are rejected at parse time.
   --dry-run           Describe the plan, discover nothing.
   -h, --help          This help
 
@@ -142,6 +144,8 @@ AUTO_SET=0
 PATH_SET=0
 BARE_ONLY_SET=0
 NO_BARE_SET=0
+PATHS_ONLY_SET=0
+PRINT0_SET=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -156,13 +160,13 @@ while [ $# -gt 0 ]; do
     --worktrees-only) { [ -z "$FILTER_FLAG" ] || arg_die "$1 may not be combined with $FILTER_FLAG (only one filter option may be given)"; FILTER="worktrees"; FILTER_FLAG="$1"; } ;;
     --both)           { [ -z "$FILTER_FLAG" ] || arg_die "$1 may not be combined with $FILTER_FLAG (only one filter option may be given)"; FILTER="both"; FILTER_FLAG="$1"; } ;;
     --bare-only)      { arg_conflict --bare-only --no-bare "$NO_BARE_SET"; [ -z "$FILTER_FLAG" ] || arg_die "$1 may not be combined with $FILTER_FLAG (only one filter option may be given)"; FILTER="bare"; FILTER_FLAG="$1"; BARE_ONLY_SET=1; } ;;
-    --paths-only)     PATHS_ONLY=1 ;;
+    --paths-only)     { arg_conflict --count --paths-only "$COUNT_ONLY"; PATHS_ONLY=1; PATHS_ONLY_SET=1; } ;;
     --no-bare)        { arg_conflict --bare-only --no-bare "$BARE_ONLY_SET"; INCLUDE_BARE=0; NO_BARE_SET=1; } ;;
     --find)           { arg_require_value "$1" "${2:-}"; arg_conflict --count --find "$COUNT_ONLY"; arg_once "$1" FIND_SET; FIND_SPEC="$2"; shift; } ;;
     --status)         WANT_STATUS=1 ;;
     --user)           { arg_require_value "$1" "${2:-}"; arg_once "$1" USER_SET; TARGET_USER="$2"; shift; } ;;
-    --print0)         PRINT0=1 ;;
-    --count)          { arg_conflict --count --find "$FIND_SET"; COUNT_ONLY=1; } ;;
+    --print0)         { arg_conflict --count --print0 "$COUNT_ONLY"; PRINT0=1; PRINT0_SET=1; } ;;
+    --count)          { arg_conflict --count --find "$FIND_SET"; arg_conflict --count --paths-only "$PATHS_ONLY_SET"; arg_conflict --count --print0 "$PRINT0_SET"; COUNT_ONLY=1; } ;;
     --dry-run)        DRY_RUN=1 ;;
     -h|--help)        usage; exit 0 ;;
     -*)               echo "unknown option: $1" >&2; usage >&2; exit 2 ;;

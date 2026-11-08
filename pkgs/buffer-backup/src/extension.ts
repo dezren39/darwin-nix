@@ -666,7 +666,19 @@ function getFirstLine(text: string): string {
   for (const line of lines) {
     const trimmed = line.trim();
     if (trimmed.length > 0) {
-      return trimmed.length > 120 ? trimmed.slice(0, 120) + "..." : trimmed;
+      if (trimmed.length <= 120) return trimmed;
+      // #1735: a raw slice(0, 120) can split a surrogate pair straddling
+      // the cut, leaving a lone high surrogate that JSON.stringify then
+      // persists into the backup meta line. Back off one code unit when
+      // the cut would split a pair, so the pre-ellipsis text never ends
+      // in a lone surrogate.
+      let cut = 120;
+      const last = trimmed.charCodeAt(cut - 1);
+      if (last >= 0xd800 && last <= 0xdbff) {
+        const next = trimmed.charCodeAt(cut);
+        if (next >= 0xdc00 && next <= 0xdfff) cut -= 1;
+      }
+      return trimmed.slice(0, cut) + "...";
     }
   }
   return "";

@@ -626,6 +626,46 @@ case "$OUT" in "repos=1 worktrees=0 total=1") echo "ok: --follow --count still p
 case "$ERR" in *"failed to list worktrees for: $FOLLOWED_CANON/repo"*) echo "ok: follow failure under --count named on stderr" ;; *) fail "follow failure under --count not named on stderr (got: $ERR) (#1628)" ;; esac
 rm -f "$git_shim_dir/git"
 
+# ─── --count + --paths-only / --print0 rejected; shaping alone works (#1625) ───
+# PR #1614 judged --count + --find at parse time but not the two
+# output-shaping flags: both pairs were silently accepted and the
+# shaping flag never consulted (the count branch bypasses the emit
+# pipeline), so a --paths-only consumer piping into xargs received
+# the summary line as if it were a path, and --print0 got a
+# newline-terminated line. The pairs now get the same parse-time
+# rejection as --count + --find, in both orders, including --dry-run.
+for pair in "--paths-only --count" "--count --paths-only" "--dry-run --paths-only --count" "--dry-run --count --paths-only" "--print0 --count" "--count --print0" "--dry-run --print0 --count" "--dry-run --count --print0"; do
+  # shellcheck disable=SC2086
+  run --path "$COUNT_SCAN" $pair
+  [ "$STATUS" -eq 2 ] || fail "--count shaping pair '$pair' exited $STATUS (want 2) (#1625)"
+  case "$pair" in
+    *paths-only*) want="git-discover-repos: --count and --paths-only may not be combined" ;;
+    *) want="git-discover-repos: --count and --print0 may not be combined" ;;
+  esac
+  case "$ERR" in
+    *"$want"*) echo "ok: pair '$pair' rejected as a conflict" ;;
+    *) fail "pair '$pair' was not named as a conflict on stderr (got: $ERR) (#1625)" ;;
+  esac
+  [ -z "$OUT" ] || fail "pair '$pair' printed stdout: $OUT (#1625)"
+done
+
+# The shaping flags alone still work as documented: --paths-only
+# prints bare canonical paths with no TYPE column, and --print0
+# NUL-separates the same records.
+COUNT_SCAN_CANON="$(cd "$COUNT_SCAN" && pwd -P)"
+run --path "$COUNT_SCAN" --paths-only
+[ "$STATUS" -eq 0 ] || fail "--paths-only alone exited $STATUS (#1625)"
+paths_only_sorted="$(printf '%s\n' "$OUT" | sort)"
+expected_paths="$(printf '%s\n' "$COUNT_SCAN_CANON/mainrepo" "$COUNT_SCAN_CANON/wt1" "$COUNT_SCAN_CANON/bare.git" | sort)"
+[ "$paths_only_sorted" = "$expected_paths" ] || fail "--paths-only alone printed unexpected records (got: $OUT) (#1625)"
+case "$OUT" in *$'\t'*) fail "--paths-only alone kept a TYPE column (got: $OUT) (#1625)" ;; *) echo "ok: --paths-only alone prints bare paths" ;; esac
+bash "$SCRIPT" --path "$COUNT_SCAN" --print0 > "$TMP_ROOT/print0.out" 2> "$TMP_ROOT/print0.err"
+print0_sorted="$(tr '\0' '\n' < "$TMP_ROOT/print0.out" | grep -v '^$' | sort)"
+expected_print0="$(printf 'repo\t%s\nworktree\t%s\nrepo\t%s\n' "$COUNT_SCAN_CANON/mainrepo" "$COUNT_SCAN_CANON/wt1" "$COUNT_SCAN_CANON/bare.git" | sort)"
+[ "$print0_sorted" = "$expected_print0" ] || fail "--print0 alone printed unexpected records (got: $(tr '\0' '\n' < "$TMP_ROOT/print0.out")) (#1625)"
+od -An -c "$TMP_ROOT/print0.out" | grep -q '\\0' || fail "--print0 alone emitted no NUL separators (#1625)"
+echo "ok: --print0 alone NUL-separates the same records"
+
 # ─── Shared conformance probe matrix (#1146, design #1145) ─────────
 # The matrix rows for git-discover-repos, driven through
 # lib/arg-probe.sh (the same helper every discovery suite uses):
@@ -655,6 +695,12 @@ for bad in abc 0 2147483648 99999999999999999999999999; do
 done
 probe_rejected "git-discover-repos: --count and --find may not be combined" --path "$VALID" --dry-run --count --find trash
 probe_rejected "git-discover-repos: --count and --find may not be combined" --path "$VALID" --dry-run --find trash --count
+probe_rejected "git-discover-repos: --count and --paths-only may not be combined" --path "$VALID" --dry-run --count --paths-only
+probe_rejected "git-discover-repos: --count and --paths-only may not be combined" --path "$VALID" --dry-run --paths-only --count
+probe_rejected "git-discover-repos: --count and --print0 may not be combined" --path "$VALID" --dry-run --count --print0
+probe_rejected "git-discover-repos: --count and --print0 may not be combined" --path "$VALID" --dry-run --print0 --count
+probe_accepted --path "$VALID" --dry-run --paths-only
+probe_accepted --path "$VALID" --dry-run --print0
 probe_accepted --path "$VALID" --dry-run --depth 08
 
 [ "$failures" -eq 0 ] || { echo "$failures failure(s)" >&2; exit 1; }

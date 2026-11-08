@@ -777,6 +777,36 @@ expected_print0="$(printf 'repo\t%s\nworktree\t%s\nrepo\t%s\n' "$COUNT_SCAN_CANO
 od -An -c "$TMP_ROOT/print0.out" | grep -q '\\0' || fail "--print0 alone emitted no NUL separators (#1625)"
 echo "ok: --print0 alone NUL-separates the same records"
 
+# ─── --find + --paths-only / --print0 rejected, not reshaped (#1734) ───
+# The find sweep prints FOUND records directly, bypassing the emit
+# pipeline that honours --paths-only / --print0 for repo/worktree
+# records, so a combined run exited 0 with mixed-format output: bare
+# repo paths beside 4-column FOUND records, or NUL-separated repo
+# records beside newline-terminated FOUND records. Reshaping FOUND is
+# triaged out (#1722 rule 5; a bare-path FOUND record is
+# indistinguishable from a repo path), so both pairs are judged after
+# parsing (exit 2, both flags named, no records) in both orders,
+# including under --dry-run.
+for pair in "--find trash --paths-only" "--paths-only --find trash" "--dry-run --find trash --paths-only" "--find trash --print0" "--print0 --find trash" "--dry-run --print0 --find trash"; do
+  # shellcheck disable=SC2086
+  run --path "$COUNT_SCAN" $pair
+  [ "$STATUS" -eq 2 ] || fail "--find shaping pair '$pair' exited $STATUS (want 2) (#1734)"
+  case "$pair" in
+    *paths-only*) want="git-discover-repos: --find and --paths-only may not be combined" ;;
+    *) want="git-discover-repos: --find and --print0 may not be combined" ;;
+  esac
+  case "$ERR" in
+    *"$want"*) echo "ok: pair '$pair' rejected as a conflict" ;;
+    *) fail "pair '$pair' was not named as a conflict on stderr (got: $ERR) (#1734)" ;;
+  esac
+  [ -z "$OUT" ] || fail "pair '$pair' printed stdout: $OUT (#1734)"
+done
+
+# A plain --find run is unchanged by the new judges.
+run --path "$COUNT_SCAN" --find trash
+[ "$STATUS" -eq 0 ] || fail "--find trash alone exited $STATUS after #1734 judges"
+case "$OUT" in *"FOUND"$'\t'"trash"*) echo "ok: --find alone still emits FOUND records after #1734" ;; *) fail "--find alone lost its FOUND record after #1734 (got: $OUT)" ;; esac
+
 # ─── Shared conformance probe matrix (#1146, design #1145) ─────────
 # The matrix rows for git-discover-repos, driven through
 # lib/arg-probe.sh (the same helper every discovery suite uses):
@@ -825,6 +855,10 @@ probe_rejected "git-discover-repos: --count and --print0 may not be combined" --
 probe_rejected "git-discover-repos: --count and --print0 may not be combined" --path "$VALID" --dry-run --print0 --count
 probe_accepted --path "$VALID" --dry-run --paths-only
 probe_accepted --path "$VALID" --dry-run --print0
+probe_rejected "git-discover-repos: --find and --paths-only may not be combined" --path "$VALID" --dry-run --find trash --paths-only
+probe_rejected "git-discover-repos: --find and --paths-only may not be combined" --path "$VALID" --dry-run --paths-only --find trash
+probe_rejected "git-discover-repos: --find and --print0 may not be combined" --path "$VALID" --dry-run --find trash --print0
+probe_rejected "git-discover-repos: --find and --print0 may not be combined" --path "$VALID" --dry-run --print0 --find trash
 probe_rejected "git-discover-repos: --status requires --find" --path "$VALID" --dry-run --status
 probe_rejected "git-discover-repos: --status requires --find" --status --dry-run
 probe_accepted --path "$VALID" --dry-run --find trash --status

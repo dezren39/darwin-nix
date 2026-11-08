@@ -82,6 +82,9 @@ FILTERING (output shape, orthogonal to scope)
   --paths-only        Print bare paths with no TYPE column, for piping into
                       xargs. (Orthogonal to --repos-only/--worktrees-only,
                       which choose WHICH records are printed, not their shape.)
+                      May not be combined with --find (--find FOUND
+                      records keep their REASON/STATUS columns); that pair
+                      is rejected at parse time.
   --bare-only         Print only bare repositories.
   --no-bare           Exclude bare repositories. (They are included by default
                       and tagged "repo" like any other; --bare-only narrows to
@@ -91,6 +94,10 @@ FINDING ARTIFACTS TOO
   --find NAME[,NAME]  Also emit artifact hits inside every discovered location,
                       as  FOUND<TAB>REASON<TAB>STATUS<TAB>PATH
                       Special values: cache, risky, trash, all
+                      May not be combined with --paths-only or --print0
+                      (those shape repo/worktree records; FOUND records
+                      keep their documented shape); those pairs are
+                      rejected at parse time.
   --status            For --find hits, ask git whether the dir is tracked /
                       ignored / untracked. Costs one git call per hit.
 
@@ -99,6 +106,9 @@ OTHER
                       --auto only: may not be combined with --path or a
                       positional path (in --path mode it has no effect).
   --print0            NUL-separate records instead of newline.
+                      May not be combined with --find (FOUND records
+                      are newline-terminated); that pair is rejected
+                      at parse time.
   --count             Print only a summary count, of the records the
                       chosen filter would print. May not be combined
                       with --find (the sweep's FOUND records are not
@@ -215,6 +225,27 @@ fi
 if [ "$USER_SET" = "1" ] && [ "$PATH_SET" = "1" ]; then
   echo "git-discover-repos: --user may not be combined with --path" >&2
   echo "                    (--user sets the home scanned in --auto mode; a --path run scans only the given paths)" >&2
+  exit 2
+fi
+
+# --paths-only and --print0 shape repo/worktree records in the emit
+# pipeline, but the find sweep prints FOUND records directly, bypassing
+# that pipeline: a combined run exited 0 with bare repo paths beside
+# 4-column FOUND records (--paths-only), or NUL-separated repo records
+# beside newline-terminated FOUND records (--print0) (#1734). Reshaping
+# FOUND would give the shape flags a new effect on a record kind they
+# never shaped (#1722 rule 5) and a bare-path FOUND record would be
+# indistinguishable from a repo path, so judge both pairs here, after
+# parsing, so both flag orders are covered -- like --status/--user above.
+if [ "$FIND_SET" = "1" ] && [ "$PATHS_ONLY_SET" = "1" ]; then
+  echo "git-discover-repos: --find and --paths-only may not be combined" >&2
+  echo "                    (--paths-only shapes repo/worktree records; --find FOUND records keep their REASON/STATUS columns)" >&2
+  exit 2
+fi
+
+if [ "$FIND_SET" = "1" ] && [ "$PRINT0_SET" = "1" ]; then
+  echo "git-discover-repos: --find and --print0 may not be combined" >&2
+  echo "                    (--print0 separates repo/worktree records with NUL; --find FOUND records are newline-terminated)" >&2
   exit 2
 fi
 

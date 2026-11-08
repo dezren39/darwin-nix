@@ -835,4 +835,46 @@ for (const bad of [NaN, Infinity, -Infinity]) {
   console.log("pass: huge-but-finite maxAge saturates and keeps real backups (#1627)");
 }
 
+// 29. A limit set alone enforces: finite rollout 0 is zero headroom,
+//     not disabled (#1612). Both rollout settings default to 0 in
+//     package.json, and only the limits document 0 as disabled, so
+//     the natural configuration (set only maxFileCount / maxTotalMb)
+//     used to disable both passes entirely and the backup dir grew
+//     unbounded. With rollout 0 a pass deletes oldest-first down to
+//     exactly the limit. A negative rollout is deliberately clamped
+//     to 0 (zero headroom, mirroring #1620), pinned below; a
+//     non-finite rollout still disables the pass (blocks 16/17).
+{
+  const dir = fixture(30);
+  cleanupCount({ backupDir: dir, maxFileCount: 10, rolloutFileCount: 0 });
+  const names = remainingNames(dir);
+  assert.strictEqual(names.length, 10, "rollout 0 count pass must converge to the limit");
+  assert.strictEqual(names[0], "f20.txt", "rollout 0 count pass deletes oldest first");
+  assert.strictEqual(names[names.length - 1], "f29.txt", "newest backup must survive the rollout 0 count pass");
+  fs.rmSync(dir, { recursive: true, force: true });
+  console.log("pass: cleanupCount with rollout 0 converges to the limit (#1612)");
+}
+{
+  const dir = fixture(30, 1024);
+  cleanupSize({ backupDir: dir, maxTotalMb: 0.02, rolloutMb: 0 });
+  const entries = listBackups(dir);
+  const total = entries.reduce((sum, e) => sum + e.size, 0);
+  assert.ok(total <= 0.02 * 1024 * 1024, "rollout 0 size pass must converge to the cap");
+  assert.strictEqual(entries.length, 20, "rollout 0 size pass deletes exactly to the cap (20 x 1024 B)");
+  assert.strictEqual(entries[entries.length - 1].name, "f29.txt", "newest backup must survive the rollout 0 size pass");
+  fs.rmSync(dir, { recursive: true, force: true });
+  console.log("pass: cleanupSize with rollout 0 converges to the limit (#1612)");
+}
+{
+  const dir = fixture(30);
+  cleanupCount({ backupDir: dir, maxFileCount: 10, rolloutFileCount: -5 });
+  assert.strictEqual(remainingNames(dir).length, 10, "negative count rollout must clamp to 0 and still enforce the limit");
+  fs.rmSync(dir, { recursive: true, force: true });
+  const dir2 = fixture(30, 1024);
+  cleanupSize({ backupDir: dir2, maxTotalMb: 0.02, rolloutMb: -0.01 });
+  assert.strictEqual(listBackups(dir2).length, 20, "negative size rollout must clamp to 0 and still enforce the cap");
+  fs.rmSync(dir2, { recursive: true, force: true });
+  console.log("pass: negative rollout clamps to 0 for both passes (#1612)");
+}
+
 console.log("cleanup-count.test.mjs: all assertions passed");

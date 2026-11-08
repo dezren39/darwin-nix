@@ -123,6 +123,8 @@ ROOT_SET=0
 DEPTH_LIMIT=""
 DEPTH_SET=0
 RECURSIVE_SET=0
+RECURSIVE_YES_SET=0
+RECURSIVE_NO_SET=0
 FOLLOW=""
 FOLLOW_GIVEN=""
 
@@ -132,9 +134,9 @@ while [ $# -gt 0 ]; do
     --no-system) { arg_conflict --system --no-system "$SYSTEM_SET"; DO_WALK=1; DO_SYSTEM=0; SCOPE_SET=1; NO_SYSTEM_SET=1; } ;;
     --system) { arg_conflict --system --no-system "$NO_SYSTEM_SET"; DO_WALK=0; DO_SYSTEM=1; SCOPE_SET=1; SYSTEM_SET=1; } ;;
     --path) { arg_require_value "$1" "${2:-}"; [ "$ROOT_SET" -eq 0 ] || arg_die "unexpected argument: $2 (target already set to $ROOT)"; ROOT="$2"; ROOT_SET=1; shift; } ;;
-    --recursive|--walk) DEPTH_LIMIT=""; RECURSIVE_SET=1 ;;
-    --no-recursive|--no-walk) DEPTH_LIMIT=1; RECURSIVE_SET=1 ;;
-    --depth) { arg_require_value "$1" "${2:-}"; arg_once "$1" DEPTH_SET; DEPTH_LIMIT="$2"; RECURSIVE_SET=1; shift; } ;;
+    --recursive|--walk) { arg_conflict --recursive --no-recursive "$RECURSIVE_NO_SET"; arg_conflict --depth --recursive "$DEPTH_SET"; DEPTH_LIMIT=""; RECURSIVE_SET=1; RECURSIVE_YES_SET=1; } ;;
+    --no-recursive|--no-walk) { arg_conflict --recursive --no-recursive "$RECURSIVE_YES_SET"; arg_conflict --depth --no-recursive "$DEPTH_SET"; DEPTH_LIMIT=1; RECURSIVE_SET=1; RECURSIVE_NO_SET=1; } ;;
+    --depth) { arg_require_value "$1" "${2:-}"; arg_conflict --depth --recursive "$RECURSIVE_YES_SET"; arg_conflict --depth --no-recursive "$RECURSIVE_NO_SET"; arg_once "$1" DEPTH_SET; DEPTH_LIMIT="$2"; RECURSIVE_SET=1; shift; } ;;
     --follow) { [ -z "$FOLLOW_GIVEN" ] || [ "$FOLLOW_GIVEN" = "--follow" ] || arg_die "--follow conflicts with --no-follow"; FOLLOW=1; FOLLOW_GIVEN="--follow"; } ;;
     --no-follow) { [ -z "$FOLLOW_GIVEN" ] || [ "$FOLLOW_GIVEN" = "--no-follow" ] || arg_die "--no-follow conflicts with --follow"; FOLLOW=0; FOLLOW_GIVEN="--no-follow"; } ;;
     --dry-run) DRY_RUN=1 ;;

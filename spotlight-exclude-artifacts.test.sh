@@ -216,6 +216,17 @@ probe_rejected "spotlight-exclude-artifacts: --depth requires a value" --depth -
 probe_rejected "spotlight-exclude-artifacts: --depth may be given only once" --no-system --dry-run --path "$VALID" --depth 1 --depth 3
 probe_rejected "--no-follow conflicts with --follow" --no-system --dry-run --path "$VALID" --follow --no-follow
 probe_rejected "--follow conflicts with --no-follow" --no-system --dry-run --path "$VALID" --no-follow --follow
+# Recursive pair + --depth judged at parse time (#1609), mirrored from
+# git-discover-repos: any two of the three depth spellings exit 2 in
+# both orders; same-side repeats stay accepted.
+probe_rejected "spotlight-exclude-artifacts: --recursive and --no-recursive may not be combined" --no-system --dry-run --path "$VALID" --recursive --no-recursive
+probe_rejected "spotlight-exclude-artifacts: --recursive and --no-recursive may not be combined" --no-system --dry-run --path "$VALID" --no-walk --walk
+probe_rejected "spotlight-exclude-artifacts: --depth and --recursive may not be combined" --no-system --dry-run --path "$VALID" --depth 3 --walk
+probe_rejected "spotlight-exclude-artifacts: --depth and --recursive may not be combined" --no-system --dry-run --path "$VALID" --recursive --depth 3
+probe_rejected "spotlight-exclude-artifacts: --depth and --no-recursive may not be combined" --no-system --dry-run --path "$VALID" --depth 3 --no-recursive
+probe_rejected "spotlight-exclude-artifacts: --depth and --no-recursive may not be combined" --no-system --dry-run --path "$VALID" --no-walk --depth 3
+probe_accepted --no-system --dry-run --path "$VALID" --recursive --walk
+probe_accepted --no-system --dry-run --path "$VALID" --no-recursive --no-walk
 probe_rejected "spotlight-exclude-artifacts: --system and --no-system may not be combined" --dry-run --system --no-system
 probe_rejected "spotlight-exclude-artifacts: --system and --no-system may not be combined" --dry-run --no-system --system
 probe_rejected "unexpected argument: $SECOND_A" --no-system --dry-run --path "$SECOND_B" "$SECOND_A"

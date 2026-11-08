@@ -140,6 +140,8 @@ USER_SET=0
 FILTER_FLAG=""
 FOLLOW_YES_SET=0
 FOLLOW_NO_SET=0
+RECURSIVE_YES_SET=0
+RECURSIVE_NO_SET=0
 AUTO_SET=0
 PATH_SET=0
 BARE_ONLY_SET=0
@@ -151,9 +153,9 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --auto)           { arg_conflict --auto --path "$PATH_SET"; MODE="auto"; AUTO_SET=1; } ;;
     --path)           { arg_require_value "$1" "${2:-}"; arg_conflict --auto --path "$AUTO_SET"; MODE="path"; PATHS+=("$2"); PATH_SET=1; shift; } ;;
-    --recursive|--walk)       DEPTH_LIMIT=""; RECURSIVE_SET=1 ;;
-    --no-recursive|--no-walk) DEPTH_LIMIT=1;  RECURSIVE_SET=1 ;;
-    --depth)                  { arg_require_value "$1" "${2:-}"; arg_once "$1" DEPTH_SET; DEPTH_LIMIT="$2"; RECURSIVE_SET=1; shift; } ;;
+    --recursive|--walk)       { arg_conflict --recursive --no-recursive "$RECURSIVE_NO_SET"; arg_conflict --depth --recursive "$DEPTH_SET"; DEPTH_LIMIT=""; RECURSIVE_SET=1; RECURSIVE_YES_SET=1; } ;;
+    --no-recursive|--no-walk) { arg_conflict --recursive --no-recursive "$RECURSIVE_YES_SET"; arg_conflict --depth --no-recursive "$DEPTH_SET"; DEPTH_LIMIT=1;  RECURSIVE_SET=1; RECURSIVE_NO_SET=1; } ;;
+    --depth)                  { arg_require_value "$1" "${2:-}"; arg_conflict --depth --recursive "$RECURSIVE_YES_SET"; arg_conflict --depth --no-recursive "$RECURSIVE_NO_SET"; arg_once "$1" DEPTH_SET; DEPTH_LIMIT="$2"; RECURSIVE_SET=1; shift; } ;;
     --follow)         { arg_conflict --follow --no-follow "$FOLLOW_NO_SET"; FOLLOW=1; FOLLOW_SET=1; FOLLOW_YES_SET=1; } ;;
     --no-follow)      { arg_conflict --follow --no-follow "$FOLLOW_YES_SET"; FOLLOW=0; FOLLOW_SET=1; FOLLOW_NO_SET=1; } ;;
     --repos-only)     { [ -z "$FILTER_FLAG" ] || arg_die "$1 may not be combined with $FILTER_FLAG (only one filter option may be given)"; FILTER="repos"; FILTER_FLAG="$1"; } ;;

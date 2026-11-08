@@ -265,6 +265,17 @@ probe_rejected "may not be combined with" --dry-run --path "$VALID" --quick --de
 probe_rejected "may not be combined with" --dry-run --path "$VALID" --deep --quick
 probe_rejected "git-maintain-repos: --system and --no-system may not be combined" --dry-run --path "$VALID" --system --no-system
 probe_rejected "git-maintain-repos: --system and --no-system may not be combined" --dry-run --path "$VALID" --no-system --system
+# Recursive pair + --depth judged at parse time (#1609), mirrored from
+# git-discover-repos: any two of the three depth spellings exit 2 in
+# both orders; same-side repeats stay accepted.
+probe_rejected "git-maintain-repos: --recursive and --no-recursive may not be combined" --dry-run --path "$VALID" --recursive --no-recursive
+probe_rejected "git-maintain-repos: --recursive and --no-recursive may not be combined" --dry-run --path "$VALID" --no-walk --walk
+probe_rejected "git-maintain-repos: --depth and --recursive may not be combined" --dry-run --path "$VALID" --depth 3 --walk
+probe_rejected "git-maintain-repos: --depth and --recursive may not be combined" --dry-run --path "$VALID" --recursive --depth 3
+probe_rejected "git-maintain-repos: --depth and --no-recursive may not be combined" --dry-run --path "$VALID" --depth 3 --no-recursive
+probe_rejected "git-maintain-repos: --depth and --no-recursive may not be combined" --dry-run --path "$VALID" --no-walk --depth 3
+probe_accepted --dry-run --path "$VALID" --recursive --walk
+probe_accepted --dry-run --path "$VALID" --no-recursive --no-walk
 probe_rejected "unexpected argument: $OTHER" --dry-run "$VALID" "$OTHER"
 probe_rejected "git-maintain-repos: empty positional argument (target must not be empty)" --dry-run ""
 for bad in abc 0 2147483648 99999999999999999999999999; do

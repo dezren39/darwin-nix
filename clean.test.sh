@@ -642,6 +642,17 @@ probe_rejected "clean.sh: --system and --no-system may not be combined" --dry-ru
 probe_rejected "clean.sh: --system and --no-system may not be combined" --dry-run --no-system --system
 probe_rejected "clean.sh: --follow and --no-follow may not be combined" --dry-run --path "$VALID" --follow --no-follow
 probe_rejected "clean.sh: --follow and --no-follow may not be combined" --dry-run --path "$VALID" --no-follow --follow
+# Recursive pair + --depth judged at parse time (#1609), mirrored from
+# git-discover-repos: any two of the three depth spellings exit 2 in
+# both orders; same-side repeats stay accepted.
+probe_rejected "clean.sh: --recursive and --no-recursive may not be combined" --dry-run --path "$VALID" --recursive --no-recursive
+probe_rejected "clean.sh: --recursive and --no-recursive may not be combined" --dry-run --path "$VALID" --no-walk --walk
+probe_rejected "clean.sh: --depth and --recursive may not be combined" --dry-run --path "$VALID" --depth 3 --walk
+probe_rejected "clean.sh: --depth and --recursive may not be combined" --dry-run --path "$VALID" --recursive --depth 3
+probe_rejected "clean.sh: --depth and --no-recursive may not be combined" --dry-run --path "$VALID" --depth 3 --no-recursive
+probe_rejected "clean.sh: --depth and --no-recursive may not be combined" --dry-run --path "$VALID" --no-walk --depth 3
+probe_accepted --dry-run --path "$VALID" --recursive --walk --only-unknown-scratch
+probe_accepted --dry-run --path "$VALID" --no-recursive --no-walk --only-unknown-scratch
 probe_rejected "unexpected argument: $OTHER" --dry-run "$VALID" "$OTHER"
 probe_rejected "clean.sh: empty positional argument (target must not be empty)" --dry-run ""
 for bad in abc 0 2147483648 99999999999999999999999999; do

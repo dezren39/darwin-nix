@@ -34,6 +34,8 @@ DEPTH_SET=0
 DOCKER_AGE_SET=0
 FOLLOW_YES_SET=0
 FOLLOW_NO_SET=0
+RECURSIVE_YES_SET=0
+RECURSIVE_NO_SET=0
 TARGET_PATH=""
 TARGET_SET=0
 DEPTH_LIMIT=""
@@ -232,9 +234,9 @@ while [ $# -gt 0 ]; do
     --system)         { arg_conflict --system --no-system "$NO_SYSTEM_SET"; SCOPE="system"; SCOPE_SET=1; SYSTEM_SET=1; } ;;
     --no-system)      { arg_conflict --system --no-system "$SYSTEM_SET"; SCOPE="no-system"; SCOPE_SET=1; NO_SYSTEM_SET=1; } ;;
     --path)           { arg_require_value "$1" "${2:-}"; [ "$TARGET_SET" -eq 0 ] || arg_die "unexpected argument: $1 (target already set to $TARGET_PATH)"; TARGET_PATH="$2"; TARGET_SET=1; REPO_FLAGS_USED="$REPO_FLAGS_USED --path"; shift; } ;;
-    --recursive|--walk) REPO_FLAGS_USED="$REPO_FLAGS_USED --recursive"; DEPTH_LIMIT=""; RECURSIVE_SET=1 ;;
-    --no-recursive|--no-walk) DEPTH_LIMIT=1; RECURSIVE_SET=1 ;;
-    --depth)          { arg_require_value "$1" "${2:-}"; arg_once "$1" DEPTH_SET; DEPTH_LIMIT="$2"; RECURSIVE_SET=1; REPO_FLAGS_USED="$REPO_FLAGS_USED --depth"; shift; } ;;
+    --recursive|--walk) { arg_conflict --recursive --no-recursive "$RECURSIVE_NO_SET"; arg_conflict --depth --recursive "$DEPTH_SET"; REPO_FLAGS_USED="$REPO_FLAGS_USED --recursive"; DEPTH_LIMIT=""; RECURSIVE_SET=1; RECURSIVE_YES_SET=1; } ;;
+    --no-recursive|--no-walk) { arg_conflict --recursive --no-recursive "$RECURSIVE_YES_SET"; arg_conflict --depth --no-recursive "$DEPTH_SET"; DEPTH_LIMIT=1; RECURSIVE_SET=1; RECURSIVE_NO_SET=1; } ;;
+    --depth)          { arg_require_value "$1" "${2:-}"; arg_conflict --depth --recursive "$RECURSIVE_YES_SET"; arg_conflict --depth --no-recursive "$RECURSIVE_NO_SET"; arg_once "$1" DEPTH_SET; DEPTH_LIMIT="$2"; RECURSIVE_SET=1; REPO_FLAGS_USED="$REPO_FLAGS_USED --depth"; shift; } ;;
     --follow)         { arg_conflict --follow --no-follow "$FOLLOW_NO_SET"; FOLLOW=1; FOLLOW_YES_SET=1; REPO_FLAGS_USED="$REPO_FLAGS_USED --follow"; } ;;
     --no-follow)      { arg_conflict --follow --no-follow "$FOLLOW_YES_SET"; FOLLOW=0; FOLLOW_NO_SET=1; REPO_FLAGS_USED="$REPO_FLAGS_USED --no-follow"; } ;;
     --sudo)           USE_SUDO=1 ;;

@@ -744,6 +744,19 @@ probe_rejected "git-discover-repos: --find requires a value" --find --dry-run
 probe_rejected "git-discover-repos: --depth may be given only once" --path "$VALID" --dry-run --depth 2 --depth 5
 probe_rejected "git-discover-repos: --follow and --no-follow may not be combined" --path "$VALID" --dry-run --follow --no-follow
 probe_rejected "git-discover-repos: --follow and --no-follow may not be combined" --path "$VALID" --dry-run --no-follow --follow
+# Recursive pair + --depth judged at parse time (#1609): both poles and
+# any explicit --depth are three spellings of one depth choice, so any
+# two of them together exit 2 in both orders; same-side repeats of one
+# spelling stay accepted.
+probe_rejected "git-discover-repos: --recursive and --no-recursive may not be combined" --path "$VALID" --dry-run --recursive --no-recursive
+probe_rejected "git-discover-repos: --recursive and --no-recursive may not be combined" --path "$VALID" --dry-run --no-walk --walk
+probe_rejected "git-discover-repos: --depth and --recursive may not be combined" --path "$VALID" --dry-run --depth 3 --walk
+probe_rejected "git-discover-repos: --depth and --recursive may not be combined" --path "$VALID" --dry-run --recursive --depth 3
+probe_rejected "git-discover-repos: --depth and --no-recursive may not be combined" --path "$VALID" --dry-run --depth 3 --no-recursive
+probe_rejected "git-discover-repos: --depth and --no-recursive may not be combined" --path "$VALID" --dry-run --no-walk --depth 3
+probe_accepted --path "$VALID" --dry-run --recursive --walk
+probe_accepted --path "$VALID" --dry-run --no-recursive --no-walk
+probe_accepted --path "$VALID" --dry-run --depth 3
 probe_rejected "may not be combined with" --path "$VALID" --dry-run --repos-only --worktrees-only
 probe_rejected "may not be combined with" --path "$VALID" --dry-run --worktrees-only --repos-only
 probe_rejected "git-discover-repos: --auto and --path may not be combined" --path "$VALID" --auto

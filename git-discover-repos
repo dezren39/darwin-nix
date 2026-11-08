@@ -194,6 +194,16 @@ if [ "$DEPTH_LIMIT" = "1" ] && [ "${FOLLOW:-0}" = "1" ] && [ "$RECURSIVE_SET" = 
   exit 2
 fi
 
+# --status only annotates --find hits (status_for is called solely from
+# the find sweep); without --find the flag is never read, so a run that
+# asked for it would exit 0 with output identical to not asking (#1657).
+# Judge it here, after parsing, so both flag orders are covered.
+if [ "$WANT_STATUS" = "1" ] && [ "$FIND_SET" = "0" ]; then
+  echo "git-discover-repos: --status requires --find" >&2
+  echo "                    (--status only annotates --find hits; without --find it has no effect)" >&2
+  exit 2
+fi
+
 # find(1) depth fragment, shared by the repo walk and the artifact sweep.
 DEPTH_ARGS=()
 [ -n "$DEPTH_LIMIT" ] && DEPTH_ARGS=(-maxdepth "$DEPTH_LIMIT")

@@ -1000,4 +1000,102 @@ for (const bad of [NaN, Infinity, -Infinity]) {
   console.log("pass: utcDayDir rechecks the day directory after mkdir and refuses a swapped-in symlink (#1709)");
 }
 
+
+// 33. backupDoc's write is contained per document (#1729): a
+//     writeFileSync failure (ENOSPC here) must not throw out of
+//     backupDoc or abort the backupAll pass - every later document is
+//     still backed up - the failed document's hash stays unset so a
+//     later trigger retries it (#1603 contract), and the failure
+//     leaves the discoverable console.error signal #1658 requires
+//     (same surface as the day-directory signal: path, trigger, error).
+{
+  const stripBackup = (code) =>
+    stripTypes(code)
+      .replace(/: vscode\.TextDocument/g, "")
+      .replace(/: BackupTrigger/g, "");
+  const makeBackup = ({ vscode, fsImpl, consoleImpl, lastHash, lastBackupPath }) =>
+    new Function(
+      "vscode", "fs", "path", "console", "lastHash", "lastBackupPath",
+      "contentHash", "utcDayDir", "langToExtension", "buildMeta", "formatMetaLine",
+      `${stripBackup(extractFunction("backupDoc"))}
+       ${stripBackup(extractFunction("backupAll"))}
+       return { backupDoc, backupAll };`,
+    )(
+      vscode, fsImpl, path, consoleImpl, lastHash, lastBackupPath,
+      (text) => `h:${text}`,
+      (dir) => { const d = path.join(dir, "day"); fs.mkdirSync(d, { recursive: true }); return d; },
+      () => ".txt",
+      () => ({}),
+      () => "//meta",
+    );
+  const doc = (n, text) => ({
+    uri: { scheme: "untitled", path: `/Untitled-${n}`, toString: () => `untitled:Untitled-${n}` },
+    getText: () => text, languageId: "txt", lineCount: 1,
+  });
+
+  // 33a. Throwing write for the first document: pass survives, second
+  //      document is backed up, first hash stays unset, signal logged.
+  {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), "buffer-backup-test-"));
+    const written = [];
+    const logged = [];
+    const failingFs = {
+      ...fs,
+      writeFileSync: (file, content) => {
+        if (String(file).includes("Untitled_1")) {
+          const e = new Error("ENOSPC: no space left on device");
+          e.code = "ENOSPC";
+          throw e;
+        }
+        written.push(String(file));
+        return fs.writeFileSync(file, content);
+      },
+    };
+    const docs = [doc(1, "first"), doc(2, "second")];
+    const lastHash = new Map();
+    const { backupAll } = makeBackup({
+      vscode: { workspace: { textDocuments: docs } },
+      fsImpl: failingFs,
+      consoleImpl: { error: (line) => logged.push(String(line)) },
+      lastHash, lastBackupPath: new Map(),
+    });
+    assert.doesNotThrow(
+      () => backupAll({ backupDir: base }, "change"),
+      "a failed write must not throw out of backupAll (#1729)",
+    );
+    assert.strictEqual(written.length, 1, "the healthy second document must still be backed up (#1729)");
+    assert.ok(written[0].includes("Untitled_2"), `second document written, got ${written[0]}`);
+    assert.ok(!lastHash.has("untitled:Untitled-1"), "failed document hash must stay unset for retry (#1603)");
+    assert.ok(lastHash.has("untitled:Untitled-2"), "healthy document hash must be set");
+    assert.strictEqual(logged.length, 1, `exactly one signal for the failed write, got ${logged.length}`);
+    assert.match(logged[0], /buffer-backup: contained write failure/, "signal must name the containment (#1658 surface)");
+    assert.ok(logged[0].includes("trigger=change"), "signal must name the trigger");
+    assert.ok(logged[0].includes("ENOSPC"), "signal must carry the underlying error");
+    fs.rmSync(base, { recursive: true, force: true });
+    console.log("pass: backupDoc write failure is contained per document, backupAll backs up later documents, hash unset, signal logged (#1729)");
+  }
+
+  // 33b. Normal write unchanged: a healthy document writes, hash set,
+  //      no signal.
+  {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), "buffer-backup-test-"));
+    const written = [];
+    const logged = [];
+    const healthyFs = { ...fs, writeFileSync: (file, content) => { written.push(String(file)); return fs.writeFileSync(file, content); } };
+    const lastHash = new Map();
+    const { backupDoc } = makeBackup({
+      vscode: { workspace: { textDocuments: [] } },
+      fsImpl: healthyFs,
+      consoleImpl: { error: (line) => logged.push(String(line)) },
+      lastHash, lastBackupPath: new Map(),
+    });
+    backupDoc(doc(3, "healthy"), base, "change");
+    assert.strictEqual(written.length, 1, "healthy document must be written");
+    assert.ok(lastHash.has("untitled:Untitled-3"), "healthy document hash must be set");
+    assert.strictEqual(logged.length, 0, "no failure signal on a healthy write");
+    fs.rmSync(base, { recursive: true, force: true });
+    console.log("pass: backupDoc normal write unchanged (#1729)");
+  }
+}
+
 console.log("cleanup-count.test.mjs: all assertions passed");

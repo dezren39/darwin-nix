@@ -107,7 +107,18 @@ const LANG_TO_EXT: Record<string, string> = {
 };
 
 function langToExtension(languageId: string): string {
-  return LANG_TO_EXT[languageId] || `.${languageId}`;
+  const known = LANG_TO_EXT[languageId];
+  if (known) return known;
+  // #1649: the fallback is spliced into the backup filename in
+  // backupDoc, and a languageId is extension/user-supplied data
+  // (contributed languages, files.associations), not a validated
+  // identifier. Interpolating it verbatim let a separator-bearing
+  // id ("a/b", "../../../evil") break out of the filename — an
+  // ENOENT at write time, or a backup written outside the day
+  // directory where listBackups never sees it. Sanitize it the
+  // way backupDoc sanitizes the uri path.
+  const safe = languageId.replace(/[^a-zA-Z0-9-]/g, "_");
+  return safe ? `.${safe}` : ".txt";
 }
 
 interface Duration {

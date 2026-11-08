@@ -556,16 +556,30 @@ function formatDayDirFailure(f: DayDirFailure): string {
 // First failure per day directory, per activation: a retry storm (a
 // failing day directory is hit by every change event of every untitled
 // buffer) must not flood the log, but a new day directory - or a fresh
-// activation - must still report.
+// activation - must still report. One escalation is allowed on top of
+// that suppression: if the first reported failure for a directory was
+// non-final (a retryable change/focus/init failure), a later
+// close/will-save failure for the same directory is reported once
+// more, because it carries the distinct final-snapshot-lost signal -
+// without it, a document that closes unbacked-up would leave only the
+// earlier, retryable warning in the log (Codex review on PR #1717).
 function shouldReportDayDirFailure(
   seen: Set<string>,
   f: DayDirFailure
 ): boolean {
-  if (seen.has(f.dir)) {
-    return false;
+  const finalKey = f.dir + "::final-snapshot";
+  if (!seen.has(f.dir)) {
+    seen.add(f.dir);
+    if (f.finalSnapshotLost) {
+      seen.add(finalKey);
+    }
+    return true;
   }
-  seen.add(f.dir);
-  return true;
+  if (f.finalSnapshotLost && !seen.has(finalKey)) {
+    seen.add(finalKey);
+    return true;
+  }
+  return false;
 }
 
 const reportedDayDirFailures = new Set<string>();

@@ -1213,6 +1213,31 @@ for (const bad of [NaN, Infinity, -Infinity]) {
     console.log("pass: close/will-save day-directory failures are reported as lost final snapshots (#1658)");
   }
 
+  // 33d. Escalation (Codex review on PR #1717): an early non-final
+  //      failure for a day directory must not suppress the distinct
+  //      final-snapshot-lost signal when a later close for the same
+  //      directory also fails - but the escalation fires only once.
+  {
+    const { vscode, documents, document, logged, consoleSpy } = fakeHost();
+    const { backupAll, backupDoc } = backupFactory()(vscode, fs, path, { createHash: (algorithm) => createHash(algorithm) }, os, consoleSpy);
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), "buffer-backup-test-"));
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "buffer-backup-outside-"));
+    fs.symlinkSync(outside, path.join(base, today), "dir");
+    documents.push(document(1, "early and late"));
+    backupAll({ backupDir: base }, "change");
+    assert.strictEqual(logged.length, 1, "the early change failure is reported once");
+    assert.ok(!logged[0].includes("final-snapshot-lost"), "the early failure is retryable, not final");
+    backupDoc(documents[0], base, "close");
+    assert.strictEqual(logged.length, 2, "a later close failure for the same directory must escalate");
+    assert.ok(logged[1].includes("trigger=close"), "the escalation must name the close trigger");
+    assert.ok(logged[1].includes("final-snapshot-lost=true"), "the escalation must carry the lost-final-snapshot signal");
+    backupDoc(documents[0], base, "will-save");
+    assert.strictEqual(logged.length, 2, "the final-snapshot escalation fires only once per day directory");
+    fs.rmSync(base, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+    console.log("pass: a close failure escalates an earlier non-final warning for the same day directory (#1658, PR #1717 review)");
+  }
+
   // 34. Containment contract unchanged (#1603): the obstacle is removed and
   //     a later change-triggered pass writes, because the hash was never
   //     set on the failure.

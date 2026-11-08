@@ -629,7 +629,21 @@ class Handler(BaseHTTPRequestHandler):
         given = self.headers.get("X-Agent-Token") or ""
         if not given:
             return False
-        return hmac.compare_digest(given, TOKEN)
+        # Compare in bytes space (#1741): hmac.compare_digest on str
+        # raises TypeError for non-ASCII operands, which the request
+        # handlers turned into a 400 leaking the exception message --
+        # and a non-ASCII token file produced a daemon that could
+        # never authenticate. http.server decodes header bytes as
+        # latin-1, so try both the utf-8 encoding of the decoded
+        # string (a latin-1 sender of the token's characters) and the
+        # raw wire bytes it recovers (a utf-8 sender).
+        expected = TOKEN.encode("utf-8")
+        candidates = {given.encode("utf-8")}
+        try:
+            candidates.add(given.encode("latin-1"))
+        except UnicodeEncodeError:
+            pass
+        return any(hmac.compare_digest(c, expected) for c in candidates)
 
     def _body(self):
         try:

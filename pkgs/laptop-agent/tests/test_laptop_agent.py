@@ -149,6 +149,85 @@ class AuthHeaderTest(unittest.TestCase):
             os.unlink(token_path)
 
 
+class AuthNonAsciiTest(unittest.TestCase):
+    """#1741: non-ASCII tokens must not crash the auth comparison.
+
+    hmac.compare_digest on str raises TypeError for non-ASCII
+    operands, which used to surface as a 400 leaking the exception
+    message, and a non-ASCII token file produced a daemon that could
+    never authenticate. The comparison is done on bytes: a presented
+    non-ASCII token gets the uniform 401, and the correct non-ASCII
+    token authenticates end to end.
+    """
+
+    def _start_agent(self, token_text):
+        f = tempfile.NamedTemporaryFile("w", encoding="utf-8",
+                                        delete=False)
+        f.write(token_text + "\n")
+        f.close()
+        port = free_port()
+        env = dict(os.environ,
+                   LAPTOP_AGENT_TOKEN_FILE=f.name,
+                   LAPTOP_AGENT_HOST="127.0.0.1",
+                   LAPTOP_AGENT_PORT=str(port),
+                   LAPTOP_AGENT_STATE=tempfile.mkdtemp())
+        proc = subprocess.Popen([sys.executable, str(AGENT)], env=env,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE)
+        self.addCleanup(os.unlink, f.name)
+        self.addCleanup(proc.kill)
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                self.fail(f"agent exited early: {proc.stderr.read()}")
+            try:
+                self._raw_health(port, None)
+                return proc, port
+            except (ConnectionError, OSError):
+                time.sleep(0.1)
+        self.fail("agent did not start")
+
+    def _raw_health(self, port, token_bytes):
+        with socket.create_connection(("127.0.0.1", port),
+                                      timeout=5) as sock:
+            lines = [b"GET /health HTTP/1.1", b"Host: 127.0.0.1",
+                     b"Connection: close"]
+            if token_bytes is not None:
+                lines.append(b"X-Agent-Token: " + token_bytes)
+            sock.sendall(b"\r\n".join(lines) + b"\r\n\r\n")
+            chunks = []
+            while True:
+                data = sock.recv(4096)
+                if not data:
+                    break
+                chunks.append(data)
+        head, _, body = b"".join(chunks).partition(b"\r\n\r\n")
+        return int(head.split(b" ")[1]), body
+
+    def test_non_ascii_header_gets_uniform_401(self):
+        _, port = self._start_agent("s" * 32)
+        wrong_status, wrong_body = self._raw_health(port, b"wrong-token")
+        self.assertEqual(wrong_status, 401)
+        self.assertEqual(json.loads(wrong_body), {"error": "bad token"})
+        for enc in ("utf-8", "latin-1"):
+            status, body = self._raw_health(
+                port, "caf\u00e9-token".encode(enc))
+            self.assertEqual(status, 401, enc)
+            self.assertEqual(json.loads(body), {"error": "bad token"}, enc)
+            self.assertNotIn(b"TypeError", body)
+
+    def test_non_ascii_token_file_authenticates(self):
+        token = "t\u00f6k\u00e9n-token-0123456789"
+        _, port = self._start_agent(token)
+        for enc in ("utf-8", "latin-1"):
+            status, body = self._raw_health(port, token.encode(enc))
+            self.assertEqual(status, 200, enc)
+            self.assertTrue(json.loads(body)["ok"], enc)
+        status, body = self._raw_health(port, b"ascii-wrong-token")
+        self.assertEqual(status, 401)
+        self.assertEqual(json.loads(body), {"error": "bad token"})
+
+
 class TailFileTest(unittest.TestCase):
     def test_job_public_samples_state_before_reading_spools(self):
         with tempfile.NamedTemporaryFile("w", suffix="-token",

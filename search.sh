@@ -67,14 +67,6 @@ check_if_brew_installed() {
         # echo "${app_path}"
         echo "${normalized_name}"
 
-        # Try to find similar Homebrew packages
-        local similar
-        similar=$(brew search "$normalized_name" 2>/dev/null | grep -i "$normalized_name" || true)
-        if [ -n "$similar" ]; then
-            # echo "  Similar Homebrew packages found:"
-            # echo "$similar" | sed 's/^/    /'
-            true
-        fi
         # echo
     fi
 }

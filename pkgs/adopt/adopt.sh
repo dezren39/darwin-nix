@@ -112,19 +112,36 @@ fi
 [[ "$host" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] ||
   { echo "adopt: host name '$host' is not a valid flake attribute name" >&2; exit 2; }
 
+# The hosts-map key as written in flake.nix: a name that is a valid bare
+# Nix identifier ([a-zA-Z_][a-zA-Z0-9_'-]*, hyphens included) is written
+# bare; anything else the validation above accepts -- in practice a
+# digit-leading name like 3DPrinter (#1746) -- must be written as a
+# quoted attribute name, because a bare digit-leading key makes the
+# whole flake fail to parse. The validated charset contains no quote
+# or backslash, so quoting needs no escaping.
+attr_name() {
+  if [[ "$1" =~ ^[A-Za-z_][A-Za-z0-9_-]*$ ]]; then
+    printf '%s' "$1"
+  else
+    printf '"%s"' "$1"
+  fi
+}
+
 # Print the indented entry block for host $2 from template $1 to stdout.
 make_block() {
   local tmpl="$1" name="$2"
+  local attr
+  attr="$(attr_name "$name")"
   if [[ "$tmpl" == default ]]; then
     cat <<EOF
-      $name = {
+      $attr = {
         # inherits default system "aarch64-darwin"
         # extraModules = [ ];
         # extraSpecialArgs = { };
       };
 EOF
   elif [[ -f "$tmpl" ]]; then
-    echo "      $name = {"
+    echo "      $attr = {"
     sed 's/^/        /' "$tmpl" ||
       { echo "adopt: cannot read template file '$tmpl'" >&2; return 1; }
     echo "      };"
@@ -133,14 +150,14 @@ EOF
       { echo "adopt: template '$tmpl' is not a host name or a file" >&2; return 2; }
     local block
     block="$(awk -v n="$tmpl" '
-      $0 ~ "^      " n " = [{]" { found = 1; start = NR }
+      $0 ~ "^      \"?" n "\"? = [{]" { found = 1; start = NR }
       found { print }
       found && NR == start && /};[[:space:]]*(#.*)?$/ { exit }
       found && /^      };[[:space:]]*(#.*)?$/ { exit }
     ' "$flake")"
     [[ -n "$block" ]] ||
       { echo "adopt: no host '$tmpl' in $flake to copy (existing: $(list_hosts))" >&2; return 1; }
-    sed "1s/^      [^ ]* = {/      $name = {/" <<<"$block"
+    sed "1s/^      [^ ]* = {/      $attr = {/" <<<"$block"
   fi
 }
 
@@ -149,7 +166,7 @@ list_hosts() {
   awk '
     /^    hosts = [{]$/ { in_hosts = 1; next }
     in_hosts && /^    };$/ { exit }
-    in_hosts && /^      [A-Za-z0-9_-]+ = [{]/ { printf "%s ", $1 }
+    in_hosts && /^      "?[A-Za-z0-9_-]+"? = [{]/ { name = $1; gsub(/"/, "", name); printf "%s ", name }
   ' "$flake"
 }
 
@@ -198,4 +215,4 @@ rm -f "$blockfile"
 # file here would bury the one-entry change under unrelated reformatting.
 
 echo "adopt: added host $host to $flake (template: $template)"
-echo "adopt: next: nix eval .#darwinConfigurations.$host.system.drvPath  # sanity, then ./s"
+echo "adopt: next: nix eval .#darwinConfigurations.$(attr_name "$host").system.drvPath  # sanity, then ./s"

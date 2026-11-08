@@ -15,7 +15,11 @@
 #   * working brew -> only apps not in the cask list are reported;
 #   * empty successful list -> all apps reported, exit 0;
 #   * `brew list` runs exactly once per invocation (the stub logs
-#     every call; per-app `brew search` calls are separate);
+#     every call; no per-app `brew search` runs at all (#1617): the similar-packages
+#     block shelled out per reported app and discarded its result, so it
+#     was removed -- the stub has no search branch and errors on one,
+#     a scenario below counts search calls in the stub log, and the
+#     working scenario pins the reported output byte-for-byte);
 #   * an unknown argument -> exit 2 naming it, usage on stderr, and
 #     no brew call at all; --help -> usage, exit 0, no brew call (#1158);
 #   * a missing first-leg directory -> a "does not exist" notice,
@@ -66,9 +70,6 @@ case "$1" in
       failing) echo "Error: brew is broken" >&2; exit 1 ;;
     esac
     ;;
-  search)
-    : # no similar packages
-    ;;
   *)
     echo "brew stub: unexpected command: $1" >&2
     exit 1
@@ -101,6 +102,7 @@ expect_rc() { # expect_rc <desc> <want>
   fi
 }
 list_calls() { grep -c '^list$' "$LOG" || true; }
+search_calls() { grep -c '^search$' "$LOG" || true; }
 
 # --- working brew: foo is a cask, bar is not --------------------------------
 run_search working
@@ -114,6 +116,16 @@ if [ "$(list_calls)" = "1" ]; then
 else
   fail "brew list ran exactly once (working) — got $(list_calls)"
 fi
+
+# --- #1617: no brew search runs, and the report is unchanged ---------------
+if [ "$(search_calls)" = "0" ]; then
+  echo "ok: no brew search calls (working)"
+else
+  fail "no brew search calls (working) -- got $(search_calls)"
+fi
+printf 'Checking %s...\nbar\nChecking ~/Applications...\nbar\n' "$APPS" > "$TMP_ROOT/expected"
+check "working brew report byte-identical to the pre-#1617 output" \
+  cmp -s "$TMP_ROOT/expected" "$TMP_ROOT/out"
 
 # --- empty successful list: everything is reported ---------------------------
 run_search empty

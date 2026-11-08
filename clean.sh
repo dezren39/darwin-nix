@@ -241,15 +241,15 @@ while [ $# -gt 0 ]; do
     --no-follow)      { arg_conflict --follow --no-follow "$FOLLOW_YES_SET"; FOLLOW=0; FOLLOW_NO_SET=1; REPO_FLAGS_USED="$REPO_FLAGS_USED --no-follow"; } ;;
     --sudo)           USE_SUDO=1 ;;
     --tmpdir)         CLEAN_TMPDIR=1 ;;
-    --expire-reflog)  EXPIRE_REFLOG=1 ;;
+    --expire-reflog)  { EXPIRE_REFLOG=1; REPO_FLAGS_USED="$REPO_FLAGS_USED --expire-reflog"; } ;;
     --docker-age)     { arg_require_value "$1" "${2:-}"; arg_once "$1" DOCKER_AGE_SET; DOCKER_AGE_DAYS="$2"; shift; } ;;
     --opencode-root-scratch) CLEAN_OPENCODE_ROOT=1 ;;
     --prune-unknown-scratch) PRUNE_UNKNOWN_SCRATCH=1 ;;
     --only-unknown-scratch) ONLY_UNKNOWN_SCRATCH=1 ;;
     --only-tmpdir)    ONLY_TMPDIR=1 ;;
     --no-sudo)        USE_SUDO=0 ;;
-    --no-git-maintenance|--no-maintenance|--no-git) DO_MAINTENANCE=0 ;;
-    --quick)          MAINT_DEPTH="--quick" ;;
+    --no-git-maintenance|--no-maintenance|--no-git) { DO_MAINTENANCE=0; REPO_FLAGS_USED="$REPO_FLAGS_USED $1"; } ;;
+    --quick)          { MAINT_DEPTH="--quick"; REPO_FLAGS_USED="$REPO_FLAGS_USED --quick"; } ;;
     --dry-run)        DRY_RUN=1 ;;
     -h|--help)        usage; exit 0 ;;
     -*)               echo "unknown option: $1" >&2; usage >&2; exit 2 ;;

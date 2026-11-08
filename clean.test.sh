@@ -161,6 +161,53 @@ for flag in --system --no-system --follow --no-follow; do
   echo "ok: single $flag still accepted"
 done
 
+# ─── --system also judges the repo-scoped maintenance flags (#1711) ────
+# The --system conflict judge only covered the discovery half of the
+# repository vocabulary (--path/--recursive/--depth/--follow/--no-follow),
+# so --quick, --expire-reflog and every --no-git-maintenance alias were
+# silently dropped in system scope: their only consumers are the per-repo
+# maintenance blocks, which DO_REPOS=0 never reaches. Erroring beats
+# silently ignoring them, so each must be named in the same conflict, in
+# either flag order, before any sweep runs (the snapshot check below
+# covers the no-side-effects part).
+for pair in "--system --quick" "--quick --system" \
+            "--system --expire-reflog" "--expire-reflog --system" \
+            "--system --no-git-maintenance" "--no-git-maintenance --system" \
+            "--system --no-maintenance" "--no-maintenance --system" \
+            "--system --no-git" "--no-git --system"; do
+  # The flag under test is whichever token is not --system, so naming it
+  # on stderr is actually proven (the judge always names --system itself).
+  _pair_flag=""
+  for _tok in $pair; do
+    [ "$_tok" = "--system" ] || _pair_flag="$_tok"
+  done
+  # shellcheck disable=SC2086
+  run --dry-run $pair
+  [ "$STATUS" -eq 2 ] || fail "system/maintenance pair '$pair' exited $STATUS (want 2)"
+  case "$ERR" in
+    *"clean.sh: --system conflicts with repository-scoped flags:"*"$_pair_flag"*)
+      echo "ok: system/maintenance pair '$pair' rejected, $_pair_flag named" ;;
+    *) fail "system/maintenance pair '$pair' was not named as a conflict on stderr (got: $ERR)" ;;
+  esac
+done
+unset _pair_flag _tok
+# All of them at once are reported together, in the order given.
+run --dry-run --system --quick --expire-reflog --no-git
+[ "$STATUS" -eq 2 ] || fail "--system with every maintenance flag exited $STATUS (want 2)"
+case "$ERR" in
+  *"conflicts with repository-scoped flags: --quick --expire-reflog --no-git"*)
+    echo "ok: every maintenance flag named together on stderr" ;;
+  *) fail "combined maintenance flags not named on stderr (got: $ERR)" ;;
+esac
+# The same flags stay live outside system scope: --no-system with a target
+# and --only-unknown-scratch parses them and exits 0 (the sudo re-exec
+# section below covers their behaviour; this pins only the parse).
+for flag in --quick --expire-reflog --no-git-maintenance --no-maintenance --no-git; do
+  run --no-system --path "$VALID" --only-unknown-scratch "$flag"
+  [ "$STATUS" -eq 0 ] || fail "$flag under --no-system exited $STATUS (want 0, stderr: $ERR)"
+  echo "ok: $flag still accepted under --no-system"
+done
+
 # ─── No side effects from the rejected runs ────────────────────────────
 if [ "$(snapshot)" = "$BEFORE" ]; then
   echo "ok: rejected runs left the fixture tree unchanged"

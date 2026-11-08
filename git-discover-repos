@@ -262,7 +262,7 @@ scan_deep() {
   # failure stays quiet there.
   local candidate_status_file candidate_stderr_file
   local status_file stderr_file find_status bare_maxdepth
-  local hits_file candidate_list filtered_file err_line cand_path keep
+  local hits_file candidate_list filtered_file err_line err_path cand_path keep
   # shellcheck disable=SC2016
   local bare_candidate_probe='
 parent="${1%/objects}"
@@ -329,29 +329,51 @@ fi
   # pruned bare roots, so nothing beneath them was ever reported.
   (
     LC_ALL=C
-    cand="" last_bare="" hit="" base=""
+    cand="" hit="" base="" root=""
+    declare -a bare_roots=()
     exec 3< "$candidate_list"
     IFS= read -r cand <&3 || cand=""
     LC_ALL=C sort -u "$hits_file" | while IFS= read -r hit; do
       while [ -n "$cand" ] && [[ "$cand" < "$hit" ]]; do
         IFS= read -r cand <&3 || cand=""
       done
-      if [ -n "$last_bare" ]; then
-        case "$hit" in "$last_bare"/*) continue ;; esac
-      fi
+      # Drop bare roots whose subtree is exhausted: every descendant of a
+      # root R sorts below R0 (the '/' separator incremented), so once the
+      # stream passes that bound no later hit can be interior to R. Siblings
+      # such as a.git-other sort between a root and its descendants, so a
+      # single last-root variable is not enough — keep the open set.
+      open=()
+      for root in "${bare_roots[@]}"; do
+        [[ "$hit" < "${root}0" ]] && open+=("$root")
+      done
+      bare_roots=("${open[@]}")
+      for root in "${bare_roots[@]}"; do
+        case "$hit" in "$root"/*) continue 2 ;; esac
+      done
       base="${hit##*/}"
+      if [ "$base" = ".git" ]; then
+        printf '%s\n' "${hit%/.git}"
+        continue
+      fi
       if [ "$hit" = "$cand" ]; then
         printf '%s\n' "$hit"
-        last_bare="$hit"
+        bare_roots+=("$hit")
         IFS= read -r cand <&3 || cand=""
+        continue
+      fi
+      # The pre-candidate loop re-checked every hit with is_bare_repo; that
+      # is what reported bare repos the candidate search cannot see
+      # (artifact-named roots the passes prune, roots under .git/modules).
+      # Three builtin tests per directory is still far cheaper than the old
+      # shell launch per directory.
+      if is_bare_repo "$hit"; then
+        printf '%s\n' "$hit"
+        bare_roots+=("$hit")
         continue
       fi
       case " ${ALL_ARTIFACT_NAMES[*]} " in
         *" $base "*) printf '%s\n' "$hit" >> "$ARTIFACTS_FILE"; continue ;;
       esac
-      if [ "$base" = ".git" ]; then
-        printf '%s\n' "${hit%/.git}"
-      fi
     done
     exec 3<&-
   )
@@ -366,8 +388,19 @@ fi
     filtered_file="$(mktemp)"
     while IFS= read -r err_line; do
       keep=1
+      # Extract the pathname find is complaining about ("find: <path>: …",
+      # optionally quoted) and drop the line only when that path is a bare
+      # candidate or beneath one — a substring match would also silence
+      # siblings such as a.git-locked next to a bare a.git.
+      err_path="${err_line#find: }"
+      err_path="${err_path#\'}"
+      err_path="${err_path#‘}"
+      err_path="${err_path%%: *}"
+      err_path="${err_path%\'}"
+      err_path="${err_path%’}"
       while IFS= read -r cand_path; do
-        case "$err_line" in *"$cand_path"*) keep=0; break ;; esac
+        if [ "$err_path" = "$cand_path" ]; then keep=0; break; fi
+        case "$err_path" in "$cand_path"/*) keep=0; break ;; esac
       done < "$candidate_list"
       [ "$keep" = "1" ] && printf '%s\n' "$err_line" >> "$filtered_file"
     done < "$stderr_file"

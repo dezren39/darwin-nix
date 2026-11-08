@@ -548,6 +548,43 @@ if [ "$(id -u)" -ne 0 ]; then
   case "$OUT" in *"repo"$'\t'"$BARE_LOCKED_CANON/b.git"*) echo "ok: bare repo listed despite unreadable refs inside it" ;; *) fail "bare-locked scan missed the bare repo (got: $OUT)" ;; esac
 fi
 
+# A sibling that sorts between a bare root and its descendants (a.git-other
+# vs a.git/embedded) must not end interior suppression (#1637 review).
+INTERLEAVE="$TMP_ROOT/interleave"
+"$real_git" init -q --bare "$INTERLEAVE/a.git"
+"$real_git" init -q "$INTERLEAVE/a.git/embedded"
+"$real_git" init -q --bare "$INTERLEAVE/a.git-other"
+run --path "$INTERLEAVE"
+[ "$STATUS" -eq 0 ] || fail "interleaved-sibling scan exited $STATUS (#1637)"
+INTERLEAVE_CANON="$(cd "$INTERLEAVE" && pwd -P)"
+expected_interleave="$(printf 'repo\t%s\nrepo\t%s' "$INTERLEAVE_CANON/a.git" "$INTERLEAVE_CANON/a.git-other")"
+[ "$OUT" = "$expected_interleave" ] || fail "interleaved siblings reported wrong repos (got: $OUT)"
+
+# An artifact-named directory with the bare shape is a repository, not an
+# artifact: the old loop's is_bare_repo re-check reported it (#1637 review).
+ARTIBARE="$TMP_ROOT/artibare"
+mkdir -p "$ARTIBARE/build/objects" "$ARTIBARE/build/refs"
+printf 'ref: refs/heads/main\n' > "$ARTIBARE/build/HEAD"
+run --path "$ARTIBARE" --bare-only
+[ "$STATUS" -eq 0 ] || fail "artifact-named bare scan exited $STATUS (#1637)"
+ARTIBARE_CANON="$(cd "$ARTIBARE" && pwd -P)"
+[ "$OUT" = "repo"$'\t'"$ARTIBARE_CANON/build" ] || fail "artifact-named bare repo not reported (got: $OUT)"
+echo "ok: artifact-named bare repo still reported"
+
+# Error suppression applies to bare interiors only: an unreadable sibling
+# whose name merely starts with a bare root's name stays a named failure
+# (#1637 review). Non-root only.
+if [ "$(id -u)" -ne 0 ]; then
+  SIBLOCK="$TMP_ROOT/siblock"
+  "$real_git" init -q --bare "$SIBLOCK/a.git"
+  mkdir -p "$SIBLOCK/a.git-locked"
+  chmod 000 "$SIBLOCK/a.git-locked"
+  run --path "$SIBLOCK"
+  chmod 755 "$SIBLOCK/a.git-locked"
+  [ "$STATUS" -ne 0 ] || fail "unreadable sibling of a bare root exited 0 (#1637)"
+  case "$ERR" in *"a.git-locked"*) echo "ok: unreadable sibling of a bare root named on stderr" ;; *) fail "unreadable sibling not named on stderr (got: $ERR)" ;; esac
+fi
+
 # A bare repo that is also an explicit seed and a --follow target is emitted
 # once, just like a nested bare repo reached by the recursive scan.
 run --path "$BARE_REPO" --path "$BARE_REPO" --follow --bare-only

@@ -107,7 +107,17 @@ const LANG_TO_EXT: Record<string, string> = {
 };
 
 function langToExtension(languageId: string): string {
-  const known = LANG_TO_EXT[languageId];
+  // #1721: judge the lookup by own property only. LANG_TO_EXT is a
+  // plain object literal, so a bare index walks the prototype chain:
+  // prototype-named languageIds (toString, constructor, __proto__,
+  // hasOwnProperty, valueOf) returned inherited functions/objects
+  // instead of a string, bypassing the #1649 sanitizer below and
+  // landing coerced garbage in the backup filename and fileExtension
+  // meta. (Object.hasOwn would do, but the ES2020 lib target predates
+  // its types; hasOwnProperty.call is the same own-property test.)
+  const known = Object.prototype.hasOwnProperty.call(LANG_TO_EXT, languageId)
+    ? LANG_TO_EXT[languageId]
+    : undefined;
   if (known) return known;
   // #1649: the fallback is spliced into the backup filename in
   // backupDoc, and a languageId is extension/user-supplied data

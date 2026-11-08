@@ -443,18 +443,34 @@ function utcDayDir(base: string): string {
   // pass (the read side was hardened in #1524; this is the write
   // side). lstat also sees a dangling link, which mkdirSync would
   // otherwise surface as a raw ENOENT out of backupDoc.
-  let isLink = false;
-  try {
-    isLink = fs.lstatSync(dir).isSymbolicLink();
-  } catch {
-    isLink = false;
-  }
-  if (isLink) {
+  //
+  // Checked twice on purpose (#1709): mkdirSync({recursive: true})
+  // succeeds silently when the day directory already exists, including
+  // when it is now a symlink to a directory - so the pre-check alone
+  // left the #1603 invariant holding only if nothing changed between
+  // the two calls. Re-checking after the mkdir makes it true by
+  // construction: a link swapped in during the window is refused with
+  // the same named error, and backupDoc's existing containment handles
+  // it exactly like the pre-planted case.
+  const refuseLink = (): void => {
     throw new Error(
       `buffer-backup: refusing to write through symlinked day directory: ${dir}`
     );
+  };
+  const isLinkNow = (): boolean => {
+    try {
+      return fs.lstatSync(dir).isSymbolicLink();
+    } catch {
+      return false;
+    }
+  };
+  if (isLinkNow()) {
+    refuseLink();
   }
   fs.mkdirSync(dir, { recursive: true });
+  if (isLinkNow()) {
+    refuseLink();
+  }
   return dir;
 }
 

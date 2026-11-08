@@ -947,4 +947,57 @@ for (const bad of [NaN, Infinity, -Infinity]) {
   console.log("pass: langToExtension fallback is separator-safe; composed backup path stays in the day dir (#1649)");
 }
 
+// 32. Symlinked day-directory swapped in after the pre-check (#1709):
+//     utcDayDir checks the day dir with lstat, then mkdirs, and for a
+//     moment the #1603 invariant held only if nothing changed between
+//     the two calls — mkdirSync({recursive:true}) succeeds silently when
+//     the path already exists, including when it is now a symlink to a
+//     directory, so backupDoc wrote through the link (its target is
+//     outside the backup dir, invisible to listBackups and every cleanup
+//     pass). The post-mkdir recheck is pinned here by interposing the
+//     injected fs surface: the real mkdirSync runs, then the harness
+//     swaps the created day dir for a symlink to an outside directory
+//     before utcDayDir can look again. Deterministic, no real race.
+{
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "buffer-backup-outside-"));
+  let swapped = false;
+  const swappingFs = {
+    ...fs,
+    // The pre-check must see the real (absent) path; only the mkdir is
+    // interposed, and it swaps the link in on its way out.
+    lstatSync: (p) => fs.lstatSync(p),
+    mkdirSync: (p, opts) => {
+      fs.mkdirSync(p, opts);
+      if (!swapped) {
+        swapped = true;
+        fs.rmSync(p, { recursive: true, force: true });
+        fs.symlinkSync(outside, p, "dir");
+      }
+    },
+  };
+  const swapFactory = new Function(
+    "fs",
+    "path",
+    `${stripTypes(extractFunction("utcDayDir"))}
+     return { utcDayDir };`,
+  );
+  const { utcDayDir: swappingUtcDayDir } = swapFactory(swappingFs, path);
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "buffer-backup-test-"));
+  const today = new Date().toISOString().slice(0, 10);
+  assert.throws(
+    () => swappingUtcDayDir(base),
+    /buffer-backup: refusing to write through symlinked day directory/,
+    "a symlink swapped in between the lstat and the mkdir must be refused after the mkdir (#1709)",
+  );
+  assert.ok(swapped, "the interposed mkdir must actually have performed the swap");
+  assert.deepStrictEqual(
+    fs.readdirSync(outside),
+    [],
+    "nothing may be written into the swapped-in link target",
+  );
+  fs.rmSync(base, { recursive: true, force: true });
+  fs.rmSync(outside, { recursive: true, force: true });
+  console.log("pass: utcDayDir rechecks the day directory after mkdir and refuses a swapped-in symlink (#1709)");
+}
+
 console.log("cleanup-count.test.mjs: all assertions passed");

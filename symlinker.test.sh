@@ -62,6 +62,13 @@
 #          claimed --simple and --no-input/--yes for undo. --simple now
 #          rejects in undo like the other forward-only flags, and the
 #          usage UNDO list no longer claims either. Scenario P pins this.
+#   #1750 -- --skip-restore is undo-only (its only consumer is the undo
+#          branch's BACKUP-record restore handling), but it was accepted
+#          in forward mode and silently ignored at exit 0 -- the mirror
+#          of #1730/#1738. It now rejects at parse time (exit 2, naming
+#          the flag and that it is undo-only) when no --undo is given,
+#          in either argument order; --undo <ts> --skip-restore and
+#          --skip-restore --undo <ts> stay valid. Scenario Q pins this.
 # This drives the REAL symlinker.sh (no pasted copies) against temp dirs.
 # The #886 scenario stubs `date` so every invocation lands in the same
 # "second" deterministically.
@@ -681,6 +688,49 @@ if XDG_CACHE_HOME="$P/cache" bash "$SCRIPT" --input-dir "$P/in" --output-dir "$P
 else
   fail "P: forward --simple exited non-zero: $(cat "$P/fwd.log")"
 fi
+
+
+# --- Scenario Q (#1750): --skip-restore rejected in forward mode ---
+# --skip-restore is undo-only: its only consumer is the undo branch's
+# BACKUP-record restore handling, so a forward run carrying it exited 0
+# and linked identically to one without it. It must now reject at parse
+# time -- exit 2, error naming --skip-restore and that it is undo-only,
+# in either argument order (flag before other forward options and flag
+# after them), before any linking is performed. Both --undo orders stay
+# valid (Scenario O's undo control also covers the after---undo order).
+Q="$TMP_ROOT/q"; mkdir -p "$Q/in" "$Q/out" "$Q/cache"
+printf 'new\n' > "$Q/in/example.txt"
+q_reject() { # q_reject <label> <args...>
+  local label="$1"; shift
+  local rc=0
+  XDG_CACHE_HOME="$Q/cache" bash "$SCRIPT" --input-dir "$Q/in" --output-dir "$Q/out" "$@" >"$Q/reject.log" 2>"$Q/reject.err" || rc=$?
+  if [[ $rc -ne 2 ]]; then
+    fail "Q: --skip-restore forward ($label) - expected exit 2, got $rc: $(cat "$Q/reject.err")"
+  elif ! grep -qF -- "--skip-restore" "$Q/reject.err"; then
+    fail "Q: --skip-restore forward ($label) - error does not name --skip-restore: $(cat "$Q/reject.err")"
+  elif ! grep -qF -- "undo-only" "$Q/reject.err"; then
+    fail "Q: --skip-restore forward ($label) - error does not name it undo-only: $(cat "$Q/reject.err")"
+  else
+    echo "ok: Q: --skip-restore rejected in forward mode (exit 2, $label)"
+  fi
+  [[ ! -e "$Q/out/example.txt" && ! -L "$Q/out/example.txt" ]] || fail "Q: rejected --skip-restore invocation ($label) performed linking"
+}
+q_reject "flag last" --skip-restore
+q_reject "flag first" --skip-restore --no-input
+# Flag-before---undo stays valid: a real forward run, then
+# --skip-restore --undo <ts> performs the undo exactly like Scenario O's
+# --undo <ts> --skip-restore control.
+XDG_CACHE_HOME="$Q/cache" bash "$SCRIPT" --input-dir "$Q/in" --output-dir "$Q/out" \
+  --no-input >"$Q/run.log" 2>&1 || fail "Q: link run exited non-zero"
+ts_q="$(undo_ts_of "$Q/cache")"
+[[ -n "$ts_q" ]] || fail "Q: no undo file written"
+check "Q: link run created the symlink" test -L "$Q/out/example.txt"
+if XDG_CACHE_HOME="$Q/cache" bash "$SCRIPT" --skip-restore --undo "$ts_q" >"$Q/undo.log" 2>&1; then
+  echo "ok: Q: --skip-restore before --undo accepted"
+else
+  fail "Q: --skip-restore --undo exited non-zero: $(cat "$Q/undo.log")"
+fi
+check "Q: flag-before---undo undo removed the symlink" test ! -L "$Q/out/example.txt"
 
 if (( failures > 0 )); then
   echo "symlinker tests: $failures failure(s)" >&2

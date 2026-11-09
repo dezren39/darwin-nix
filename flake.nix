@@ -706,6 +706,33 @@ rec {
               bash ./symlinker.test.sh
               touch $out
             '';
+        # #1752: tmux-navigator.test.sh extracts the vim-tmux-navigator
+        # block from homeUser.nix and loads it in isolated tmux servers -
+        # the host version and a stubbed tmux 2.9 - pinning the C-backslash
+        # root-table binding for both version branches. The block's old
+        # tmux_version assignment was never shell-evaluated by tmux, so
+        # the binding silently never installed; no suite covered it.
+        tmux-navigator-tests =
+          pkgs.runCommandLocal "tmux-navigator-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.tmux
+                pkgs.coreutils
+                pkgs.gawk
+                pkgs.gnugrep
+                pkgs.gnused
+              ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/homeUser.nix $src/tmux-navigator.test.sh ./
+              chmod u+w ./homeUser.nix ./tmux-navigator.test.sh
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./tmux-navigator.test.sh
+              touch $out
+            '';
         # #967: symlink-scripts.test.sh drives the real symlink-commands
         # and symlink-plugins — in place against the repo's real
         # commands/ and plugins/, and as verbatim copies in a fixture

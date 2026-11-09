@@ -1276,7 +1276,7 @@ for (const bad of [NaN, Infinity, -Infinity]) {
 }
 
 
-// 33. backupDoc's write is contained per document (#1729): a
+// 35. backupDoc's write is contained per document (#1729): a
 //     writeFileSync failure (ENOSPC here) must not throw out of
 //     backupDoc or abort the backupAll pass - every later document is
 //     still backed up - the failed document's hash stays unset so a
@@ -1309,7 +1309,7 @@ for (const bad of [NaN, Infinity, -Infinity]) {
     getText: () => text, languageId: "txt", lineCount: 1,
   });
 
-  // 33a. Throwing write for the first document: pass survives, second
+  // 35a. Throwing write for the first document: pass survives, second
   //      document is backed up, first hash stays unset, signal logged.
   {
     const base = fs.mkdtempSync(path.join(os.tmpdir(), "buffer-backup-test-"));
@@ -1351,7 +1351,7 @@ for (const bad of [NaN, Infinity, -Infinity]) {
     console.log("pass: backupDoc write failure is contained per document, backupAll backs up later documents, hash unset, signal logged (#1729)");
   }
 
-  // 33b. Normal write unchanged: a healthy document writes, hash set,
+  // 35b. Normal write unchanged: a healthy document writes, hash set,
   //      no signal.
   {
     const base = fs.mkdtempSync(path.join(os.tmpdir(), "buffer-backup-test-"));
@@ -1374,7 +1374,7 @@ for (const bad of [NaN, Infinity, -Infinity]) {
   }
 }
 
-// 34. getFirstLine 120-unit cut must never split a surrogate pair
+// 36. getFirstLine 120-unit cut must never split a surrogate pair
 //     (#1735): the cut backs off one code unit when a pair straddles
 //     it, so BackupMeta.firstLine never carries a lone surrogate into
 //     the JSON meta line. Pinned shapes: straddle / fully inside /

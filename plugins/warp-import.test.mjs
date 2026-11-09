@@ -3,7 +3,7 @@
 // Uses only fake data. It never touches opencode.db and never spawns the CLI.
 
 import assert from "node:assert/strict"
-import { mkdir, mkdtemp, rm } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import plugin, { buildTool, describeSession, resolveSession } from "./warp-import.js"
@@ -319,6 +319,61 @@ await test("no client and no serverUrl still degrades cleanly", async () => {
   delete process.env.OPENCODE_BIN
   assert.match(out, /FALLBACK/)
   assert.match(out, /no SDK client and no serverUrl available/)
+})
+
+await test("sanitize is declared in the args schema with a pass-false-normally instruction (#1754)", () => {
+  const { env } = makeEnv()
+  const tool = buildTool(env)
+  assert.deepEqual(Object.keys(tool.args), ["session", "branch", "use_current_directory", "sanitize"])
+  assert.equal(tool.args.sanitize.type, "boolean")
+  assert.match(tool.args.sanitize.description, /Pass false normally/)
+  // The existing three args are unchanged.
+  assert.equal(tool.args.session.type, "string")
+  assert.deepEqual(tool.args.branch.type, ["string", "null"])
+  assert.equal(tool.args.use_current_directory.type, "boolean")
+})
+
+// OPENCODE_BIN stub that records every argv line, so the export argv is
+// observable without spawning a real CLI.
+let stubSeq = 0
+async function argvStub() {
+  stubSeq++
+  const log = join(ROOT, `argv-${stubSeq}.log`)
+  const stub = join(ROOT, `opencode-stub-${stubSeq}.sh`)
+  await writeFile(stub, `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(log)}\n`)
+  await chmod(stub, 0o755)
+  return { stub, log }
+}
+
+await test("sanitize:true exports with --sanitize and says so (#1754)", async () => {
+  const { stub, log } = await argvStub()
+  const { env } = makeEnv()
+  process.env.OPENCODE_BIN = stub
+  let out
+  try {
+    out = await buildTool(env).execute({ session: "ses_aaa", use_current_directory: true, sanitize: true }, ctx)
+  } finally {
+    delete process.env.OPENCODE_BIN
+  }
+  const lines = (await readFile(log, "utf8")).trim().split("\n")
+  assert.ok(lines.includes("export ses_aaa --sanitize"), `export argv missing --sanitize: ${lines.join(" | ")}`)
+  assert.match(out, /Sanitized: exported with --sanitize/)
+})
+
+await test("sanitize omitted exports exactly as today with no sanitize note (#1754)", async () => {
+  const { stub, log } = await argvStub()
+  const { env } = makeEnv()
+  process.env.OPENCODE_BIN = stub
+  let out
+  try {
+    out = await buildTool(env).execute({ session: "ses_aaa", use_current_directory: true }, ctx)
+  } finally {
+    delete process.env.OPENCODE_BIN
+  }
+  const lines = (await readFile(log, "utf8")).trim().split("\n")
+  assert.ok(lines.includes("export ses_aaa"), `unexpected export argv: ${lines.join(" | ")}`)
+  assert.ok(!lines.some((l) => l.includes("--sanitize")), `--sanitize leaked without the arg: ${lines.join(" | ")}`)
+  assert.ok(!out.includes("Sanitized:"), "result claims a sanitize that did not happen")
 })
 
 await test("the plugin leaves no temp files behind", async () => {

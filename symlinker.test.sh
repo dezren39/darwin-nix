@@ -56,6 +56,12 @@
 #          order; undo-valid controls stay accepted. Scenario O pins
 #          this, and earlier undo scenarios no longer pass --no-input
 #          (a forward-only flag) to undo runs.
+#   #1738 -- --simple was left out of the #1730 refusal list: it is only
+#          consumed by describe() on the forward path, so --undo --simple
+#          was silently byte-identical, and the usage UNDO list still
+#          claimed --simple and --no-input/--yes for undo. --simple now
+#          rejects in undo like the other forward-only flags, and the
+#          usage UNDO list no longer claims either. Scenario P pins this.
 # This drives the REAL symlinker.sh (no pasted copies) against temp dirs.
 # The #886 scenario stubs `date` so every invocation lands in the same
 # "second" deterministically.
@@ -635,6 +641,46 @@ else
   fail "O: plain undo exited non-zero: $(cat "$O/undo.log")"
 fi
 check "O: plain undo removed the symlink" test ! -L "$O/out/example.txt"
+
+
+# --- Scenario P (#1738): --simple rejected in --undo mode ---
+# --simple only shapes forward-path describe() output; the undo branch
+# never calls describe(), so --undo <ts> --simple was byte-identical to
+# --undo <ts> at exit 0. It must now reject at parse time -- exit 2, error
+# naming --simple and --undo mode, in either argument order -- and the
+# usage UNDO list must not claim --simple or --no-input/--yes.
+P="$TMP_ROOT/p"; mkdir -p "$P/in" "$P/out" "$P/cache"
+printf 'new\n' > "$P/in/example.txt"
+XDG_CACHE_HOME="$P/cache" bash "$SCRIPT" --input-dir "$P/in" --output-dir "$P/out" \
+  --no-input >"$P/run.log" 2>&1 || fail "P: link run exited non-zero"
+ts_p="$(undo_ts_of "$P/cache")"
+[[ -n "$ts_p" ]] || fail "P: no undo file written"
+p_reject() {
+  local rc=0
+  XDG_CACHE_HOME="$P/cache" bash "$SCRIPT" "$@" >"$P/reject.log" 2>"$P/reject.err" || rc=$?
+  if [[ $rc -ne 2 ]]; then
+    fail "P: --simple with --undo ($*) - expected exit 2, got $rc: $(cat "$P/reject.err")"
+  elif ! grep -qF -- "--simple" "$P/reject.err"; then
+    fail "P: --simple with --undo - error does not name --simple: $(cat "$P/reject.err")"
+  elif ! grep -qF -- "--undo" "$P/reject.err"; then
+    fail "P: --simple with --undo - error does not name --undo mode: $(cat "$P/reject.err")"
+  else
+    echo "ok: P: --simple rejected in --undo mode (exit 2, order: $*)"
+  fi
+  [[ -L "$P/out/example.txt" ]] || fail "P: rejected --simple invocation performed the undo (symlink gone)"
+}
+p_reject --undo "$ts_p" --dry-run --simple
+p_reject --simple --undo "$ts_p" --dry-run
+p_reject --undo "$ts_p" --simple
+bash "$SCRIPT" --help >"$P/help.log" 2>&1 || fail "P: --help exited non-zero"
+undo_list="$(sed -n "/Undo supports the same flags/,/^$/p" "$P/help.log")"
+if grep -qF -- "--simple" <<<"$undo_list"; then fail "P: usage UNDO list still claims --simple"; else echo "ok: P: usage UNDO list omits --simple"; fi
+if grep -qF -- "--no-input" <<<"$undo_list"; then fail "P: usage UNDO list still claims --no-input"; else echo "ok: P: usage UNDO list omits --no-input/--yes"; fi
+if XDG_CACHE_HOME="$P/cache" bash "$SCRIPT" --input-dir "$P/in" --output-dir "$P/out" --dry-run --simple >"$P/fwd.log" 2>&1; then
+  echo "ok: P: forward --simple still accepted"
+else
+  fail "P: forward --simple exited non-zero: $(cat "$P/fwd.log")"
+fi
 
 if (( failures > 0 )); then
   echo "symlinker tests: $failures failure(s)" >&2

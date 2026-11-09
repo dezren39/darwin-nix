@@ -320,6 +320,11 @@ export function buildTool(env) {
         description:
           "Pass false normally. Pass true only when the user is already in the worktree they want, to skip creating a workspace and import into the current directory instead.",
       },
+      sanitize: {
+        type: "boolean",
+        description:
+          "Pass false normally. Pass true only when the user explicitly asked for redaction, to export with --sanitize so transcript and file data are redacted before the move.",
+      },
     },
     async execute(args, ctx) {
       try {
@@ -408,8 +413,9 @@ async function execute(env, args, ctx) {
   }
 
   // 3. Move the session.
+  const sanitized = args.sanitize === true
   try {
-    await relocate(session.id, targetDir, args.sanitize === true)
+    await relocate(session.id, targetDir, sanitized)
   } catch (err) {
     return [
       `warp_import failed while moving the session: ${errorText(err)}`,
@@ -436,6 +442,7 @@ async function execute(env, args, ctx) {
     `    to: ${targetDir}`,
     workspace ? `  workspace: ${workspace.id} (worktree${workspace.branch ? `, branch ${workspace.branch}` : ""})` : null,
     switched ? "  TUI switched to this session." : null,
+    sanitized ? "  Sanitized: exported with --sanitize, so transcript and file data were redacted." : null,
     "",
     "Warning: this was a MOVE, not a copy — the old location no longer has this session.",
     "Warning: the imported session has no event history, so it can never be warped again.",

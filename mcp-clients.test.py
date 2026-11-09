@@ -31,6 +31,12 @@ Covers the two PR #904 fallout bugs:
   clients still enforced, exit 1; the #905 unbalanced-object warn-and-leave
   at exit 0 is unchanged.
 
+- #1749: a Zed settings.json with two live top-level context_servers
+  keys is a #906 per-client failure -- named on stderr as duplicate,
+  file byte-for-byte unchanged, other clients still enforced, exit 1;
+  replacing only the first key would leave the second (which json.loads
+  resolves last-key-wins) in place while reporting success.
+
 - #1217: a JSON client whose mcpServers is present but not an object
   (string, list, number, bool) is a #906 per-client failure -- named on
   stderr, file byte-for-byte unchanged, other clients still enforced,
@@ -286,6 +292,31 @@ check("1228 comment before string exits 1", r.returncode == 1, f"exit={r.returnc
 check("1228 comment before string names not-an-object", "not an object" in r.stderr, r.stderr)
 check("1228 comment before string file unchanged", read(zed_path) == seeded)
 shutil.rmtree(home)
+
+# #1749: two live top-level context_servers keys in Zed -- a #906 failure
+# for Zed only: exit 1, Zed and its file named on stderr as duplicate,
+# the bad file byte-for-byte unchanged, and the well-formed Copilot
+# client still enforced. Any second live key triggers it, whatever
+# either value holds (foreign+foreign, mcpx+foreign, foreign+mcpx).
+MCPX_BLOCK = '{"mcpx": {"command": "mcpx"}}'
+for first, second, label in (
+        ('{"old": {"command": "old"}}', '{"foreign": {"command": "bypass"}}', "foreign+foreign"),
+        (MCPX_BLOCK, '{"foreign": {"command": "bypass"}}', "mcpx+foreign"),
+        ('{"foreign": {"command": "bypass"}}', MCPX_BLOCK, "foreign+mcpx")):
+    home = fresh_home()
+    seed(home, ".copilot/mcp-config.json", '{"mcpServers": {"other": {"command": "x"}}}')
+    zed_path = seed(home, ".config/zed/settings.json",
+                    '{\n  "theme": "Dark",\n  "context_servers": ' + first +
+                    ',\n  "context_servers": ' + second + '\n}\n')
+    seeded = read(zed_path)
+    r = run(home)
+    check(f"1749 {label} duplicate keys exits 1", r.returncode == 1, f"exit={r.returncode} stderr={r.stderr}")
+    check(f"1749 {label} stderr names Zed, its file, and duplicate",
+          "Zed" in r.stderr and ".config/zed/settings.json" in r.stderr and "duplicate" in r.stderr, r.stderr)
+    check(f"1749 {label} bad file byte-for-byte unchanged", read(zed_path) == seeded)
+    check(f"1749 {label} Copilot still enforced",
+          '"mcpx"' in read(os.path.join(home, ".copilot/mcp-config.json")))
+    shutil.rmtree(home)
 
 # #929: a commented-out context_servers block before a live foreign block --
 # the live block is replaced, the comment is preserved byte-for-byte.

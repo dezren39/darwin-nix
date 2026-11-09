@@ -723,8 +723,11 @@ def _replace_context_servers(text, entry):
     value already is the mcpx-only entry, or None when no balanced object
     value can be located — the caller then warns and leaves the file alone
     rather than guessing (#905). A live value that is present but not an
-    object raises ValueError instead (#1228). The key is located with
-    _live_key_span, so
+    object raises ValueError instead (#1228). A second live top-level
+    "context_servers" key also raises ValueError (#1749): duplicate keys
+    are ambiguous (json.loads resolves last-key-wins), so replacing only
+    the first would leave a foreign block in place while reporting
+    success. The key is located with _live_key_span, so
     a commented-out or quoted "context_servers" block cannot absorb the
     replacement (#929)."""
     live = _live_key_span(text, "context_servers")
@@ -744,6 +747,19 @@ def _replace_context_servers(text, entry):
     end = _object_span(text, value_start)
     if end is None:
         return None
+    # #1749: a second live top-level "context_servers" key makes the file
+    # ambiguous -- fail this client (#906 path) instead of replacing only
+    # the first key and reporting success while a duplicate (which
+    # json.loads would resolve last-key-wins) survives. Blank the first
+    # key's whole span (newlines kept) and re-scan: any live key the
+    # scanner still finds is a genuine second top-level occurrence --
+    # nested keys inside the first value are blanked with it, and
+    # commented-out or quoted occurrences are still skipped (#929).
+    masked = text[:key_start] + "".join(
+        "\n" if ch == "\n" else " " for ch in text[key_start:end]
+    ) + text[end:]
+    if _live_key_span(masked, "context_servers") is not None:
+        raise ValueError("duplicate live context_servers keys; not changed")
     try:
         if _jsonc_loads(text[value_start:end]) == entry:
             return text

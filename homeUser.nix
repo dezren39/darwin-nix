@@ -510,10 +510,14 @@ lib.recursiveUpdate {
        bind-key -n 'C-j' if-shell "$is_vim" 'send-keys C-j'  'select-pane -D'
        bind-key -n 'C-k' if-shell "$is_vim" 'send-keys C-k'  'select-pane -U'
        bind-key -n 'C-l' if-shell "$is_vim" 'send-keys C-l'  'select-pane -R'
-       tmux_version='$(tmux -V | sed -En "s/^tmux ([0-9]+(.[0-9]+)?).*TODO_REMOVE_THIS_BLOCK/\1/p")'
-       if-shell -b '[ "$(echo "$tmux_version < 3.0" | bc)" = 1 ]' \
+       # tmux config assignments are never shell-evaluated, so the old
+       # tmux_version line stayed a literal string and both bc gates below
+       # it silently never fired (#1752). Ask the shell directly instead:
+       # if-shell -b runs its command with /bin/sh, which parses the real
+       # tmux -V output at load time.
+       if-shell -b 'tmux -V | grep -Eq "^tmux (next-)?[12][.]"' \
          "bind-key -n 'C-\\' if-shell \"$is_vim\" 'send-keys C-\\'  'select-pane -l'"
-       if-shell -b '[ "$(echo "$tmux_version >= 3.0" | bc)" = 1 ]' \
+       if-shell -b 'tmux -V | grep -Eq "^tmux (next-)?([3-9]|[1-9][0-9])"' \
          "bind-key -n 'C-\\' if-shell \"$is_vim\" 'send-keys C-\\\\'  'select-pane -l'"
 
        bind-key -T copy-mode-vi 'C-h' select-pane -L

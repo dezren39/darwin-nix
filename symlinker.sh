@@ -201,6 +201,19 @@ EOF
 # the loop for the flag-before---undo order. --dry-run, --force,
 # --verbose, --strict and --skip-restore stay valid in undo mode, and
 # --help stays mode-independent.
+# Undo-only options (#1750): --skip-restore is consumed only by the undo
+# branch (the BACKUP-record restore handling), so accepting it in a
+# forward run silently ignored it -- the mirror of the above. Record it
+# when seen before --undo; reject it (exit 2, naming the flag and that
+# it is undo-only) after the loop if no --undo was given. The
+# flag-before---undo order stays valid: the post-loop judge only fires
+# when UNDO_SET is still 0.
+UNDO_ONLY_SEEN=()
+note_undo_only() {
+  if (( ! UNDO_SET )); then
+    UNDO_ONLY_SEEN+=("$1")
+  fi
+}
 FORWARD_ONLY_SEEN=()
 reject_forward_only_in_undo() {
   if (( UNDO_SET )); then
@@ -238,7 +251,7 @@ while [[ $# -gt 0 ]]; do
     --no-input|--yes|-y) reject_forward_only_in_undo "$1"; NO_INPUT=true;      shift ;;
     --skip-backup)       reject_forward_only_in_undo "$1"; SKIP_BACKUP=true;   shift ;;
     --skip-conflict)     reject_forward_only_in_undo "$1"; SKIP_CONFLICT=true; shift ;;
-    --skip-restore)      SKIP_RESTORE=true;  shift ;;
+    --skip-restore)      note_undo_only "$1"; SKIP_RESTORE=true;  shift ;;
     --strict)            STRICT=true;        shift ;;
     --only-files)        reject_forward_only_in_undo "$1"; ONLY_FILES=true;    shift ;;
     --only-dirs)         reject_forward_only_in_undo "$1"; ONLY_DIRS=true;     shift ;;
@@ -328,6 +341,12 @@ done
 # happened yet (this is still parse time), so reject here with exit 2.
 if (( UNDO_SET )) && (( ${#FORWARD_ONLY_SEEN[@]} > 0 )); then
   echo "Error: ${FORWARD_ONLY_SEEN[*]} cannot be used in --undo mode (forward-only option)" >&2; exit 2
+fi
+
+# Undo-only options given without --undo (#1750): no linking has
+# happened yet (this is still parse time), so reject here with exit 2.
+if (( ! UNDO_SET )) && (( ${#UNDO_ONLY_SEEN[@]} > 0 )); then
+  echo "Error: ${UNDO_ONLY_SEEN[*]} cannot be used in forward mode (undo-only option; use with --undo)" >&2; exit 2
 fi
 
 # Validate conflicting type filters

@@ -30,7 +30,8 @@ fi
 # failing step on stderr, surface brew's own stderr, and exit 1.
 # A genuinely empty successful list keeps the normal path below.
 BREW_ERR=$(mktemp)
-trap 'rm -f "$BREW_ERR"' EXIT
+UNMANAGED_APPS_FILE=$(mktemp)
+trap 'rm -f "$BREW_ERR" "$UNMANAGED_APPS_FILE"' EXIT
 
 if ! BREW_LIST=$(brew list --cask 2>"$BREW_ERR"); then
     echo "search: error: 'brew list --cask' failed — installed casks could not be enumerated" >&2
@@ -66,6 +67,7 @@ check_if_brew_installed() {
        [[ ! " ${BREW_NAMES[*]} " =~ " ${normalized_name} " ]]; then
         # echo "${app_path}"
         echo "${normalized_name}"
+        printf '%s\n' "$normalized_name" >> "$UNMANAGED_APPS_FILE"
 
         # echo
     fi
@@ -96,4 +98,8 @@ if [ -d ~/Applications ]; then
     done
 else
     echo "~/Applications directory does not exist"
+fi
+
+if [[ ! -s "$UNMANAGED_APPS_FILE" ]]; then
+    echo "No non-Homebrew apps found."
 fi

@@ -716,6 +716,14 @@ probe_accepted --path "$VALID" --depth 08 --docker-age 08 --only-unknown-scratch
 probe_mode_refused "clean.sh: --system conflicts with repository-scoped flags: --depth" --dry-run --system --depth 3
 probe_mode_refused "clean.sh: --system conflicts with repository-scoped flags: --depth" --dry-run --depth 3 --system
 probe_mode_refused "clean.sh: --system conflicts with repository-scoped flags: --quick --expire-reflog" --dry-run --system --quick --expire-reflog
+# --no-recursive/--no-walk: the one repo-scoped pair the judge never saw
+# (#1763) - the arm set DEPTH_LIMIT but never recorded arg_used, so
+# --system silently dropped them. Both spellings, both orders, refuse
+# naming the canonical --no-recursive (spotlight precedent).
+probe_mode_refused "clean.sh: --system conflicts with repository-scoped flags: --no-recursive" --dry-run --system --no-recursive
+probe_mode_refused "clean.sh: --system conflicts with repository-scoped flags: --no-recursive" --dry-run --no-recursive --system
+probe_mode_refused "clean.sh: --system conflicts with repository-scoped flags: --no-recursive" --dry-run --system --no-walk
+probe_mode_refused "clean.sh: --system conflicts with repository-scoped flags: --no-recursive" --dry-run --no-walk --system
 probe_mode_accepted --dry-run --no-system --path "$VALID" --depth 3 --only-unknown-scratch
 
 # ─── Shared operation-outcome conformance matrix (#1339) ───────────────

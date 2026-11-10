@@ -235,7 +235,7 @@ while [ $# -gt 0 ]; do
     --no-system)      { arg_conflict --system --no-system "$SYSTEM_SET"; SCOPE="no-system"; SCOPE_SET=1; NO_SYSTEM_SET=1; } ;;
     --path)           { arg_require_value "$1" "${2:-}"; [ "$TARGET_SET" -eq 0 ] || arg_die "unexpected argument: $1 (target already set to $TARGET_PATH)"; TARGET_PATH="$2"; TARGET_SET=1; arg_used REPO_FLAGS_USED --path; shift; } ;;
     --recursive|--walk) { arg_conflict --recursive --no-recursive "$RECURSIVE_NO_SET"; arg_conflict --depth --recursive "$DEPTH_SET"; arg_used REPO_FLAGS_USED --recursive; DEPTH_LIMIT=""; RECURSIVE_SET=1; RECURSIVE_YES_SET=1; } ;;
-    --no-recursive|--no-walk) { arg_conflict --recursive --no-recursive "$RECURSIVE_YES_SET"; arg_conflict --depth --no-recursive "$DEPTH_SET"; DEPTH_LIMIT=1; RECURSIVE_SET=1; RECURSIVE_NO_SET=1; } ;;
+    --no-recursive|--no-walk) { arg_conflict --recursive --no-recursive "$RECURSIVE_YES_SET"; arg_conflict --depth --no-recursive "$DEPTH_SET"; DEPTH_LIMIT=1; RECURSIVE_SET=1; RECURSIVE_NO_SET=1; arg_used REPO_FLAGS_USED --no-recursive; } ;;
     --depth)          { arg_require_value "$1" "${2:-}"; arg_conflict --depth --recursive "$RECURSIVE_YES_SET"; arg_conflict --depth --no-recursive "$RECURSIVE_NO_SET"; arg_once "$1" DEPTH_SET; DEPTH_LIMIT="$2"; RECURSIVE_SET=1; arg_used REPO_FLAGS_USED --depth; shift; } ;;
     --follow)         { arg_conflict --follow --no-follow "$FOLLOW_NO_SET"; FOLLOW=1; FOLLOW_YES_SET=1; arg_used REPO_FLAGS_USED --follow; } ;;
     --no-follow)      { arg_conflict --follow --no-follow "$FOLLOW_YES_SET"; FOLLOW=0; FOLLOW_NO_SET=1; arg_used REPO_FLAGS_USED --no-follow; } ;;

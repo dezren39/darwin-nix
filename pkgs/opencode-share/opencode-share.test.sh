@@ -375,6 +375,28 @@ if grep -q "wrongsrce" <<<"$out_n"; then
 fi
 [[ $failures -eq $start ]] && ok "N: sibling mount differing at a '.' position listed first; --status reports only the target's own source"
 
+# ─── Scenario O (#1772): mode-effectiveness refusal ───────────────────────
+# --dry-run has no consumer in status mode (do_status never reads it), so
+# it now refuses post-parse at exit 2, naming the flag and the mode (both
+# orders). --source is pinned as accepted with --status here too: it is a
+# global option (scenarios K/L/N pass it with unmount/status controls).
+start=$failures
+out_o4="$(bash "$SCRIPT" --status --dry-run "$GOOD1" 2>&1)"; rc_o4=$?
+[[ $rc_o4 -eq 2 ]] || fail "O: --status --dry-run expected exit 2, got $rc_o4"
+grep -q -- "--status conflicts with mode flags: --dry-run" <<<"$out_o4" || fail "O: --status --dry-run did not name flag and mode"
+out_o5="$(bash "$SCRIPT" --dry-run --status "$GOOD1" 2>&1)"; rc_o5=$?
+[[ $rc_o5 -eq 2 ]] || fail "O: --dry-run --status expected exit 2, got $rc_o5"
+grep -q -- "--status conflicts with mode flags: --dry-run" <<<"$out_o5" || fail "O: --dry-run --status did not name flag and mode"
+# Controls: the judged mode still works without the dead flag, --dry-run
+# stays effective where it has a consumer, --source stays accepted.
+out_o6="$(bash "$SCRIPT" --status "$GOOD1" 2>&1)"; rc_o6=$?
+[[ $rc_o6 -eq 0 ]] || fail "O: plain --status expected exit 0, got $rc_o6"
+out_o7="$(bash "$SCRIPT" --unmount --dry-run "$GOOD1" 2>&1)"; rc_o7=$?
+[[ $rc_o7 -eq 0 ]] || fail "O: --unmount --dry-run expected exit 0, got $rc_o7"
+out_o8="$(bash "$SCRIPT" --status --source "$SRC" "$GOOD1" 2>&1)"; rc_o8=$?
+[[ $rc_o8 -eq 0 ]] || fail "O: --status --source expected exit 0 (global option), got $rc_o8"
+[[ $failures -eq $start ]] && ok "O: --dry-run refuses at exit 2 in status mode; --source stays accepted; controls pass"
+
 if [[ $failures -gt 0 ]]; then
   echo "$failures failure(s)" >&2
   exit 1

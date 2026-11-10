@@ -161,6 +161,53 @@ for flag in --system --no-system --follow --no-follow; do
   echo "ok: single $flag still accepted"
 done
 
+# ─── --system also judges the repo-scoped maintenance flags (#1711) ────
+# The --system conflict judge only covered the discovery half of the
+# repository vocabulary (--path/--recursive/--depth/--follow/--no-follow),
+# so --quick, --expire-reflog and every --no-git-maintenance alias were
+# silently dropped in system scope: their only consumers are the per-repo
+# maintenance blocks, which DO_REPOS=0 never reaches. Erroring beats
+# silently ignoring them, so each must be named in the same conflict, in
+# either flag order, before any sweep runs (the snapshot check below
+# covers the no-side-effects part).
+for pair in "--system --quick" "--quick --system" \
+            "--system --expire-reflog" "--expire-reflog --system" \
+            "--system --no-git-maintenance" "--no-git-maintenance --system" \
+            "--system --no-maintenance" "--no-maintenance --system" \
+            "--system --no-git" "--no-git --system"; do
+  # The flag under test is whichever token is not --system, so naming it
+  # on stderr is actually proven (the judge always names --system itself).
+  _pair_flag=""
+  for _tok in $pair; do
+    [ "$_tok" = "--system" ] || _pair_flag="$_tok"
+  done
+  # shellcheck disable=SC2086
+  run --dry-run $pair
+  [ "$STATUS" -eq 2 ] || fail "system/maintenance pair '$pair' exited $STATUS (want 2)"
+  case "$ERR" in
+    *"clean.sh: --system conflicts with repository-scoped flags:"*"$_pair_flag"*)
+      echo "ok: system/maintenance pair '$pair' rejected, $_pair_flag named" ;;
+    *) fail "system/maintenance pair '$pair' was not named as a conflict on stderr (got: $ERR)" ;;
+  esac
+done
+unset _pair_flag _tok
+# All of them at once are reported together, in the order given.
+run --dry-run --system --quick --expire-reflog --no-git
+[ "$STATUS" -eq 2 ] || fail "--system with every maintenance flag exited $STATUS (want 2)"
+case "$ERR" in
+  *"conflicts with repository-scoped flags: --quick --expire-reflog --no-git"*)
+    echo "ok: every maintenance flag named together on stderr" ;;
+  *) fail "combined maintenance flags not named on stderr (got: $ERR)" ;;
+esac
+# The same flags stay live outside system scope: --no-system with a target
+# and --only-unknown-scratch parses them and exits 0 (the sudo re-exec
+# section below covers their behaviour; this pins only the parse).
+for flag in --quick --expire-reflog --no-git-maintenance --no-maintenance --no-git; do
+  run --no-system --path "$VALID" --only-unknown-scratch "$flag"
+  [ "$STATUS" -eq 0 ] || fail "$flag under --no-system exited $STATUS (want 0, stderr: $ERR)"
+  echo "ok: $flag still accepted under --no-system"
+done
+
 # ─── No side effects from the rejected runs ────────────────────────────
 if [ "$(snapshot)" = "$BEFORE" ]; then
   echo "ok: rejected runs left the fixture tree unchanged"
@@ -642,6 +689,17 @@ probe_rejected "clean.sh: --system and --no-system may not be combined" --dry-ru
 probe_rejected "clean.sh: --system and --no-system may not be combined" --dry-run --no-system --system
 probe_rejected "clean.sh: --follow and --no-follow may not be combined" --dry-run --path "$VALID" --follow --no-follow
 probe_rejected "clean.sh: --follow and --no-follow may not be combined" --dry-run --path "$VALID" --no-follow --follow
+# Recursive pair + --depth judged at parse time (#1609), mirrored from
+# git-discover-repos: any two of the three depth spellings exit 2 in
+# both orders; same-side repeats stay accepted.
+probe_rejected "clean.sh: --recursive and --no-recursive may not be combined" --dry-run --path "$VALID" --recursive --no-recursive
+probe_rejected "clean.sh: --recursive and --no-recursive may not be combined" --dry-run --path "$VALID" --no-walk --walk
+probe_rejected "clean.sh: --depth and --recursive may not be combined" --dry-run --path "$VALID" --depth 3 --walk
+probe_rejected "clean.sh: --depth and --recursive may not be combined" --dry-run --path "$VALID" --recursive --depth 3
+probe_rejected "clean.sh: --depth and --no-recursive may not be combined" --dry-run --path "$VALID" --depth 3 --no-recursive
+probe_rejected "clean.sh: --depth and --no-recursive may not be combined" --dry-run --path "$VALID" --no-walk --depth 3
+probe_accepted --dry-run --path "$VALID" --recursive --walk --only-unknown-scratch
+probe_accepted --dry-run --path "$VALID" --no-recursive --no-walk --only-unknown-scratch
 probe_rejected "unexpected argument: $OTHER" --dry-run "$VALID" "$OTHER"
 probe_rejected "clean.sh: empty positional argument (target must not be empty)" --dry-run ""
 for bad in abc 0 2147483648 99999999999999999999999999; do
@@ -649,6 +707,24 @@ for bad in abc 0 2147483648 99999999999999999999999999; do
   probe_rejected "clean.sh: --docker-age must be a positive integer" --dry-run --path "$VALID" --docker-age "$bad"
 done
 probe_accepted --path "$VALID" --depth 08 --docker-age 08 --only-unknown-scratch
+
+# Mode-effectiveness rows (#1723, design #1722), driven through the
+# shared probes: the arg_used accumulator records class flags in
+# either order, the arg_refuse_in_mode judge names every offending
+# flag, and it fires only under --system (the --no-system control
+# with the same class flags is accepted).
+probe_mode_refused "clean.sh: --system conflicts with repository-scoped flags: --depth" --dry-run --system --depth 3
+probe_mode_refused "clean.sh: --system conflicts with repository-scoped flags: --depth" --dry-run --depth 3 --system
+probe_mode_refused "clean.sh: --system conflicts with repository-scoped flags: --quick --expire-reflog" --dry-run --system --quick --expire-reflog
+# --no-recursive/--no-walk: the one repo-scoped pair the judge never saw
+# (#1763) - the arm set DEPTH_LIMIT but never recorded arg_used, so
+# --system silently dropped them. Both spellings, both orders, refuse
+# naming the canonical --no-recursive (spotlight precedent).
+probe_mode_refused "clean.sh: --system conflicts with repository-scoped flags: --no-recursive" --dry-run --system --no-recursive
+probe_mode_refused "clean.sh: --system conflicts with repository-scoped flags: --no-recursive" --dry-run --no-recursive --system
+probe_mode_refused "clean.sh: --system conflicts with repository-scoped flags: --no-recursive" --dry-run --system --no-walk
+probe_mode_refused "clean.sh: --system conflicts with repository-scoped flags: --no-recursive" --dry-run --no-walk --system
+probe_mode_accepted --dry-run --no-system --path "$VALID" --depth 3 --only-unknown-scratch
 
 # ─── Shared operation-outcome conformance matrix (#1339) ───────────────
 outcome_probe_matrix
@@ -702,6 +778,96 @@ case "$BC_ERR" in
   *) fail "brew_cleanup failure was swallowed (stderr: $BC_ERR)" ;;
 esac
 BREW_STUB_FAIL=0
+
+# ─── #1465: the warn/info color gate follows its output stream ─────────────
+# warn writes to stderr while info writes to stdout. Keep their gates
+# independent so a terminal on one stream cannot leak escapes to a log on
+# the other; NO_COLOR disables both.
+GATE_DIR="$(mktemp -d)"
+sed -n '/^# Gate each color by the stream/,/^set_output_colors$/p' "$SCRIPT" > "$GATE_DIR/gate.sh"
+[ -s "$GATE_DIR/gate.sh" ] || fail "could not extract the output color gates from clean.sh"
+grep -q 'NO_COLOR' "$GATE_DIR/gate.sh" || fail "clean.sh color gate does not consult NO_COLOR"
+grep -Fq '&& -t 2' "$GATE_DIR/gate.sh" || fail "warn color gate does not test stderr"
+grep -Fq '&& -t 1' "$GATE_DIR/gate.sh" || fail "info color gate does not test stdout"
+gate_colors() (
+  # shellcheck disable=SC1091
+  . "$GATE_DIR/gate.sh" > /dev/null
+  printf '%s%s%s%s' "$C_WARN" "$C_WARN_OFF" "$C_INFO" "$C_INFO_OFF"
+)
+[ -z "$(gate_colors 2>/dev/null)" ] || fail "color gate: piped streams still set warn/info colors"
+[ -z "$(NO_COLOR=1 gate_colors 2>/dev/null)" ] || fail "color gate: NO_COLOR=1 still sets warn/info colors"
+rm -rf "$GATE_DIR"
+
+# ─── #1610: mark_dir's symlinked-marker guard (#1586) ──────────────────
+# PR #1602 added the -L guard to mark_dir but no test: neither this suite
+# nor full-clean.test.sh ever exercised mark_dir, so the guard could be
+# dropped or reordered below the [ -e ] check and every suite would stay
+# green. Extract the real mark_dir (the brew_cleanup pattern above) plus
+# the real spotlight_mark it delegates to, and drive it with poisoned
+# markers. Oracle: per-directory filesystem state after the call --
+# clean.sh's own warning line, no write at the symlink target, the
+# marker still a symlink, MARKED not incremented -- plus a clean sibling
+# in the same run still marked. Mutation check (verified when written):
+# deleting the -L guard makes the live case silent (the [ -e ] shortcut
+# counts it as already present) and degrades the dangling case to
+# spotlight_mark's differently-worded warning, so both fail below.
+MD_DIR="$TMP_ROOT/mark-dir"
+mkdir -p "$MD_DIR/outside"
+sed -n '/^mark_dir() {/,/^}/p' "$SCRIPT" > "$MD_DIR/mark_dir.sh"
+[ -s "$MD_DIR/mark_dir.sh" ] || fail "could not extract mark_dir from clean.sh"
+grep -q 'cannot write.*(symlink; not followed)' "$MD_DIR/mark_dir.sh" \
+  || fail "extracted mark_dir has no symlinked-marker guard to test"
+sed -n '/^spotlight_mark() {/,/^}/p' "$SELF_DIR/lib/common.sh" > "$MD_DIR/spotlight_mark.sh"
+[ -s "$MD_DIR/spotlight_mark.sh" ] || fail "could not extract spotlight_mark from lib/common.sh"
+SPOTLIGHT_MARKER=".metadata_never_index"
+DRY_RUN=0
+CALLER_USER=""
+MARKED=0
+# shellcheck disable=SC1091
+. "$MD_DIR/spotlight_mark.sh"
+# shellcheck disable=SC1091
+. "$MD_DIR/mark_dir.sh"
+
+# Live symlink: marker points at an existing file outside the directory.
+MD_LIVE="$MD_DIR/live"
+mkdir -p "$MD_LIVE"
+printf 'outside\n' > "$MD_DIR/outside/live-target"
+ln -s "$MD_DIR/outside/live-target" "$MD_LIVE/$SPOTLIGHT_MARKER"
+mark_dir "$MD_LIVE" 2> "$MD_DIR/live.err"
+case "$(cat "$MD_DIR/live.err")" in
+  *"  warning: cannot write $MD_LIVE/$SPOTLIGHT_MARKER (symlink; not followed)"*)
+    echo "ok: mark_dir warns with its own line on a live symlinked marker" ;;
+  *) fail "mark_dir live symlinked marker: wrong stderr (got: $(cat "$MD_DIR/live.err"))" ;;
+esac
+[ -L "$MD_LIVE/$SPOTLIGHT_MARKER" ] || fail "mark_dir live case: marker is no longer a symlink"
+[ "$(cat "$MD_DIR/outside/live-target")" = "outside" ] \
+  || fail "mark_dir live case: symlink target was modified"
+
+# Dangling symlink: marker points at a path that does not exist, in a
+# writable directory -- a followed write would create it.
+MD_DANGLING="$MD_DIR/dangling"
+mkdir -p "$MD_DANGLING"
+ln -s "$MD_DIR/outside/dangling-target" "$MD_DANGLING/$SPOTLIGHT_MARKER"
+mark_dir "$MD_DANGLING" 2> "$MD_DIR/dangling.err"
+case "$(cat "$MD_DIR/dangling.err")" in
+  *"  warning: cannot write $MD_DANGLING/$SPOTLIGHT_MARKER (symlink; not followed)"*)
+    echo "ok: mark_dir warns with its own line on a dangling symlinked marker" ;;
+  *) fail "mark_dir dangling symlinked marker: wrong stderr (got: $(cat "$MD_DIR/dangling.err"))" ;;
+esac
+[ -L "$MD_DANGLING/$SPOTLIGHT_MARKER" ] || fail "mark_dir dangling case: marker is no longer a symlink"
+[ ! -e "$MD_DIR/outside/dangling-target" ] \
+  || fail "mark_dir dangling case: a file was created at the symlink target"
+
+# Clean sibling in the same run: still marked, and it is the ONLY one of
+# the three that increments MARKED.
+MD_CLEAN="$MD_DIR/clean"
+mkdir -p "$MD_CLEAN"
+mark_dir "$MD_CLEAN" 2> "$MD_DIR/clean.err"
+[ -f "$MD_CLEAN/$SPOTLIGHT_MARKER" ] && [ ! -L "$MD_CLEAN/$SPOTLIGHT_MARKER" ] \
+  || fail "mark_dir clean sibling: marker was not created as a regular file"
+[ "$MARKED" -eq 1 ] || fail "mark_dir marked $MARKED directories (want exactly 1: the clean sibling)"
+[ -s "$MD_DIR/clean.err" ] && fail "mark_dir clean sibling warned unexpectedly: $(cat "$MD_DIR/clean.err")"
+echo "ok: mark_dir skips both symlinked markers and marks the clean sibling"
 
 [ "$failures" -eq 0 ] || { echo "$failures failure(s)" >&2; exit 1; }
 echo "all clean.sh flag-shaped-value checks passed"

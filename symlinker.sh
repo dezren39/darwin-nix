@@ -120,9 +120,7 @@ UNDO
     --dry-run             Preview what undo would do
     --force               Force restore even if paths are occupied (removes them)
     --verbose             Show full paths
-    --simple              Omit details
     --strict              Stop on first error
-    --no-input, --yes     Skip confirmation
 
   Undo generates its own undo file, so you can undo an undo:
     symlinker.sh --undo <original-timestamp>         # undo a run
@@ -194,17 +192,50 @@ EOF
 
 # ─── Parse arguments ─────────────────────────────────────────────────────────
 
+# Forward-only options (#1730): these configure the forward run and are
+# never consumed by the undo branch, so accepting them alongside --undo
+# silently ignored them — a caller could believe an input path or filter
+# constrained an undo that can unlink unrelated symlinks. Record every
+# forward-only option seen; reject it (exit 2, naming the flag and the
+# --undo mode) immediately when --undo was already given, and again after
+# the loop for the flag-before---undo order. --dry-run, --force,
+# --verbose, --strict and --skip-restore stay valid in undo mode, and
+# --help stays mode-independent.
+# Undo-only options (#1750): --skip-restore is consumed only by the undo
+# branch (the BACKUP-record restore handling), so accepting it in a
+# forward run silently ignored it -- the mirror of the above. Record it
+# when seen before --undo; reject it (exit 2, naming the flag and that
+# it is undo-only) after the loop if no --undo was given. The
+# flag-before---undo order stays valid: the post-loop judge only fires
+# when UNDO_SET is still 0.
+UNDO_ONLY_SEEN=()
+note_undo_only() {
+  if (( ! UNDO_SET )); then
+    UNDO_ONLY_SEEN+=("$1")
+  fi
+}
+FORWARD_ONLY_SEEN=()
+reject_forward_only_in_undo() {
+  if (( UNDO_SET )); then
+    echo "Error: $1 cannot be used in --undo mode (forward-only option)" >&2; exit 2
+  fi
+  FORWARD_ONLY_SEEN+=("$1")
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --input-dir)
+      reject_forward_only_in_undo "$1"
       [[ -n "${2:-}" && "$2" != -* ]] || { echo "Error: --input-dir requires a value" >&2; exit 1; }
       [[ "$INPUT_DIR_SET" -eq 0 ]] || { echo "Error: --input-dir may be given only once" >&2; exit 1; }
       INPUT_DIR="$2"; INPUT_DIR_SET=1; shift 2 ;;
     --output-dir)
+      reject_forward_only_in_undo "$1"
       [[ -n "${2:-}" && "$2" != -* ]] || { echo "Error: --output-dir requires a value" >&2; exit 1; }
       [[ "$OUTPUT_DIR_SET" -eq 0 ]] || { echo "Error: --output-dir may be given only once" >&2; exit 1; }
       OUTPUT_DIR="$2"; OUTPUT_DIR_SET=1; shift 2 ;;
     --backup-suffix)
+      reject_forward_only_in_undo "$1"
       [[ -n "${2:-}" && "$2" != -* ]] || { echo "Error: --backup-suffix requires a value" >&2; exit 1; }
       [[ "$BACKUP_SUFFIX_SET" -eq 0 ]] || { echo "Error: --backup-suffix may be given only once" >&2; exit 1; }
       [[ "$2" != */* ]] || { echo "Error: --backup-suffix must not contain '/' (got: $2)" >&2; exit 1; }
@@ -216,18 +247,20 @@ while [[ $# -gt 0 ]]; do
     --dry-run)           DRY_RUN=true;       shift ;;
     --force)             FORCE=true;         shift ;;
     --verbose)           VERBOSE=true;       shift ;;
-    --simple)            SIMPLE=true;        shift ;;
-    --no-input|--yes|-y) NO_INPUT=true;      shift ;;
-    --skip-backup)       SKIP_BACKUP=true;   shift ;;
-    --skip-conflict)     SKIP_CONFLICT=true; shift ;;
-    --skip-restore)      SKIP_RESTORE=true;  shift ;;
+    --simple)            reject_forward_only_in_undo "$1"; SIMPLE=true; shift ;;
+    --no-input|--yes|-y) reject_forward_only_in_undo "$1"; NO_INPUT=true;      shift ;;
+    --skip-backup)       reject_forward_only_in_undo "$1"; SKIP_BACKUP=true;   shift ;;
+    --skip-conflict)     reject_forward_only_in_undo "$1"; SKIP_CONFLICT=true; shift ;;
+    --skip-restore)      note_undo_only "$1"; SKIP_RESTORE=true;  shift ;;
     --strict)            STRICT=true;        shift ;;
-    --only-files)        ONLY_FILES=true;    shift ;;
-    --only-dirs)         ONLY_DIRS=true;     shift ;;
+    --only-files)        reject_forward_only_in_undo "$1"; ONLY_FILES=true;    shift ;;
+    --only-dirs)         reject_forward_only_in_undo "$1"; ONLY_DIRS=true;     shift ;;
     --exclude)
+      reject_forward_only_in_undo "$1"
       [[ -n "${2:-}" && "$2" != -* ]] || { echo "Error: --exclude requires a value" >&2; exit 1; }
       EXTRA_EXCLUDES+=("$2"); shift 2 ;;
     --exact)
+      reject_forward_only_in_undo "$1"
       # NOTE (#912): the empty-occurrence guard must compare against the
       # count before this occurrence consumed values — testing the
       # cumulative array lets a repeated empty flag pass silently.
@@ -242,6 +275,7 @@ while [[ $# -gt 0 ]]; do
       [[ ${#FILTER_EXACT[@]} -gt $before ]] || { echo "Error: --exact requires at least one value" >&2; exit 1; }
       ;;
     --prefix|--starts-with)
+      reject_forward_only_in_undo "$1"
       shift
       before=${#FILTER_PREFIX[@]}
       while [[ $# -gt 0 && "$1" != --* ]]; do
@@ -253,6 +287,7 @@ while [[ $# -gt 0 ]]; do
       [[ ${#FILTER_PREFIX[@]} -gt $before ]] || { echo "Error: --prefix/--starts-with requires at least one value" >&2; exit 1; }
       ;;
     --suffix|--ends-with)
+      reject_forward_only_in_undo "$1"
       shift
       before=${#FILTER_SUFFIX[@]}
       while [[ $# -gt 0 && "$1" != --* ]]; do
@@ -264,6 +299,7 @@ while [[ $# -gt 0 ]]; do
       [[ ${#FILTER_SUFFIX[@]} -gt $before ]] || { echo "Error: --suffix/--ends-with requires at least one value" >&2; exit 1; }
       ;;
     --regex)
+      reject_forward_only_in_undo "$1"
       shift
       before=${#FILTER_REGEX[@]}
       while [[ $# -gt 0 && "$1" != --* ]]; do
@@ -281,6 +317,7 @@ while [[ $# -gt 0 ]]; do
       [[ ${#FILTER_REGEX[@]} -gt $before ]] || { echo "Error: --regex requires at least one value" >&2; exit 1; }
       ;;
     --match)
+      reject_forward_only_in_undo "$1"
       shift
       before=${#FILTER_MATCH[@]}
       while [[ $# -gt 0 && "$1" != --* ]]; do
@@ -299,6 +336,18 @@ while [[ $# -gt 0 ]]; do
       exit 1 ;;
   esac
 done
+
+# Forward-only options given before --undo (#1730): no undo work has
+# happened yet (this is still parse time), so reject here with exit 2.
+if (( UNDO_SET )) && (( ${#FORWARD_ONLY_SEEN[@]} > 0 )); then
+  echo "Error: ${FORWARD_ONLY_SEEN[*]} cannot be used in --undo mode (forward-only option)" >&2; exit 2
+fi
+
+# Undo-only options given without --undo (#1750): no linking has
+# happened yet (this is still parse time), so reject here with exit 2.
+if (( ! UNDO_SET )) && (( ${#UNDO_ONLY_SEEN[@]} > 0 )); then
+  echo "Error: ${UNDO_ONLY_SEEN[*]} cannot be used in forward mode (undo-only option; use with --undo)" >&2; exit 2
+fi
 
 # Validate conflicting type filters
 if $ONLY_FILES && $ONLY_DIRS; then

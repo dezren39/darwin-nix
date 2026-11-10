@@ -34,6 +34,8 @@ DEPTH_SET=0
 DOCKER_AGE_SET=0
 FOLLOW_YES_SET=0
 FOLLOW_NO_SET=0
+RECURSIVE_YES_SET=0
+RECURSIVE_NO_SET=0
 TARGET_PATH=""
 TARGET_SET=0
 DEPTH_LIMIT=""
@@ -231,23 +233,23 @@ while [ $# -gt 0 ]; do
     --auto)           AUTO_SET=1 ;;
     --system)         { arg_conflict --system --no-system "$NO_SYSTEM_SET"; SCOPE="system"; SCOPE_SET=1; SYSTEM_SET=1; } ;;
     --no-system)      { arg_conflict --system --no-system "$SYSTEM_SET"; SCOPE="no-system"; SCOPE_SET=1; NO_SYSTEM_SET=1; } ;;
-    --path)           { arg_require_value "$1" "${2:-}"; [ "$TARGET_SET" -eq 0 ] || arg_die "unexpected argument: $1 (target already set to $TARGET_PATH)"; TARGET_PATH="$2"; TARGET_SET=1; REPO_FLAGS_USED="$REPO_FLAGS_USED --path"; shift; } ;;
-    --recursive|--walk) REPO_FLAGS_USED="$REPO_FLAGS_USED --recursive"; DEPTH_LIMIT=""; RECURSIVE_SET=1 ;;
-    --no-recursive|--no-walk) DEPTH_LIMIT=1; RECURSIVE_SET=1 ;;
-    --depth)          { arg_require_value "$1" "${2:-}"; arg_once "$1" DEPTH_SET; DEPTH_LIMIT="$2"; RECURSIVE_SET=1; REPO_FLAGS_USED="$REPO_FLAGS_USED --depth"; shift; } ;;
-    --follow)         { arg_conflict --follow --no-follow "$FOLLOW_NO_SET"; FOLLOW=1; FOLLOW_YES_SET=1; REPO_FLAGS_USED="$REPO_FLAGS_USED --follow"; } ;;
-    --no-follow)      { arg_conflict --follow --no-follow "$FOLLOW_YES_SET"; FOLLOW=0; FOLLOW_NO_SET=1; REPO_FLAGS_USED="$REPO_FLAGS_USED --no-follow"; } ;;
+    --path)           { arg_require_value "$1" "${2:-}"; [ "$TARGET_SET" -eq 0 ] || arg_die "unexpected argument: $1 (target already set to $TARGET_PATH)"; TARGET_PATH="$2"; TARGET_SET=1; arg_used REPO_FLAGS_USED --path; shift; } ;;
+    --recursive|--walk) { arg_conflict --recursive --no-recursive "$RECURSIVE_NO_SET"; arg_conflict --depth --recursive "$DEPTH_SET"; arg_used REPO_FLAGS_USED --recursive; DEPTH_LIMIT=""; RECURSIVE_SET=1; RECURSIVE_YES_SET=1; } ;;
+    --no-recursive|--no-walk) { arg_conflict --recursive --no-recursive "$RECURSIVE_YES_SET"; arg_conflict --depth --no-recursive "$DEPTH_SET"; DEPTH_LIMIT=1; RECURSIVE_SET=1; RECURSIVE_NO_SET=1; arg_used REPO_FLAGS_USED --no-recursive; } ;;
+    --depth)          { arg_require_value "$1" "${2:-}"; arg_conflict --depth --recursive "$RECURSIVE_YES_SET"; arg_conflict --depth --no-recursive "$RECURSIVE_NO_SET"; arg_once "$1" DEPTH_SET; DEPTH_LIMIT="$2"; RECURSIVE_SET=1; arg_used REPO_FLAGS_USED --depth; shift; } ;;
+    --follow)         { arg_conflict --follow --no-follow "$FOLLOW_NO_SET"; FOLLOW=1; FOLLOW_YES_SET=1; arg_used REPO_FLAGS_USED --follow; } ;;
+    --no-follow)      { arg_conflict --follow --no-follow "$FOLLOW_YES_SET"; FOLLOW=0; FOLLOW_NO_SET=1; arg_used REPO_FLAGS_USED --no-follow; } ;;
     --sudo)           USE_SUDO=1 ;;
     --tmpdir)         CLEAN_TMPDIR=1 ;;
-    --expire-reflog)  EXPIRE_REFLOG=1 ;;
+    --expire-reflog)  { EXPIRE_REFLOG=1; arg_used REPO_FLAGS_USED --expire-reflog; } ;;
     --docker-age)     { arg_require_value "$1" "${2:-}"; arg_once "$1" DOCKER_AGE_SET; DOCKER_AGE_DAYS="$2"; shift; } ;;
     --opencode-root-scratch) CLEAN_OPENCODE_ROOT=1 ;;
     --prune-unknown-scratch) PRUNE_UNKNOWN_SCRATCH=1 ;;
     --only-unknown-scratch) ONLY_UNKNOWN_SCRATCH=1 ;;
     --only-tmpdir)    ONLY_TMPDIR=1 ;;
     --no-sudo)        USE_SUDO=0 ;;
-    --no-git-maintenance|--no-maintenance|--no-git) DO_MAINTENANCE=0 ;;
-    --quick)          MAINT_DEPTH="--quick" ;;
+    --no-git-maintenance|--no-maintenance|--no-git) { DO_MAINTENANCE=0; arg_used REPO_FLAGS_USED "$1"; } ;;
+    --quick)          { MAINT_DEPTH="--quick"; arg_used REPO_FLAGS_USED --quick; } ;;
     --dry-run)        DRY_RUN=1 ;;
     -h|--help)        usage; exit 0 ;;
     -*)               echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -332,11 +334,12 @@ done
 unset _clean_nonnegative_vars _v _val
 
 # --system touches no repositories, so repository-scoped flags are meaningless
-# alongside it. Erroring beats silently ignoring them.
-if [ "$SCOPE" = "system" ] && [ -n "$REPO_FLAGS_USED" ]; then
-  echo "clean.sh: --system conflicts with repository-scoped flags:$REPO_FLAGS_USED" >&2
-  echo "          (--system does caches/logs only and opens no repository)" >&2
-  exit 2
+# alongside it. Erroring beats silently ignoring them. The accumulator
+# and the judge are the shared mode-effectiveness mechanism in
+# lib/common.sh (design #1722, #1723); the parser arms above declare
+# class membership with arg_used.
+if [ "$SCOPE" = "system" ]; then
+  arg_refuse_in_mode --system repository-scoped "$REPO_FLAGS_USED" "--system does caches/logs only and opens no repository"
 fi
 
 # --dry-run writes nothing, so it should not demand a password. --sudo forces
@@ -366,9 +369,20 @@ esac
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-C_WARN=$'\033[1;33m'; C_INFO=$'\033[0;36m'; C_OFF=$'\033[0m'
-warn() { printf '%s⚠️  %s%s\n' "$C_WARN" "$*" "$C_OFF" >&2; }
-info() { printf '%sℹ️  %s%s\n' "$C_INFO" "$*" "$C_OFF"; }
+# Gate each color by the stream its helper writes to: warn is stderr, info is
+# stdout. NO_COLOR disables both (https://no-color.org) -- Palette (#1465).
+set_output_colors() {
+  C_WARN=''; C_WARN_OFF=''; C_INFO=''; C_INFO_OFF=''
+  if [[ -z "${NO_COLOR:-}" && -t 2 ]]; then
+    C_WARN=$'\033[1;33m'; C_WARN_OFF=$'\033[0m'
+  fi
+  if [[ -z "${NO_COLOR:-}" && -t 1 ]]; then
+    C_INFO=$'\033[0;36m'; C_INFO_OFF=$'\033[0m'
+  fi
+}
+set_output_colors
+warn() { printf '%s⚠️  %s%s\n' "$C_WARN" "$*" "$C_WARN_OFF" >&2; }
+info() { printf '%sℹ️  %s%s\n' "$C_INFO" "$*" "$C_INFO_OFF"; }
 
 get_free_bytes() { df -k / | awk 'NR==2 {print $4 * 1024}'; }
 
@@ -1498,6 +1512,13 @@ mark_dir() {
   # App static trees may be committed or feed flat-static manifests. Never add
   # an untracked Spotlight marker to them.
   [ "${d##*/}" = "static" ] && return 0
+  # A symlinked marker is never followed (#1586): warn distinctly and
+  # skip -- the [ -e ] check below would count a live symlink as
+  # already present, and spotlight_mark would refuse it anyway.
+  if [ -L "$d/$SPOTLIGHT_MARKER" ]; then
+    echo "  warning: cannot write $d/$SPOTLIGHT_MARKER (symlink; not followed)" >&2
+    return 0
+  fi
   [ -e "$d/$SPOTLIGHT_MARKER" ] && return 0
   if [ "$DRY_RUN" = "1" ]; then echo "  would mark: ${d/#$HOME/\~}"; MARKED=$((MARKED + 1)); return 0; fi
   spotlight_mark "$d" "$CALLER_USER" && MARKED=$((MARKED + 1))

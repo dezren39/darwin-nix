@@ -15,7 +15,11 @@
 #   * working brew -> only apps not in the cask list are reported;
 #   * empty successful list -> all apps reported, exit 0;
 #   * `brew list` runs exactly once per invocation (the stub logs
-#     every call; per-app `brew search` calls are separate);
+#     every call; no per-app `brew search` runs at all (#1617): the similar-packages
+#     block shelled out per reported app and discarded its result, so it
+#     was removed -- the stub has no search branch and errors on one,
+#     a scenario below counts search calls in the stub log, and the
+#     working scenario pins the reported output byte-for-byte);
 #   * an unknown argument -> exit 2 naming it, usage on stderr, and
 #     no brew call at all; --help -> usage, exit 0, no brew call (#1158);
 #   * a missing first-leg directory -> a "does not exist" notice,
@@ -55,19 +59,17 @@ LOG="$TMP_ROOT/brew.log"
 
 cat > "$BIN/brew" <<'EOF'
 #!/bin/sh
-# brew stub: modes via STUB_BREW_MODE (working|empty|failing);
+# brew stub: modes via STUB_BREW_MODE (working|all-managed|empty|failing);
 # every invocation is appended to $STUB_BREW_LOG.
 echo "$1" >> "$STUB_BREW_LOG"
 case "$1" in
   list)
     case "$STUB_BREW_MODE" in
       working) echo "foo" ;;
+      all-managed) printf 'foo\nbar\n' ;;
       empty) : ;;
       failing) echo "Error: brew is broken" >&2; exit 1 ;;
     esac
-    ;;
-  search)
-    : # no similar packages
     ;;
   *)
     echo "brew stub: unexpected command: $1" >&2
@@ -101,6 +103,7 @@ expect_rc() { # expect_rc <desc> <want>
   fi
 }
 list_calls() { grep -c '^list$' "$LOG" || true; }
+search_calls() { grep -c '^search$' "$LOG" || true; }
 
 # --- working brew: foo is a cask, bar is not --------------------------------
 run_search working
@@ -109,11 +112,31 @@ check "working brew does not report the cask app (foo)" \
   bash -c "! grep -qx foo '$TMP_ROOT/out'"
 check "working brew reports the non-cask app (bar)" \
   grep -qx bar "$TMP_ROOT/out"
+check "working brew does not show the empty-result message" \
+  bash -c "! grep -qx 'No non-Homebrew apps found.' '$TMP_ROOT/out'"
 if [ "$(list_calls)" = "1" ]; then
   echo "ok: brew list ran exactly once (working)"
 else
   fail "brew list ran exactly once (working) — got $(list_calls)"
 fi
+
+# --- #1617: no brew search runs, and the report is unchanged ---------------
+if [ "$(search_calls)" = "0" ]; then
+  echo "ok: no brew search calls (working)"
+else
+  fail "no brew search calls (working) -- got $(search_calls)"
+fi
+printf 'Checking %s...\nbar\nChecking ~/Applications...\nbar\n' "$APPS" > "$TMP_ROOT/expected"
+check "working brew report byte-identical to the pre-#1617 output" \
+  cmp -s "$TMP_ROOT/expected" "$TMP_ROOT/out"
+
+# --- no unmatched apps: make the empty result explicit -----------------------
+run_search all-managed
+expect_rc "all-managed apps exits 0" 0
+check "all-managed apps reports a clear empty result" \
+  grep -qx "No non-Homebrew apps found." "$TMP_ROOT/out"
+check "all-managed apps does not report app names" \
+  bash -c "! grep -qx -e foo -e bar '$TMP_ROOT/out'"
 
 # --- empty successful list: everything is reported ---------------------------
 run_search empty

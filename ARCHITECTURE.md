@@ -30,7 +30,10 @@ openchamber.nix        OpenChamber server launchd agent + desktop client (§5)
 docs/                  services.md (how OpenChamber, OpenCode and mcpx run, are replaced
                        on a switch, checked and debugged), mcp.md (every MCP server, its
                        auth and credentials), dated reviews, sidepulse docs
+                       (canonical copies of services.md, mcp.md and the dated reviews:
+                       developing-today/code doc/fleet/)
 instructions/          OpenCode instruction files (worktrees, recordings, work-strategies; archive/)
+                       (canonical copies: developing-today/code doc/platform/)
 commands/              OpenCode slash commands (/gha-fix, /gha-why)
 .agents/skills/        Repo-local agent skills (see §7)
 opencode-global.jsonc  OpenCode v2 global config, meant to be linked as ~/.config/opencode/opencode.jsonc (currently not; see §5)
@@ -42,7 +45,7 @@ rebuild.sh r / simple-rebuild.sh s / clean(.sh) / path.sh   Rebuild + cleanup sc
 symlinker.sh           Large bash symlink manager (source for pkgs/symlinker)
 .aerospace.toml        AeroSpace tiling WM config
 mcpx.config.nix        Every MCP server, and how mcpx pools it
-config.toml            VSCode extension source-of-truth list (used by code-install-extensions.sh)
+config.toml            One of three copies of the VSCode extension list (with code-install-extensions.sh's hardcoded lines and vsc-extensions.txt); the installer never reads it — the copies are kept identical by the drift check in code-install-extensions-tests (#1547)
 .github/workflows/     opencode.yml (/oc comment bot), mcpx-nixbuild.yml (mcpx package build)
 ```
 
@@ -85,8 +88,7 @@ flake.nix → ./configuration.nix
   `npm-mcp-servers`, `opencode-share`, `symlinker`.
 - **checks:** `formatting` (treefmt), `tidy` (flake-tidy `--check`),
   `flake-tidy-tests` (the flake-tidy pytest suite), `plugins-tests`
-  (plugins/*.test.mjs), `opencode-db-pids-tests` and `skill-tests`
-  (archive/skills/*/SKILL.test.ts) on every supported system; the Sidepulse
+  (plugins/*.test.mjs), `opencode-db-pids-tests` on every supported system; the Sidepulse
   package build/test and setup smoke test run on Darwin only.
 - **apps:** `flake-tidy`, `mcpx`, `opencode`, `openchamber`, `opencode-share`,
   `symlinker`, `adopt`; Sidepulse apps are Darwin-only.
@@ -157,7 +159,7 @@ into projects). Also atuin (Ctrl-R history), starship, direnv+nix-direnv, git
 | codedb | Zig binary | `fetchurl` | Pinned signed/notarized AST-aware code search and MCP server. |
 | fff-mcp | Rust binary | `fetchurl` | Pinned frecency-ranked file/content search MCP server. |
 | npm-mcp-servers | Node/Nix | `importNpmLock.buildNodeModules` | `mcp-remote` and `chrome-devtools-mcp`, which are only published to npm, pinned by a committed `package-lock.json`. |
-| sidepulse | Python/PyObjC | `buildPythonApplication` | Darwin-only SidePulse CLI/status-bar app. Individually documented, an ordered stack of twelve patch files applies upstream PRs #14, #17, #26, #28, #29, #30, #31 and #32. PRs #33, #34 and #35 are local-only: #33 holds the LED completion signal until the user is visibly back at a terminal (`src/sidepulse/presence.py`) instead of timing out after 4s; #34 stops failures and permission prompts expiring on a clock (they persist while the owning process is alive, and are released when the session is deleted or its terminal is closed), keeps a failure from being overwritten by the idle that follows it, and widens OpenCode error capture to `message.updated` and the `session.next.*` runner; #35 adds multi-signal composition (`src/sidepulse/compose.py`): ten display modes over a ranked signal registry with demand/ambient tiers, eight static (`priority`, `round-robin`, `split`, `paired`, `orbit`, `depth`, `beacon`, `tide`) and two host-driven (`drift`, `live`), plus per-signal arrival announcements, a `tempo` pace dial and per-LED colour correction for the Dot's opposed LEDs. Selected by `multi_signal.mode`, defaulting to `beacon`. dezren39/nix#378 (`sidepulse-dezren39-nix-378-opencode-v2-plugin.patch`, last in the stack) makes `opencode_plugin_source()` generate the OpenCode v2 plugin (`export default { id, setup(ctx) }`, v2 run-lifecycle events mapped to the v1 names SidePulse already handles), so `sidepulse setup opencode` writes a plugin the v2 loader accepts. See `docs/sidepulse-modes.md` for every display mode, `docs/sidepulse-customisations.md` for what each local patch adds and the live LED configuration, and `docs/sidepulse-leds.md` for the verified hardware limits they work within. |
+| sidepulse | Python/PyObjC | `buildPythonApplication` | Darwin-only SidePulse CLI/status-bar app. Individually documented, an ordered stack of twelve patch files applies upstream PRs #14, #17, #26, #28, #29, #30, #31 and #32. PRs #33, #34 and #35 are local-only: #33 holds the LED completion signal until the user is visibly back at a terminal (`src/sidepulse/presence.py`) instead of timing out after 4s; #34 stops failures and permission prompts expiring on a clock (they persist while the owning process is alive, and are released when the session is deleted or its terminal is closed), keeps a failure from being overwritten by the idle that follows it, and widens OpenCode error capture to `message.updated` and the `session.next.*` runner; #35 adds multi-signal composition (`src/sidepulse/compose.py`): ten display modes over a ranked signal registry with demand/ambient tiers, eight static (`priority`, `round-robin`, `split`, `paired`, `orbit`, `depth`, `beacon`, `tide`) and two host-driven (`drift`, `live`), plus per-signal arrival announcements, a `tempo` pace dial and per-LED colour correction for the Dot's opposed LEDs. Selected by `multi_signal.mode`, defaulting to `beacon`. dezren39/darwin-nix#378 (`sidepulse-dezren39-nix-378-opencode-v2-plugin.patch`, last in the stack) makes `opencode_plugin_source()` generate the OpenCode v2 plugin (`export default { id, setup(ctx) }`, v2 run-lifecycle events mapped to the v1 names SidePulse already handles), so `sidepulse setup opencode` writes a plugin the v2 loader accepts. See `docs/sidepulse-modes.md` for every display mode, `docs/sidepulse-customisations.md` for what each local patch adds and the live LED configuration, and `docs/sidepulse-leds.md` for the verified hardware limits they work within. |
 | sidepulse-setup | Bash/Nix | `writeShellApplication` | Darwin-only wrapper providing `sidepulse --setup opencode` and `sidepulse setup opencode`; setup defaults to all upstream-supported providers. Home Manager invokes the packaged `sidepulse setup <provider>` for the configured provider list on every switch. |
 
 ---

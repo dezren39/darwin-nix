@@ -12,8 +12,9 @@ ACTION="mount" # mount | unmount | status
 ACTION_SET=false # true once an action flag is given on the command line
 SOURCE_SET=false # true once --source is given (SOURCE itself has a default)
 
-# Colors (disabled if not a terminal)
-if [[ -t 1 ]]; then
+# Colors (disabled if not a terminal, or when NO_COLOR is set --
+# https://no-color.org; #1465)
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
   RED='\033[0;31m'
   GREEN='\033[0;32m'
   YELLOW='\033[1;33m'
@@ -326,11 +327,11 @@ do_status() {
     warn ".opencode is a symlink -> $link_target (not a bindfs mount)"
   elif is_mounted "$target_opencode"; then
     local mount_src
-    mount_src=$(mount | grep " on $target_opencode (" | awk '{print $1}')
+    mount_src=$(mount | grep -F " on $target_opencode (" | awk 'NR==1 {print $1}')
     log ".opencode: mounted (source: $mount_src)"
 
     if is_mounted "$target_opencode/plans"; then
-      mount_src=$(mount | grep " on $target_opencode/plans (" | awk '{print $1}')
+      mount_src=$(mount | grep -F " on $target_opencode/plans (" | awk 'NR==1 {print $1}')
       log "plans/:   mounted (source: $mount_src)"
     else
       warn "plans/:   NOT mounted (using shared plans from source)"

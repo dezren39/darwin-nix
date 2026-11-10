@@ -11,6 +11,14 @@
 }:
 let
   serviceEvents = inputs.self.packages.${system}.service-events;
+  serviceEvent = "${serviceEvents}/bin/service-event";
+  serviceEventAsPrimaryUser = pkgs.writeShellScript "service-event-as-primary-user" ''
+    set -euo pipefail
+    primary_uid=$(/usr/bin/id -u ${config.system.primaryUser})
+    exec /bin/launchctl asuser "$primary_uid" \
+      /usr/bin/sudo -u ${config.system.primaryUser} \
+      ${serviceEvent} "$@"
+  '';
 in
 lib.recursiveUpdate {
   imports = [
@@ -90,7 +98,7 @@ lib.recursiveUpdate {
   # started at login without them, ran its own server (0.0.0.0:57123) and
   # OpenCode next to the launchd agent's, and the two managers killed each
   # other's OpenCode every 30 minutes through the shared
-  # ~/.config/openchamber/managed-opencode state (dezren39/nix#670). Exported
+  # ~/.config/openchamber/managed-opencode state (dezren39/darwin-nix#670). Exported
   # here they are in every login shell, so the app always attaches to the
   # agent's server instead.
   environment.variables.OPENCHAMBER_SERVER_URL = "http://127.0.0.1:3000";
@@ -852,27 +860,38 @@ lib.recursiveUpdate {
         cp ${./lib/common.sh} $out/lib/common.sh
       ''
     }/git-maintain-repos
+    system_activation_helper=${./system-activation-helper.sh}
+    service_event=${serviceEvent}
+    service_event_as_user=${serviceEventAsPrimaryUser}
     as_user="/bin/launchctl asuser $primary_uid /usr/bin/sudo -u ${config.system.primaryUser}"
     helper_env="/usr/bin/env PATH=/run/current-system/sw/bin:/usr/bin:/bin"
 
     # exclude: --system re-asserts the static list only (~40 ms). Consider
     # dropping --system to get the default --auto instead: it adds the per-repo
     # walk for only ~3 s, and would mark newly-created repos automatically.
-    $helper_env /run/current-system/sw/bin/bash "$spotlight_exclude" --system || true
+    $helper_env /run/current-system/sw/bin/bash "$system_activation_helper" \
+      spotlight-exclude-artifacts root "$service_event_as_user" -- \
+      /run/current-system/sw/bin/bash "$spotlight_exclude" --system
     # maintain: --system only (~80 ms). Do NOT drop --system here -- the default
     # scope is --auto, which walks every repo under ~/git and takes roughly 3
     # minutes. Adding --deep on top would also expire reflogs and prune. Run
     # `just git-maintain` / `just git-maintain-quick` deliberately instead.
-    $helper_env /run/current-system/sw/bin/bash "$git_maintain" --system || true
+    $helper_env /run/current-system/sw/bin/bash "$system_activation_helper" \
+      git-maintain-repos root "$service_event_as_user" -- \
+      /run/current-system/sw/bin/bash "$git_maintain" --system
 
     # shellcheck disable=SC2086
     # same trade-off as above: --system ~40 ms, default --auto adds the ~3 s walk
-    $as_user $helper_env /run/current-system/sw/bin/bash "$spotlight_exclude" --system || true
+    $as_user $helper_env /run/current-system/sw/bin/bash "$system_activation_helper" \
+      spotlight-exclude-artifacts user "$service_event" -- \
+      /run/current-system/sw/bin/bash "$spotlight_exclude" --system
     # shellcheck disable=SC2086
     # --system only. No scheduler is installed for root: macOS offers only
     # launchd, and `git maintenance start` writes launchd *agents*, which
     # require a GUI Aqua session that root does not have.
-    $as_user $helper_env /run/current-system/sw/bin/bash "$git_maintain" --system || true
+    $as_user $helper_env /run/current-system/sw/bin/bash "$system_activation_helper" \
+      git-maintain-repos user "$service_event" -- \
+      /run/current-system/sw/bin/bash "$git_maintain" --system
 
     # Point xcode-select at full Xcode.app if installed (idempotent, instant)
     if [ -d "/Applications/Xcode.app/Contents/Developer" ]; then
@@ -1017,7 +1036,7 @@ lib.recursiveUpdate {
     # their servers drop and regain, with timestamps; plus what the switch
     # and the agents' wrappers record through `service-event`. It also
     # size-bounds the agents' logs. Read it with `just service-events`;
-    # docs/services.md lists the events (dezren39/nix#670, #668).
+    # docs/services.md lists the events (dezren39/darwin-nix#670, #668).
     service-events = {
       serviceConfig = {
         ProgramArguments = [ "${serviceEvents}/bin/service-monitor" ];

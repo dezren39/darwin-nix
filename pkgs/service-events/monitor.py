@@ -5,7 +5,7 @@ INTERVAL seconds it samples launchd, the process table and the TCP
 connections of the servers it watches, and appends one JSON object per change
 to ~/Library/Logs/nix-services/events.jsonl. `service-event` (event.py)
 appends to the same file from scripts. Read it with `just service-events`;
-docs/services.md describes every event. dezren39/nix#670.
+docs/services.md describes every event. dezren39/darwin-nix#670.
 
 Only names, pids, ports and exit codes are recorded. No environment, command
 argument values beyond the program name, or request contents.
@@ -51,7 +51,7 @@ LABEL_PREFIXES = ("application.dev.openchamber.desktop",)
 
 # Logs written by launchd (StandardOutPath/StandardErrorPath, opened
 # O_APPEND, so a copy followed by truncation in place is safe) or by
-# OpenChamber itself. Size-bounded here; dezren39/nix#668.
+# OpenChamber itself. Size-bounded here; dezren39/darwin-nix#668.
 ROTATED_LOGS = (
     "~/Library/Logs/openchamber.log",
     "~/Library/Logs/mcpx.log",
@@ -101,7 +101,11 @@ def launchd_jobs():
             continue
         pid, status, label = parts
         if label in LABELS or label.startswith(LABEL_PREFIXES):
-            jobs[label] = (int(pid) if pid.isdigit() else None, status)
+            # #1613: isascii() first, as in processes() below -- a bare
+            # isdigit() is also true for Unicode digits int() rejects
+            # (superscript/subscript digits, the #935 class), and the
+            # ValueError aborted every monitor tick.
+            jobs[label] = (int(pid) if pid.isascii() and pid.isdigit() else None, status)
     return jobs
 
 
@@ -173,10 +177,13 @@ def sockets(pids):
     for line in out.splitlines():
         tag, value = line[:1], line[1:]
         if tag == "p":
-            pid = int(value)
+            # Skip malformed lsof records; clearing pid prevents their n/T
+            # fields from being attributed to the preceding valid process.
+            pid = int(value) if value.isascii() and value.isdigit() else None
+            name = None
         elif tag == "n":
             name = value
-        elif tag == "T" and value.startswith("ST=") and pid in result:
+        elif tag == "T" and value.startswith("ST=") and pid in result and name is not None:
             state = value[3:]
             if state == "LISTEN":
                 result[pid][0].add(name.rsplit(":", 1)[-1])
@@ -242,6 +249,10 @@ class Monitor:
                     self.drops[(role, ppid)] = (now, len(open_conns), pid)
                     self.emit("conn.drop", role=role, pid=pid, count=len(open_conns), cause="server-exit",
                               ports=sorted({c.split("->")[0].rsplit(":", 1)[-1] for c in open_conns}))
+                opened, closed = self.stats.pop(pid, [0, 0])
+                if opened or closed:
+                    self.emit("conn.stats", role=role, pid=pid, opened=opened, closed=closed,
+                              open_now=0, window_s=round(now - self.last_stats))
             for pid in sorted(set(procs) - set(self.procs)):
                 role, ppid, program = procs[pid]
                 parent = procs.get(ppid, (None,))[0] or ("launchd" if ppid == 1 else None)

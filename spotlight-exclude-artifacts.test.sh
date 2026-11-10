@@ -146,12 +146,67 @@ for pair in "--system --no-system" "--no-system --system"; do
     *) fail "scope pair '$pair' was not named as a conflict on stderr (got: $ERR)" ;;
   esac
 done
-run --dry-run --path "$VALID" --system
+run --dry-run --system
 [ "$STATUS" -eq 0 ] || fail "single --system exited $STATUS (want 0)"
 echo "ok: single --system still accepted"
 run --dry-run --path "$VALID" --no-system
 [ "$STATUS" -eq 0 ] || fail "single --no-system exited $STATUS (want 0)"
 echo "ok: single --no-system still accepted"
+
+# ─── --system silently dropping discovery flags is rejected (#1719) ──
+# --system sets DO_WALK=0, so --path/positional, --recursive/--no-recursive,
+# --depth and --follow/--no-follow had no consumer and were silently
+# dropped at exit 0, including a nonexistent --path target. Each flag
+# class must now exit 2 at parse time naming the flag, in either order,
+# in the clean.sh --system judge shape. --dry-run is not a discovery
+# flag (mark() honours it in the static half), so the plain --system
+# and --system --dry-run controls below stay exit 0.
+for spec in "--path|$VALID" "--recursive|" "--no-recursive|" "--depth|3" "--follow|" "--no-follow|"; do
+  flag="${spec%%|*}"; val="${spec#*|}"
+  for order in "sys-first" "flag-first"; do
+    if [ "$order" = "sys-first" ]; then
+      # shellcheck disable=SC2086
+      run --system --dry-run $flag $val
+    else
+      # shellcheck disable=SC2086
+      run --dry-run $flag $val --system
+    fi
+    [ "$STATUS" -eq 2 ] || fail "--system with $flag ($order) exited $STATUS (want 2)"
+    case "$ERR" in
+      *"spotlight-exclude-artifacts: --system conflicts with discovery flags:"*"$flag"*) echo "ok: --system with $flag ($order) rejected, flag named" ;;
+      *) fail "--system with $flag ($order) did not name the flag (got: $ERR)" ;;
+    esac
+  done
+done
+# Positional target is the --path form: rejected and named as --path.
+run --system --dry-run "$VALID"
+[ "$STATUS" -eq 2 ] || fail "--system with positional target exited $STATUS (want 2)"
+case "$ERR" in
+  *"conflicts with discovery flags: --path"*) echo "ok: --system with positional target rejected, named as --path" ;;
+  *) fail "--system with positional target was not named as --path (got: $ERR)" ;;
+esac
+run --dry-run "$VALID" --system
+[ "$STATUS" -eq 2 ] || fail "positional target then --system exited $STATUS (want 2)"
+case "$ERR" in
+  *"conflicts with discovery flags: --path"*) echo "ok: positional target then --system rejected, named as --path" ;;
+  *) fail "positional target then --system was not named as --path (got: $ERR)" ;;
+esac
+# Multiple discovery flags are all named.
+run --system --dry-run --path "$VALID" --depth 3 --follow
+[ "$STATUS" -eq 2 ] || fail "--system with three discovery flags exited $STATUS (want 2)"
+case "$ERR" in
+  *"conflicts with discovery flags: --path --depth --follow"*) echo "ok: --system with multiple discovery flags names them all" ;;
+  *) fail "--system with multiple discovery flags did not name them all (got: $ERR)" ;;
+esac
+# Controls: plain --system and --system --dry-run unchanged (exit 0,
+# static list only), and --no-system with discovery flags still works.
+run --system --dry-run
+[ "$STATUS" -eq 0 ] || fail "plain --system --dry-run control exited $STATUS (want 0)"
+case "$OUT" in
+  *"static paths"*) echo "ok: plain --system control still verifies the static list" ;;
+  *) fail "plain --system control output changed (got: $OUT)" ;;
+esac
+[ -z "$(markers)" ] && echo "ok: rejected --system runs wrote no markers" || fail "rejected --system runs wrote markers"
 
 # ─── No side effects from the rejected runs ────────────────────────────
 if [ -z "$(markers)" ]; then
@@ -216,6 +271,17 @@ probe_rejected "spotlight-exclude-artifacts: --depth requires a value" --depth -
 probe_rejected "spotlight-exclude-artifacts: --depth may be given only once" --no-system --dry-run --path "$VALID" --depth 1 --depth 3
 probe_rejected "--no-follow conflicts with --follow" --no-system --dry-run --path "$VALID" --follow --no-follow
 probe_rejected "--follow conflicts with --no-follow" --no-system --dry-run --path "$VALID" --no-follow --follow
+# Recursive pair + --depth judged at parse time (#1609), mirrored from
+# git-discover-repos: any two of the three depth spellings exit 2 in
+# both orders; same-side repeats stay accepted.
+probe_rejected "spotlight-exclude-artifacts: --recursive and --no-recursive may not be combined" --no-system --dry-run --path "$VALID" --recursive --no-recursive
+probe_rejected "spotlight-exclude-artifacts: --recursive and --no-recursive may not be combined" --no-system --dry-run --path "$VALID" --no-walk --walk
+probe_rejected "spotlight-exclude-artifacts: --depth and --recursive may not be combined" --no-system --dry-run --path "$VALID" --depth 3 --walk
+probe_rejected "spotlight-exclude-artifacts: --depth and --recursive may not be combined" --no-system --dry-run --path "$VALID" --recursive --depth 3
+probe_rejected "spotlight-exclude-artifacts: --depth and --no-recursive may not be combined" --no-system --dry-run --path "$VALID" --depth 3 --no-recursive
+probe_rejected "spotlight-exclude-artifacts: --depth and --no-recursive may not be combined" --no-system --dry-run --path "$VALID" --no-walk --depth 3
+probe_accepted --no-system --dry-run --path "$VALID" --recursive --walk
+probe_accepted --no-system --dry-run --path "$VALID" --no-recursive --no-walk
 probe_rejected "spotlight-exclude-artifacts: --system and --no-system may not be combined" --dry-run --system --no-system
 probe_rejected "spotlight-exclude-artifacts: --system and --no-system may not be combined" --dry-run --no-system --system
 probe_rejected "unexpected argument: $SECOND_A" --no-system --dry-run --path "$SECOND_B" "$SECOND_A"
@@ -224,6 +290,18 @@ for bad in abc 0 2147483648 99999999999999999999999999; do
   probe_rejected "spotlight-exclude-artifacts: --depth must be a positive integer" --no-system --dry-run --path "$VALID" --depth "$bad"
 done
 probe_accepted --no-system --path "$VALID" --depth 08 --dry-run
+
+# Mode-effectiveness rows (#1723, design #1722), driven through the
+# shared probes: accumulation in both orders, a positional target
+# recorded as --path and judged like the option form, every
+# offending flag named, and the judge firing only under --system
+# (the --no-system control with the same class flags is accepted).
+probe_mode_refused "spotlight-exclude-artifacts: --system conflicts with discovery flags: --depth" --system --dry-run --depth 3
+probe_mode_refused "spotlight-exclude-artifacts: --system conflicts with discovery flags: --depth" --dry-run --depth 3 --system
+probe_mode_refused "spotlight-exclude-artifacts: --system conflicts with discovery flags: --path" --system --dry-run "$VALID"
+probe_mode_refused "spotlight-exclude-artifacts: --system conflicts with discovery flags: --path" --dry-run "$VALID" --system
+probe_mode_refused "spotlight-exclude-artifacts: --system conflicts with discovery flags: --path --depth --follow" --system --dry-run --path "$VALID" --depth 3 --follow
+probe_mode_accepted --no-system --dry-run --path "$VALID" --depth 3
 
 
 # ─── Failed marker writes exit non-zero (#1333) ─────────────────────
@@ -291,6 +369,73 @@ case "$OUT" in
   *) fail "system failing run printed no summary (got: $OUT)" ;;
 esac
 [ -e "$SYS_HOME/.bun/$MARKER" ] && echo "ok: system failing run still marked the clean path" || fail "system failing run did not mark the clean .bun path (early abort?)"
+
+
+# ─── Symlinked markers are never followed (#1586) ─────────────────
+# A marker path that is itself a symlink must not be followed: no file
+# is created/updated outside the directory being marked, and the
+# directory counts as failed -- never as marked or already present.
+# Variant 1: dangling symlink whose target parent exists and is
+# writable (touch would succeed outside the tree -- the case #1333's
+# nonexistent-parent fixture cannot reach). Variant 2: live symlink
+# to a real file ([ -e ] follows it, so the old code counted the
+# directory as already present and left it unmarked).
+LINKFAIL="$TMP_ROOT/linkfail"
+OUTSIDE="$TMP_ROOT/outside"
+mkdir -p "$LINKFAIL/repo1/.git" "$LINKFAIL/repo2/.git" "$OUTSIDE"
+ln -s "$OUTSIDE/dangling-target" "$LINKFAIL/repo1/.git/$MARKER"
+run --no-system --path "$LINKFAIL" --depth 2
+[ "$STATUS" -eq 1 ] || fail "dangling-symlink run exited $STATUS (want 1)"
+case "$ERR" in
+  *"cannot write $LINKFAIL/repo1/.git/$MARKER (symlink; not followed)"*) echo "ok: dangling symlink named on stderr" ;;
+  *) fail "dangling symlink not named on stderr (got: $ERR)" ;;
+esac
+case "$OUT" in
+  *"1 failed"*) echo "ok: dangling symlink counted as failed" ;;
+  *) fail "dangling symlink not counted as failed (got: $OUT)" ;;
+esac
+[ ! -e "$OUTSIDE/dangling-target" ] && echo "ok: dangling symlink target was not created outside the tree" || fail "dangling symlink target WAS created outside the tree"
+[ -L "$LINKFAIL/repo1/.git/$MARKER" ] && echo "ok: dangling marker is still just the symlink" || fail "dangling marker was replaced"
+[ -e "$LINKFAIL/repo2/.git/$MARKER" ] && echo "ok: symlink run still marked the clean repo" || fail "symlink run did not mark the clean repo (early abort?)"
+
+LIVEFAIL="$TMP_ROOT/livefail"
+mkdir -p "$LIVEFAIL/repo1/.git"
+printf 'precious\n' > "$OUTSIDE/live-target"
+ln -s "$OUTSIDE/live-target" "$LIVEFAIL/repo1/.git/$MARKER"
+run --no-system --path "$LIVEFAIL" --depth 2
+[ "$STATUS" -eq 1 ] || fail "live-symlink run exited $STATUS (want 1)"
+case "$ERR" in
+  *"cannot write $LIVEFAIL/repo1/.git/$MARKER (symlink; not followed)"*) echo "ok: live symlink named on stderr" ;;
+  *) fail "live symlink not named on stderr (got: $ERR)" ;;
+esac
+case "$OUT" in
+  *"0 marked, 0 already"*) echo "ok: live symlink counted as neither marked nor already present" ;;
+  *) fail "live symlink miscounted (got: $OUT)" ;;
+esac
+case "$OUT" in
+  *"1 failed"*) echo "ok: live symlink counted as failed" ;;
+  *) fail "live symlink not counted as failed (got: $OUT)" ;;
+esac
+[ "$(cat "$OUTSIDE/live-target")" = "precious" ] && echo "ok: live symlink target untouched" || fail "live symlink target was modified"
+
+# spotlight_mark (lib/common.sh) directly: same two variants, oracle is
+# return 2 + warning + no outside write (clean.sh's mark_dir delegates
+# here, and its own pre-check carries the same -L guard).
+(
+  # shellcheck source=lib/common.sh
+  . "$SELF_DIR/lib/common.sh"
+  d1="$TMP_ROOT/markfn-dangling"; mkdir -p "$d1"
+  ln -s "$OUTSIDE/fn-dangling-target" "$d1/$MARKER"
+  spotlight_mark "$d1" 2>"$TMP_ROOT/markfn.err"; rc=$?
+  [ "$rc" -eq 2 ] || { echo "FAIL: spotlight_mark dangling symlink returned $rc (want 2)" >&2; exit 1; }
+  grep -q "symlink; not followed" "$TMP_ROOT/markfn.err" || { echo "FAIL: spotlight_mark dangling symlink gave no warning" >&2; exit 1; }
+  [ ! -e "$OUTSIDE/fn-dangling-target" ] || { echo "FAIL: spotlight_mark created the dangling target outside" >&2; exit 1; }
+  d2="$TMP_ROOT/markfn-live"; mkdir -p "$d2"
+  ln -s "$OUTSIDE/live-target" "$d2/$MARKER"
+  spotlight_mark "$d2" 2>"$TMP_ROOT/markfn2.err"; rc=$?
+  [ "$rc" -eq 2 ] || { echo "FAIL: spotlight_mark live symlink returned $rc (want 2, not 1=already present)" >&2; exit 1; }
+  echo "ok: spotlight_mark refuses both symlink variants with return 2"
+) || fail "spotlight_mark symlink probe failed (see stderr above)"
 
 [ "$failures" -eq 0 ] || { echo "$failures failure(s)" >&2; exit 1; }
 echo "all spotlight-exclude-artifacts flag-shaped-value checks passed"

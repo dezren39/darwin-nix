@@ -159,6 +159,74 @@ arg_decimal() {
 }
 
 # ---------------------------------------------------------------------------
+# The mode-effectiveness contract (design #1722)
+# ---------------------------------------------------------------------------
+# Sibling of the argument contract above: #1145 judges flags against
+# each other at parse time; this contract judges a flag against the
+# mode the run will actually execute.
+#   1. Effective, or refused. Every accepted flag must have a live
+#      consumer in the mode, scope and output shape the run executes.
+#      A flag with no live consumer is refused post-parse: exit 2,
+#      naming the flag(s), the mode, and why it has no effect there.
+#   2. Judged post-parse, against the executed mode: both flag
+#      orders, positional targets, and environment-set modes count
+#      the same.
+#   3. One shared mechanism (the two helpers below). Scripts declare
+#      class membership by recording each class flag with arg_used
+#      in its parser arm -- the class list lives in exactly one place
+#      per script, next to its parser -- and judge once post-parse
+#      with arg_refuse_in_mode. No per-script accumulation or judge
+#      code: clean.sh's REPO_FLAGS_USED judge (#1711) and
+#      spotlight-exclude-artifacts' DISCOVERY_FLAGS_USED judge
+#      (#1719) were the same mechanism hand-rolled twice, with
+#      divergent names and wording, and the clean.sh copy
+#      under-enforced until its hand-maintained list was completed.
+#   4. --dry-run is a flag like any other: a mode that never reads
+#      DRY_RUN must refuse it under rule 1 (#1718).
+#   5. No disposition changes: every refused combination is one that
+#      today silently does nothing (or, for --dry-run, does the real
+#      work while claiming a preview).
+
+# arg_used LISTVAR FLAG
+#   Record FLAG in the caller's used-flags accumulator LISTVAR (a
+#   plain string the caller initialises to ""). Parser arms call it
+#   once per class flag they accept -- including a positional target
+#   recorded under its option name, as spotlight-exclude-artifacts
+#   records a positional as --path -- so the post-parse judge sees
+#   the whole invocation in the order given.
+#     arg_used REPO_FLAGS_USED --path
+arg_used() {
+  local -n _arg_used_list="$1"
+  if [ -n "${_arg_used_list:-}" ]; then
+    _arg_used_list="$_arg_used_list $2"
+  else
+    _arg_used_list="$2"
+  fi
+}
+
+# arg_refuse_in_mode MODE CLASS USED WHY
+#   The mode judge: USED is the caller's arg_used accumulator for
+#   CLASS; when it is non-empty, MODE has no live consumer for those
+#   flags, so print the one shared message shape --
+#     <prog>: <mode> conflicts with <class> flags: <flags>
+#             (<why>)
+#   -- on stderr and exit 2. An empty USED returns silently: the
+#   judge fires only in the named mode, and only against flags that
+#   were actually given. Callers gate the call on their mode test.
+#     arg_refuse_in_mode --system repository-scoped "$REPO_FLAGS_USED" \
+#       "--system does caches/logs only and opens no repository"
+arg_refuse_in_mode() {
+  [ -n "${3:-}" ] || return 0
+  echo "$ARG_PROGRAM: $1 conflicts with $2 flags: $3" >&2
+  local _arg_refuse_indent="" _arg_refuse_i
+  for (( _arg_refuse_i = 0; _arg_refuse_i < ${#ARG_PROGRAM} + 2; _arg_refuse_i++ )); do
+    _arg_refuse_indent="$_arg_refuse_indent "
+  done
+  echo "${_arg_refuse_indent}($4)" >&2
+  exit 2
+}
+
+# ---------------------------------------------------------------------------
 # The operation outcome contract (design #1339, phase 1)
 # ---------------------------------------------------------------------------
 # A failure is keyed by the item whose outcome is in doubt (usually a repo or
@@ -336,9 +404,15 @@ SPOTLIGHT_MARKER=".metadata_never_index"
 
 # spotlight_mark DIR [OWNER]
 #   0 = marked, 1 = already present, 2 = absent/unwritable
+#   A symlinked marker is never followed (#1586): it counts as 2 with a
+#   warning, so no file is created, updated, or chowned outside DIR.
 spotlight_mark() {
   local dir="$1" owner="${2:-}"
   [ -d "$dir" ] || return 2
+  if [ -L "$dir/$SPOTLIGHT_MARKER" ]; then
+    echo "spotlight_mark: warning: cannot write $dir/$SPOTLIGHT_MARKER (symlink; not followed)" >&2
+    return 2
+  fi
   [ -e "$dir/$SPOTLIGHT_MARKER" ] && return 1
   touch "$dir/$SPOTLIGHT_MARKER" 2>/dev/null || return 2
   [ -n "$owner" ] && chown "$owner" "$dir/$SPOTLIGHT_MARKER" 2>/dev/null

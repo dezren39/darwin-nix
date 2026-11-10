@@ -1,9 +1,11 @@
+Canonical: https://github.com/developing-today/code/blob/main/doc/fleet/mcpx-identity-transport.md
+
 # mcpx identity transport: comparison and recommendation for #297
 
 - Status: decision made 2026-10-28 (queue task 2654, lane A). No code in
   this document's PR — it answers the question #297 exists to force, so an
   implementation issue can be filed against a settled choice.
-- Issues: dezren39/nix#297 (this decision), #187 (the iroh-blobs
+- Issues: dezren39/darwin-nix#297 (this decision), #187 (the iroh-blobs
   question, answered in §4), #85 (ssh remote access — the incumbent),
   #115 (Tailscale proposal — changes the tsnet calculus if it lands),
   #158 (release artefacts), #174 (parent tracker).

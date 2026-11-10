@@ -112,7 +112,7 @@ export function resolveSession(sessions, selector) {
   const needle = term.toLowerCase()
   const matches = list.filter((item) => title(item).toLowerCase().includes(needle)).sort(byRecent)
   if (matches.length === 1) return { status: "ok", session: matches[0], matchedBy: "title" }
-  if (matches.length > 1) return { status: "ambiguous", candidates: matches.slice(0, RECENT_LIMIT) }
+  if (matches.length > 1) return { status: "ambiguous", candidates: matches.slice(0, RECENT_LIMIT), total: matches.length }
   return { status: "none", candidates: getRecent(), reason: `No session title matches "${term}".` }
 }
 
@@ -320,6 +320,11 @@ export function buildTool(env) {
         description:
           "Pass false normally. Pass true only when the user is already in the worktree they want, to skip creating a workspace and import into the current directory instead.",
       },
+      sanitize: {
+        type: "boolean",
+        description:
+          "Pass false normally. Pass true only when the user explicitly asked for redaction, to export with --sanitize so transcript and file data are redacted before the move.",
+      },
     },
     async execute(args, ctx) {
       try {
@@ -359,13 +364,23 @@ async function execute(env, args, ctx) {
   const found = resolveSession(sessions, args.session)
   if (found.status !== "ok") {
     const lines = found.candidates.map((item) => `  - ${describeSession(item)}`)
+    // An ambiguous result over the cap must say so: the candidate list is
+    // a truncated sample, not the match set (#1604). The true total rides
+    // on found.total so the slice in resolveSession cannot lose it.
+    const truncated =
+      found.status === "ambiguous" && typeof found.total === "number" && found.total > found.candidates.length
     const head =
       found.status === "ambiguous"
-        ? `"${args.session}" matches ${found.candidates.length} sessions. Ask the user which one, then call again with the exact id.`
+        ? truncated
+          ? `"${args.session}" matches ${found.total} sessions (showing the ${found.candidates.length} most recent). Ask the user which one, then call again with the exact id.`
+          : `"${args.session}" matches ${found.candidates.length} sessions. Ask the user which one, then call again with the exact id.`
         : found.status === "empty"
           ? "No sessions exist in this project."
           : `${found.reason} Ask the user which session they meant, then call again with the exact id.`
-    return [head, lines.length ? "\nCandidates (most recent first):" : "", ...lines].filter(Boolean).join("\n")
+    const candidatesHead = truncated
+      ? `\nCandidates (most recent first; truncated \u2014 showing ${found.candidates.length} of ${found.total}):`
+      : "\nCandidates (most recent first):"
+    return [head, lines.length ? candidatesHead : "", ...lines].filter(Boolean).join("\n")
   }
 
   const session = found.session
@@ -398,8 +413,9 @@ async function execute(env, args, ctx) {
   }
 
   // 3. Move the session.
+  const sanitized = args.sanitize === true
   try {
-    await relocate(session.id, targetDir, args.sanitize === true)
+    await relocate(session.id, targetDir, sanitized)
   } catch (err) {
     return [
       `warp_import failed while moving the session: ${errorText(err)}`,
@@ -426,6 +442,7 @@ async function execute(env, args, ctx) {
     `    to: ${targetDir}`,
     workspace ? `  workspace: ${workspace.id} (worktree${workspace.branch ? `, branch ${workspace.branch}` : ""})` : null,
     switched ? "  TUI switched to this session." : null,
+    sanitized ? "  Sanitized: exported with --sanitize, so transcript and file data were redacted." : null,
     "",
     "Warning: this was a MOVE, not a copy — the old location no longer has this session.",
     "Warning: the imported session has no event history, so it can never be warped again.",

@@ -216,6 +216,102 @@ class TestCLI:
         assert args.exclude_flatten == ["foo"]
 
 
+class TestMainFormatting:
+    def _fixture(self, tmp_path):
+        flake_nix = tmp_path / "flake.nix"
+        original = b"{ inputs = {}; }\n"
+        flake_nix.write_bytes(original)
+        (tmp_path / "flake.lock").write_text("{}\n")
+        config = tmp_path / "config.json"
+        config.write_text("{}\n")
+        return flake_nix, config, original
+
+    def _stub_operations(self, monkeypatch, calls):
+        def run_nixfmt(flake_dir):
+            calls.append("nixfmt")
+            with open(os.path.join(flake_dir, "flake.nix"), "wb") as output:
+                output.write(b"{ inputs = {}; }  # formatted\n")
+
+        def dedup(*args, **kwargs):
+            calls.append("dedup")
+            return 0
+
+        monkeypatch.setattr(flake_tidy, "run_nixfmt", run_nixfmt)
+        monkeypatch.setattr(flake_tidy, "dedup", dedup)
+
+    def test_dry_run_skips_initial_format_and_preserves_flake_nix(
+        self, monkeypatch, tmp_path
+    ):
+        flake_nix, config, original = self._fixture(tmp_path)
+        calls = []
+        self._stub_operations(monkeypatch, calls)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "flake-tidy",
+                "dedup",
+                "--dry-run",
+                "--config",
+                str(config),
+                "--flake-dir",
+                str(tmp_path),
+            ],
+        )
+
+        flake_tidy.main()
+
+        assert calls == ["dedup"]
+        assert flake_nix.read_bytes() == original
+
+    def test_normal_run_formats_before_operation(self, monkeypatch, tmp_path):
+        flake_nix, config, original = self._fixture(tmp_path)
+        calls = []
+        self._stub_operations(monkeypatch, calls)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "flake-tidy",
+                "dedup",
+                "--config",
+                str(config),
+                "--flake-dir",
+                str(tmp_path),
+            ],
+        )
+
+        flake_tidy.main()
+
+        assert calls == ["nixfmt", "dedup"]
+        assert flake_nix.read_bytes() != original
+
+    def test_check_mode_still_skips_initial_format(self, monkeypatch, tmp_path):
+        flake_nix, config, original = self._fixture(tmp_path)
+        calls = []
+        self._stub_operations(monkeypatch, calls)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "flake-tidy",
+                "dedup",
+                "--check",
+                "--config",
+                str(config),
+                "--flake-dir",
+                str(tmp_path),
+            ],
+        )
+
+        with pytest.raises(SystemExit) as excinfo:
+            flake_tidy.main()
+
+        assert excinfo.value.code == 0
+        assert calls == ["dedup"]
+        assert flake_nix.read_bytes() == original
+
+
 class TestMissingFlakeFiles:
     """main() missing flake.lock / flake.nix is exit 2, not 1 (#1250).
 

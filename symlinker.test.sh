@@ -48,6 +48,27 @@
 #          enumeration is now captured to a file and its status
 #          checked (#1325 pattern): a failure exits non-zero with
 #          symlinker's own stderr error. Scenario M pins this.
+#   #1730 — forward-only options (--input-dir, --exclude, filters, ...)
+#          were accepted alongside --undo and silently ignored, so a
+#          caller could believe a path/filter constrained an undo that
+#          can unlink unrelated symlinks. They now reject at parse time
+#          (exit 2, naming the flag and --undo mode) in either argument
+#          order; undo-valid controls stay accepted. Scenario O pins
+#          this, and earlier undo scenarios no longer pass --no-input
+#          (a forward-only flag) to undo runs.
+#   #1738 -- --simple was left out of the #1730 refusal list: it is only
+#          consumed by describe() on the forward path, so --undo --simple
+#          was silently byte-identical, and the usage UNDO list still
+#          claimed --simple and --no-input/--yes for undo. --simple now
+#          rejects in undo like the other forward-only flags, and the
+#          usage UNDO list no longer claims either. Scenario P pins this.
+#   #1750 -- --skip-restore is undo-only (its only consumer is the undo
+#          branch's BACKUP-record restore handling), but it was accepted
+#          in forward mode and silently ignored at exit 0 -- the mirror
+#          of #1730/#1738. It now rejects at parse time (exit 2, naming
+#          the flag and that it is undo-only) when no --undo is given,
+#          in either argument order; --undo <ts> --skip-restore and
+#          --skip-restore --undo <ts> stay valid. Scenario Q pins this.
 # This drives the REAL symlinker.sh (no pasted copies) against temp dirs.
 # The #886 scenario stubs `date` so every invocation lands in the same
 # "second" deterministically.
@@ -96,7 +117,7 @@ else
   fail "A: BACKUP records are not tab-separated"
 fi
 
-XDG_CACHE_HOME="$A/cache" bash "$SCRIPT" --undo "$ts_a" --no-input >"$A/undo.log" 2>&1 \
+XDG_CACHE_HOME="$A/cache" bash "$SCRIPT" --undo "$ts_a" >"$A/undo.log" 2>&1 \
   || fail "A: undo of a fully restorable run exited non-zero"
 check "A: colon file restored byte-for-byte" cmp -s "$A/out/a:b.txt" <(printf 'old-colon\n')
 check "A: plain file restored byte-for-byte" cmp -s "$A/out/plain.txt" <(printf 'old-plain\n')
@@ -115,7 +136,7 @@ printf 'old-legacy\n' > "$B/out/legacy.txt.bak.1600000000"
   echo "BACKUP:$B/out/legacy.txt:$B/out/legacy.txt.bak.1600000000"
 } > "$B/cache/symlinker/1600000000.undo"
 
-XDG_CACHE_HOME="$B/cache" bash "$SCRIPT" --undo 1600000000 --no-input >"$B/undo.log" 2>&1 \
+XDG_CACHE_HOME="$B/cache" bash "$SCRIPT" --undo 1600000000 >"$B/undo.log" 2>&1 \
   || fail "B: undo of a legacy v2 file exited non-zero"
 check "B: legacy colon-format backup restored" cmp -s "$B/out/legacy.txt" <(printf 'old-legacy\n')
 
@@ -126,7 +147,7 @@ XDG_CACHE_HOME="$C/cache" bash "$SCRIPT" --input-dir "$C/in" --output-dir "$C/ou
   --force --no-input >"$C/run.log" 2>&1 || fail "C: link run exited non-zero"
 ts_c="$(undo_ts_of "$C/cache")"
 rm -f "$C/out/gone.txt.bak.$ts_c" # the backup is lost before the undo runs
-if XDG_CACHE_HOME="$C/cache" bash "$SCRIPT" --undo "$ts_c" --no-input >"$C/undo.log" 2>&1; then
+if XDG_CACHE_HOME="$C/cache" bash "$SCRIPT" --undo "$ts_c" >"$C/undo.log" 2>&1; then
   fail "C: undo with an irrecoverable restore exited 0"
 else
   echo "ok: C: undo with an irrecoverable restore exits non-zero"
@@ -167,7 +188,7 @@ grep -q "SYMLINK:$D/out2/f.txt" "$D/cache/symlinker/1700000001.undo" \
   || fail "D: second run's undo records missing from its bumped undo file"
 
 # The undo runs in the same "second" too: it must not truncate its source.
-run_stubbed --undo 1700000000 --no-input >"$D/undo1.log" 2>&1 \
+run_stubbed --undo 1700000000 >"$D/undo1.log" 2>&1 \
   || fail "D: same-second undo exited non-zero"
 check "D: same-second undo restored the original" cmp -s "$D/out1/f.txt" <(printf 'old1\n')
 [[ ! -L "$D/out1/f.txt" ]] || fail "D: same-second undo left the symlink in place"
@@ -184,7 +205,7 @@ ts_e="$(undo_ts_of "$E/cache")"
 [[ -n "$ts_e" ]] || fail "E: no undo file written"
 sleep 1
 
-XDG_CACHE_HOME="$E/cache" bash "$SCRIPT" --undo "$ts_e" --no-input >"$E/undo.log" 2>&1 \
+XDG_CACHE_HOME="$E/cache" bash "$SCRIPT" --undo "$ts_e" >"$E/undo.log" 2>&1 \
   || fail "E: undo exited non-zero"
 check "E: undo restored the original" cmp -s "$E/out/plain.txt" <(printf 'old\n')
 sleep 1
@@ -197,7 +218,7 @@ for f in "$E/cache"/symlinker/*.undo; do
 done
 [[ -n "$ts_eu" ]] || fail "E: no undo-of-undo file written"
 
-XDG_CACHE_HOME="$E/cache" bash "$SCRIPT" --undo "$ts_eu" --no-input >"$E/undo2.log" 2>&1 \
+XDG_CACHE_HOME="$E/cache" bash "$SCRIPT" --undo "$ts_eu" >"$E/undo2.log" 2>&1 \
   || fail "E: undo-of-undo of a --force run exited non-zero"
 check "E: undo-of-undo recreated the symlink" test -L "$E/out/plain.txt"
 if [[ -L "$E/out/plain.txt" && "$(readlink "$E/out/plain.txt")" == "$E/in/plain.txt" ]]; then
@@ -340,7 +361,7 @@ i_expect_error() { # i_expect_error <desc> <message> <args...>
 i_expect_error "repeated --input-dir errors" "Error: --input-dir may be given only once" --input-dir "$I/in" --input-dir "$I/in2" --output-dir "$I/out" --dry-run
 i_expect_error "repeated --output-dir errors" "Error: --output-dir may be given only once" --input-dir "$I/in" --output-dir "$I/out" --output-dir "$I/out"
 i_expect_error "repeated --backup-suffix errors" "Error: --backup-suffix may be given only once" --input-dir "$I/in" --output-dir "$I/out" --backup-suffix .bak.one --backup-suffix .bak.two
-i_expect_error "repeated --undo errors" "Error: --undo may be given only once" --undo 1111111111 --undo 2222222222 --dry-run --no-input
+i_expect_error "repeated --undo errors" "Error: --undo may be given only once" --undo 1111111111 --undo 2222222222 --dry-run
 check "I: rejected repeats wrote no links" test -z "$(ls -A "$I/out")"
 if i_run --input-dir "$I/in" --output-dir "$I/out" --dry-run --exclude foo --exclude bar --exact foo --exact foo; then
   echo "ok: I: accumulate flags (--exclude/--exact) still repeat"
@@ -553,6 +574,163 @@ else
   fail "N: valid matching --regex should exit 0: $(cat "$N/err")"
 fi
 grep -q "1 to create" "$N/out.log" || fail "N: valid matching --regex no longer plans 1 link: $(cat "$N/out.log")"
+
+
+# ─── Scenario O (#1730): forward-only flags rejected in --undo mode ───────
+# --undo accepted forward-path/filter options and silently ignored them:
+# `--undo <ts> --dry-run --input-dir /nonexistent --exclude example.txt`
+# exited 0 and printed "Would unlink". Every forward-only option must now
+# reject at parse time — exit 2, error naming the flag and --undo mode,
+# in either argument order, with no undo action performed. The undo-valid
+# controls (--dry-run/--force/--verbose/--strict/--skip-restore) and
+# --help stay accepted.
+O="$TMP_ROOT/o"; mkdir -p "$O/in" "$O/out" "$O/cache"
+printf 'new\n' > "$O/in/example.txt"
+XDG_CACHE_HOME="$O/cache" bash "$SCRIPT" --input-dir "$O/in" --output-dir "$O/out" \
+  --no-input >"$O/run.log" 2>&1 || fail "O: link run exited non-zero"
+ts_o="$(undo_ts_of "$O/cache")"
+[[ -n "$ts_o" ]] || fail "O: no undo file written"
+check "O: link run created the symlink" test -L "$O/out/example.txt"
+o_reject() { # o_reject <flag-as-given> <args...>
+  local flag="$1"; shift
+  local rc=0
+  XDG_CACHE_HOME="$O/cache" bash "$SCRIPT" "$@" >"$O/reject.log" 2>"$O/reject.err" || rc=$?
+  if [[ $rc -ne 2 ]]; then
+    fail "O: $flag with --undo — expected exit 2, got $rc: $(cat "$O/reject.err")"
+  elif ! grep -qF -- "$flag" "$O/reject.err"; then
+    fail "O: $flag with --undo — error does not name the flag: $(cat "$O/reject.err")"
+  elif ! grep -qF -- "--undo" "$O/reject.err"; then
+    fail "O: $flag with --undo — error does not name --undo mode: $(cat "$O/reject.err")"
+  else
+    echo "ok: O: $flag rejected in --undo mode (exit 2)"
+  fi
+  [[ -L "$O/out/example.txt" ]] || fail "O: rejected $flag invocation performed the undo (symlink gone)"
+}
+# --input-dir and --exclude in BOTH argument orders
+o_reject "--input-dir" --undo "$ts_o" --dry-run --input-dir /definitely/nonexistent --exclude example.txt
+o_reject "--input-dir" --input-dir /definitely/nonexistent --undo "$ts_o" --dry-run
+o_reject "--exclude" --undo "$ts_o" --exclude example.txt
+o_reject "--exclude" --exclude example.txt --undo "$ts_o"
+# The remaining forward-only options (after --undo), plus one before-order boolean
+o_reject "--output-dir" --undo "$ts_o" --output-dir "$O/out"
+o_reject "--backup-suffix" --undo "$ts_o" --backup-suffix .x
+o_reject "--no-input" --undo "$ts_o" --no-input
+o_reject "--yes" --undo "$ts_o" --yes
+o_reject "-y" --undo "$ts_o" -y
+o_reject "--skip-backup" --undo "$ts_o" --skip-backup
+o_reject "--skip-conflict" --undo "$ts_o" --skip-conflict
+o_reject "--only-files" --undo "$ts_o" --only-files
+o_reject "--only-dirs" --only-dirs --undo "$ts_o"
+o_reject "--exact" --undo "$ts_o" --exact example.txt
+o_reject "--prefix" --undo "$ts_o" --prefix ex
+o_reject "--starts-with" --undo "$ts_o" --starts-with ex
+o_reject "--suffix" --undo "$ts_o" --suffix .txt
+o_reject "--ends-with" --undo "$ts_o" --ends-with .txt
+o_reject "--regex" --undo "$ts_o" --regex '^ex'
+o_reject "--match" --undo "$ts_o" --match examp
+# Undo-valid controls stay accepted: a dry-run undo with all of them exits 0
+# and changes nothing; --help stays mode-independent.
+if XDG_CACHE_HOME="$O/cache" bash "$SCRIPT" --undo "$ts_o" --dry-run --force --verbose --strict --skip-restore >"$O/dry.log" 2>&1; then
+  echo "ok: O: undo-valid controls accepted in --undo mode"
+else
+  fail "O: undo with --dry-run/--force/--verbose/--strict/--skip-restore exited non-zero: $(cat "$O/dry.log")"
+fi
+check "O: dry-run undo left the symlink in place" test -L "$O/out/example.txt"
+if XDG_CACHE_HOME="$O/cache" bash "$SCRIPT" --undo "$ts_o" --help >"$O/help.log" 2>&1; then
+  echo "ok: O: --help accepted alongside --undo"
+else
+  fail "O: --help alongside --undo exited non-zero"
+fi
+# A plain undo (no forward-only flags) still performs the undo.
+if XDG_CACHE_HOME="$O/cache" bash "$SCRIPT" --undo "$ts_o" --force --verbose --strict >"$O/undo.log" 2>&1; then
+  echo "ok: O: plain undo still exits 0"
+else
+  fail "O: plain undo exited non-zero: $(cat "$O/undo.log")"
+fi
+check "O: plain undo removed the symlink" test ! -L "$O/out/example.txt"
+
+
+# --- Scenario P (#1738): --simple rejected in --undo mode ---
+# --simple only shapes forward-path describe() output; the undo branch
+# never calls describe(), so --undo <ts> --simple was byte-identical to
+# --undo <ts> at exit 0. It must now reject at parse time -- exit 2, error
+# naming --simple and --undo mode, in either argument order -- and the
+# usage UNDO list must not claim --simple or --no-input/--yes.
+P="$TMP_ROOT/p"; mkdir -p "$P/in" "$P/out" "$P/cache"
+printf 'new\n' > "$P/in/example.txt"
+XDG_CACHE_HOME="$P/cache" bash "$SCRIPT" --input-dir "$P/in" --output-dir "$P/out" \
+  --no-input >"$P/run.log" 2>&1 || fail "P: link run exited non-zero"
+ts_p="$(undo_ts_of "$P/cache")"
+[[ -n "$ts_p" ]] || fail "P: no undo file written"
+p_reject() {
+  local rc=0
+  XDG_CACHE_HOME="$P/cache" bash "$SCRIPT" "$@" >"$P/reject.log" 2>"$P/reject.err" || rc=$?
+  if [[ $rc -ne 2 ]]; then
+    fail "P: --simple with --undo ($*) - expected exit 2, got $rc: $(cat "$P/reject.err")"
+  elif ! grep -qF -- "--simple" "$P/reject.err"; then
+    fail "P: --simple with --undo - error does not name --simple: $(cat "$P/reject.err")"
+  elif ! grep -qF -- "--undo" "$P/reject.err"; then
+    fail "P: --simple with --undo - error does not name --undo mode: $(cat "$P/reject.err")"
+  else
+    echo "ok: P: --simple rejected in --undo mode (exit 2, order: $*)"
+  fi
+  [[ -L "$P/out/example.txt" ]] || fail "P: rejected --simple invocation performed the undo (symlink gone)"
+}
+p_reject --undo "$ts_p" --dry-run --simple
+p_reject --simple --undo "$ts_p" --dry-run
+p_reject --undo "$ts_p" --simple
+bash "$SCRIPT" --help >"$P/help.log" 2>&1 || fail "P: --help exited non-zero"
+undo_list="$(sed -n "/Undo supports the same flags/,/^$/p" "$P/help.log")"
+if grep -qF -- "--simple" <<<"$undo_list"; then fail "P: usage UNDO list still claims --simple"; else echo "ok: P: usage UNDO list omits --simple"; fi
+if grep -qF -- "--no-input" <<<"$undo_list"; then fail "P: usage UNDO list still claims --no-input"; else echo "ok: P: usage UNDO list omits --no-input/--yes"; fi
+if XDG_CACHE_HOME="$P/cache" bash "$SCRIPT" --input-dir "$P/in" --output-dir "$P/out" --dry-run --simple >"$P/fwd.log" 2>&1; then
+  echo "ok: P: forward --simple still accepted"
+else
+  fail "P: forward --simple exited non-zero: $(cat "$P/fwd.log")"
+fi
+
+
+# --- Scenario Q (#1750): --skip-restore rejected in forward mode ---
+# --skip-restore is undo-only: its only consumer is the undo branch's
+# BACKUP-record restore handling, so a forward run carrying it exited 0
+# and linked identically to one without it. It must now reject at parse
+# time -- exit 2, error naming --skip-restore and that it is undo-only,
+# in either argument order (flag before other forward options and flag
+# after them), before any linking is performed. Both --undo orders stay
+# valid (Scenario O's undo control also covers the after---undo order).
+Q="$TMP_ROOT/q"; mkdir -p "$Q/in" "$Q/out" "$Q/cache"
+printf 'new\n' > "$Q/in/example.txt"
+q_reject() { # q_reject <label> <args...>
+  local label="$1"; shift
+  local rc=0
+  XDG_CACHE_HOME="$Q/cache" bash "$SCRIPT" --input-dir "$Q/in" --output-dir "$Q/out" "$@" >"$Q/reject.log" 2>"$Q/reject.err" || rc=$?
+  if [[ $rc -ne 2 ]]; then
+    fail "Q: --skip-restore forward ($label) - expected exit 2, got $rc: $(cat "$Q/reject.err")"
+  elif ! grep -qF -- "--skip-restore" "$Q/reject.err"; then
+    fail "Q: --skip-restore forward ($label) - error does not name --skip-restore: $(cat "$Q/reject.err")"
+  elif ! grep -qF -- "undo-only" "$Q/reject.err"; then
+    fail "Q: --skip-restore forward ($label) - error does not name it undo-only: $(cat "$Q/reject.err")"
+  else
+    echo "ok: Q: --skip-restore rejected in forward mode (exit 2, $label)"
+  fi
+  [[ ! -e "$Q/out/example.txt" && ! -L "$Q/out/example.txt" ]] || fail "Q: rejected --skip-restore invocation ($label) performed linking"
+}
+q_reject "flag last" --skip-restore
+q_reject "flag first" --skip-restore --no-input
+# Flag-before---undo stays valid: a real forward run, then
+# --skip-restore --undo <ts> performs the undo exactly like Scenario O's
+# --undo <ts> --skip-restore control.
+XDG_CACHE_HOME="$Q/cache" bash "$SCRIPT" --input-dir "$Q/in" --output-dir "$Q/out" \
+  --no-input >"$Q/run.log" 2>&1 || fail "Q: link run exited non-zero"
+ts_q="$(undo_ts_of "$Q/cache")"
+[[ -n "$ts_q" ]] || fail "Q: no undo file written"
+check "Q: link run created the symlink" test -L "$Q/out/example.txt"
+if XDG_CACHE_HOME="$Q/cache" bash "$SCRIPT" --skip-restore --undo "$ts_q" >"$Q/undo.log" 2>&1; then
+  echo "ok: Q: --skip-restore before --undo accepted"
+else
+  fail "Q: --skip-restore --undo exited non-zero: $(cat "$Q/undo.log")"
+fi
+check "Q: flag-before---undo undo removed the symlink" test ! -L "$Q/out/example.txt"
 
 if (( failures > 0 )); then
   echo "symlinker tests: $failures failure(s)" >&2

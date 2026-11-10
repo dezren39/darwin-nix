@@ -60,13 +60,13 @@ rec {
     };
     mac-app-util = {
       url = "github:hraban/mac-app-util";
-      # nixpkgs not followed — mac-app-util uses its own tested nixpkgs for SBCL/CL compat
+      # SBCL >= 2.6.6 fixes fixed-address allocation failures on newer macOS.
       inputs.treefmt-nix.follows = "treefmt-nix";
       inputs.cl-nix-lite.follows = "cl-nix-lite";
       inputs.flake-utils.follows = "flake-utils";
       inputs.flake-compat.follows = "flake-compat-hoisted";
       inputs.systems.follows = "systems-hoisted";
-      inputs.nixpkgs.follows = "nixpkgs-hoisted";
+      inputs.nixpkgs.follows = "nixpkgs";
     };
     brew-src = {
       # Track upstream so ./r's flake update advances Homebrew automatically.
@@ -708,6 +708,33 @@ rec {
               bash ./symlinker.test.sh
               touch $out
             '';
+        # #1752: tmux-navigator.test.sh extracts the vim-tmux-navigator
+        # block from homeUser.nix and loads it in isolated tmux servers -
+        # the host version and a stubbed tmux 2.9 - pinning the C-backslash
+        # root-table binding for both version branches. The block's old
+        # tmux_version assignment was never shell-evaluated by tmux, so
+        # the binding silently never installed; no suite covered it.
+        tmux-navigator-tests =
+          pkgs.runCommandLocal "tmux-navigator-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.tmux
+                pkgs.coreutils
+                pkgs.gawk
+                pkgs.gnugrep
+                pkgs.gnused
+              ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/homeUser.nix $src/tmux-navigator.test.sh ./
+              chmod u+w ./homeUser.nix ./tmux-navigator.test.sh
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./tmux-navigator.test.sh
+              touch $out
+            '';
         # #967: symlink-scripts.test.sh drives the real symlink-commands
         # and symlink-plugins — in place against the repo's real
         # commands/ and plugins/, and as verbatim copies in a fixture
@@ -1096,6 +1123,31 @@ rec {
               python3 ./mcp-clients.test.py
               touch $out
             '';
+        # #1648: pkgs/service-events/monitor.test.py — the direct-import
+        # probes for monitor.py's launchctl/ps parsers (the #1613
+        # Unicode-digit pid regression and the #1643 rotate symlink
+        # guard) — was run by nothing: the service-events package build
+        # copies only event.py and monitor.py and stubs launchd_jobs
+        # out of its own tick scenarios, and no check or workflow named
+        # the test file, so those regressions could recur with every
+        # automated check green. The test inserts its own directory
+        # into sys.path and imports monitor (which imports event), so
+        # copy the three files in their package layout.
+        service-events-tests =
+          pkgs.runCommandLocal "service-events-tests"
+            {
+              nativeBuildInputs = [ pkgs.python3 ];
+            }
+            ''
+              mkdir -p pkgs/service-events
+              cp ${./pkgs/service-events/event.py} pkgs/service-events/event.py
+              cp ${./pkgs/service-events/monitor.py} pkgs/service-events/monitor.py
+              cp ${./pkgs/service-events/monitor.test.py} pkgs/service-events/monitor.test.py
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              python3 pkgs/service-events/monitor.test.py
+              touch $out
+            '';
         # #1449: exercise the actual home-manager activation wrapper and
         # mcp-clients.py with a scratch HOME and a service-event stub. A
         # partial enforcement must be durably reported without blocking the
@@ -1118,6 +1170,25 @@ rec {
               export HOME="$TMPDIR/home"
               mkdir -p "$HOME"
               bash ./mcp-clients-activation.test.sh
+              touch $out
+            '';
+        # #1454: activation must durably record failures from the root and
+        # primary-user helper runs without hiding helper output or blocking
+        # later activation entries when the event write succeeds.
+        system-activation-helper-tests =
+          pkgs.runCommandLocal "system-activation-helper-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.coreutils
+                pkgs.gnugrep
+              ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/system-activation-helper.sh $src/system-activation-helper.test.sh ./
+              chmod u+w ./system-activation-helper.test.sh
+              bash ./system-activation-helper.test.sh
               touch $out
             '';
         # #907: opencode-share.test.sh drives the real opencode-share.sh
@@ -1184,7 +1255,9 @@ rec {
             ''
               cp ${./code-install-extensions.sh} code-install-extensions.sh
               cp ${./code-install-extensions.test.sh} code-install-extensions.test.sh
-              chmod u+w code-install-extensions.sh code-install-extensions.test.sh
+              cp ${./config.toml} config.toml
+              cp ${./vsc-extensions.txt} vsc-extensions.txt
+              chmod u+w code-install-extensions.sh code-install-extensions.test.sh config.toml vsc-extensions.txt
               export HOME="$TMPDIR/home"
               mkdir -p "$HOME"
               bash ./code-install-extensions.test.sh
@@ -1215,38 +1288,21 @@ rec {
               bash ./pm-dispatch-launch.test.sh
               touch $out
             '';
-        # #478: archive/skills/plannotator-setup-goal/SKILL.test.ts (the
-        # repo's only *.test.ts suite) was run by nothing — no check,
-        # workflow, or recipe referenced it, unlike the flake-tidy,
-        # warp-import, and opencode-db-pids suites (#397/#414/#472). It is
-        # self-contained (bun:test content pins on the sibling SKILL.md),
-        # so run every archived skill suite here.
-        skill-tests =
-          pkgs.runCommandLocal "skill-tests"
-            {
-              nativeBuildInputs = [ pkgs.bun ];
-              src = inputs.self;
-            }
-            ''
-              cp -r $src/archive ./archive
-              chmod -R u+w ./archive
-              export HOME="$TMPDIR/home"
-              mkdir -p "$HOME"
-              found=0
-              for t in archive/skills/*/SKILL.test.ts; do
-                [ -e "$t" ] || continue
-                found=1
-                echo "== $t"
-                bun test "$t"
-              done
-              if [ "$found" -eq 0 ]; then
-                echo "no archive/skills/*/SKILL.test.ts suites found" >&2
-                exit 1
-              fi
-              touch $out
-            '';
+        # skill-tests (the archive/skills/*/SKILL.test.ts suites, #478)
+        # retired 2026-11-07: the vendored skills moved to dezren39/cairn
+        # (.agents/skills-examples/) per developing-today/code#5982, and
+        # their suites moved with them.
       }
       // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
+        # #1768: build the Lisp dependencies and run upstream's --help install check.
+        mac-app-util =
+          assert pkgs.lib.assertMsg (
+            pkgs.lib.versionAtLeast
+              inputs.mac-app-util.inputs.nixpkgs.legacyPackages.${pkgs.stdenv.hostPlatform.system}.sbcl.version
+              "2.6.6"
+          ) "mac-app-util requires SBCL >= 2.6.6 on newer macOS";
+          inputs.mac-app-util.packages.${pkgs.stdenv.hostPlatform.system}.default;
+        mcpx = (mkPackages pkgs).mcpx;
         sidepulse = (mkPackages pkgs).sidepulse;
         sidepulse-wrapper =
           let
@@ -1627,7 +1683,7 @@ rec {
         # The default shell pulls this repo's own from-source builds
         # (selfPkgs.opencode), which a CI export job has to
         # compile from scratch — that realisation ran 2h+ and died
-        # (dezren39/nix#1381). Everything below substitutes from
+        # (dezren39/darwin-nix#1381). Everything below substitutes from
         # cache.nixos.org instead: same tools, no local builds.
         fleet = pkgs.mkShell {
           packages = [

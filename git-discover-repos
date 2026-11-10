@@ -82,6 +82,9 @@ FILTERING (output shape, orthogonal to scope)
   --paths-only        Print bare paths with no TYPE column, for piping into
                       xargs. (Orthogonal to --repos-only/--worktrees-only,
                       which choose WHICH records are printed, not their shape.)
+                      May not be combined with --find (--find FOUND
+                      records keep their REASON/STATUS columns); that pair
+                      is rejected at parse time.
   --bare-only         Print only bare repositories.
   --no-bare           Exclude bare repositories. (They are included by default
                       and tagged "repo" like any other; --bare-only narrows to
@@ -91,13 +94,27 @@ FINDING ARTIFACTS TOO
   --find NAME[,NAME]  Also emit artifact hits inside every discovered location,
                       as  FOUND<TAB>REASON<TAB>STATUS<TAB>PATH
                       Special values: cache, risky, trash, all
+                      May not be combined with --paths-only or --print0
+                      (those shape repo/worktree records; FOUND records
+                      keep their documented shape); those pairs are
+                      rejected at parse time.
   --status            For --find hits, ask git whether the dir is tracked /
                       ignored / untracked. Costs one git call per hit.
 
 OTHER
   --user USER         Scan USER's home instead of the caller's (needs root).
+                      --auto only: may not be combined with --path or a
+                      positional path (in --path mode it has no effect).
   --print0            NUL-separate records instead of newline.
-  --count             Print only a summary count.
+                      May not be combined with --find (FOUND records
+                      are newline-terminated); that pair is rejected
+                      at parse time.
+  --count             Print only a summary count, of the records the
+                      chosen filter would print. May not be combined
+                      with --find (the sweep's FOUND records are not
+                      counted), --paths-only, or --print0 (the count
+                      line has no record shape for them to shape);
+                      those pairs are rejected at parse time.
   --dry-run           Describe the plan, discover nothing.
   -h, --help          This help
 
@@ -135,31 +152,39 @@ USER_SET=0
 FILTER_FLAG=""
 FOLLOW_YES_SET=0
 FOLLOW_NO_SET=0
+RECURSIVE_YES_SET=0
+RECURSIVE_NO_SET=0
+AUTO_SET=0
+PATH_SET=0
+BARE_ONLY_SET=0
+NO_BARE_SET=0
+PATHS_ONLY_SET=0
+PRINT0_SET=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --auto)           MODE="auto" ;;
-    --path)           { arg_require_value "$1" "${2:-}"; MODE="path"; PATHS+=("$2"); shift; } ;;
-    --recursive|--walk)       DEPTH_LIMIT=""; RECURSIVE_SET=1 ;;
-    --no-recursive|--no-walk) DEPTH_LIMIT=1;  RECURSIVE_SET=1 ;;
-    --depth)                  { arg_require_value "$1" "${2:-}"; arg_once "$1" DEPTH_SET; DEPTH_LIMIT="$2"; RECURSIVE_SET=1; shift; } ;;
+    --auto)           { arg_conflict --auto --path "$PATH_SET"; MODE="auto"; AUTO_SET=1; } ;;
+    --path)           { arg_require_value "$1" "${2:-}"; arg_conflict --auto --path "$AUTO_SET"; MODE="path"; PATHS+=("$2"); PATH_SET=1; shift; } ;;
+    --recursive|--walk)       { arg_conflict --recursive --no-recursive "$RECURSIVE_NO_SET"; arg_conflict --depth --recursive "$DEPTH_SET"; DEPTH_LIMIT=""; RECURSIVE_SET=1; RECURSIVE_YES_SET=1; } ;;
+    --no-recursive|--no-walk) { arg_conflict --recursive --no-recursive "$RECURSIVE_YES_SET"; arg_conflict --depth --no-recursive "$DEPTH_SET"; DEPTH_LIMIT=1;  RECURSIVE_SET=1; RECURSIVE_NO_SET=1; } ;;
+    --depth)                  { arg_require_value "$1" "${2:-}"; arg_conflict --depth --recursive "$RECURSIVE_YES_SET"; arg_conflict --depth --no-recursive "$RECURSIVE_NO_SET"; arg_once "$1" DEPTH_SET; DEPTH_LIMIT="$2"; RECURSIVE_SET=1; shift; } ;;
     --follow)         { arg_conflict --follow --no-follow "$FOLLOW_NO_SET"; FOLLOW=1; FOLLOW_SET=1; FOLLOW_YES_SET=1; } ;;
     --no-follow)      { arg_conflict --follow --no-follow "$FOLLOW_YES_SET"; FOLLOW=0; FOLLOW_SET=1; FOLLOW_NO_SET=1; } ;;
     --repos-only)     { [ -z "$FILTER_FLAG" ] || arg_die "$1 may not be combined with $FILTER_FLAG (only one filter option may be given)"; FILTER="repos"; FILTER_FLAG="$1"; } ;;
     --worktrees-only) { [ -z "$FILTER_FLAG" ] || arg_die "$1 may not be combined with $FILTER_FLAG (only one filter option may be given)"; FILTER="worktrees"; FILTER_FLAG="$1"; } ;;
     --both)           { [ -z "$FILTER_FLAG" ] || arg_die "$1 may not be combined with $FILTER_FLAG (only one filter option may be given)"; FILTER="both"; FILTER_FLAG="$1"; } ;;
-    --bare-only)      { [ -z "$FILTER_FLAG" ] || arg_die "$1 may not be combined with $FILTER_FLAG (only one filter option may be given)"; FILTER="bare"; FILTER_FLAG="$1"; } ;;
-    --paths-only)     PATHS_ONLY=1 ;;
-    --no-bare)        INCLUDE_BARE=0 ;;
-    --find)           { arg_require_value "$1" "${2:-}"; arg_once "$1" FIND_SET; FIND_SPEC="$2"; shift; } ;;
+    --bare-only)      { arg_conflict --bare-only --no-bare "$NO_BARE_SET"; [ -z "$FILTER_FLAG" ] || arg_die "$1 may not be combined with $FILTER_FLAG (only one filter option may be given)"; FILTER="bare"; FILTER_FLAG="$1"; BARE_ONLY_SET=1; } ;;
+    --paths-only)     { arg_conflict --count --paths-only "$COUNT_ONLY"; PATHS_ONLY=1; PATHS_ONLY_SET=1; } ;;
+    --no-bare)        { arg_conflict --bare-only --no-bare "$BARE_ONLY_SET"; INCLUDE_BARE=0; NO_BARE_SET=1; } ;;
+    --find)           { arg_require_value "$1" "${2:-}"; arg_conflict --count --find "$COUNT_ONLY"; arg_once "$1" FIND_SET; FIND_SPEC="$2"; shift; } ;;
     --status)         WANT_STATUS=1 ;;
     --user)           { arg_require_value "$1" "${2:-}"; arg_once "$1" USER_SET; TARGET_USER="$2"; shift; } ;;
-    --print0)         PRINT0=1 ;;
-    --count)          COUNT_ONLY=1 ;;
+    --print0)         { arg_conflict --count --print0 "$COUNT_ONLY"; PRINT0=1; PRINT0_SET=1; } ;;
+    --count)          { arg_conflict --count --find "$FIND_SET"; arg_conflict --count --paths-only "$PATHS_ONLY_SET"; arg_conflict --count --print0 "$PRINT0_SET"; COUNT_ONLY=1; } ;;
     --dry-run)        DRY_RUN=1 ;;
     -h|--help)        usage; exit 0 ;;
     -*)               echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
-    *)                MODE="path"; PATHS+=("$1") ;;
+    *)                { arg_conflict --auto --path "$AUTO_SET"; MODE="path"; PATHS+=("$1"); PATH_SET=1; } ;;
   esac
   shift
 done
@@ -178,6 +203,49 @@ fi
 if [ "$DEPTH_LIMIT" = "1" ] && [ "${FOLLOW:-0}" = "1" ] && [ "$RECURSIVE_SET" = "1" ]; then
   echo "git-discover-repos: --no-recursive conflicts with --follow" >&2
   echo "                    (use --depth N with N>1 if you want a bounded walk plus following)" >&2
+  exit 2
+fi
+
+# --status only annotates --find hits (status_for is called solely from
+# the find sweep); without --find the flag is never read, so a run that
+# asked for it would exit 0 with output identical to not asking (#1657).
+# Judge it here, after parsing, so both flag orders are covered.
+if [ "$WANT_STATUS" = "1" ] && [ "$FIND_SET" = "0" ]; then
+  echo "git-discover-repos: --status requires --find" >&2
+  echo "                    (--status only annotates --find hits; without --find it has no effect)" >&2
+  exit 2
+fi
+
+# --user only resolves SCAN_HOME, which seed_auto() alone consumes;
+# seed_path() never reads it, so in --path mode (a positional path
+# counts too) the flag was silently ignored: the run exited 0 with
+# output byte-identical to not asking, and --dry-run printed the
+# ignored home as the plan (#1710). Judge the pair here, after
+# parsing, so both flag orders and the positional form are covered.
+if [ "$USER_SET" = "1" ] && [ "$PATH_SET" = "1" ]; then
+  echo "git-discover-repos: --user may not be combined with --path" >&2
+  echo "                    (--user sets the home scanned in --auto mode; a --path run scans only the given paths)" >&2
+  exit 2
+fi
+
+# --paths-only and --print0 shape repo/worktree records in the emit
+# pipeline, but the find sweep prints FOUND records directly, bypassing
+# that pipeline: a combined run exited 0 with bare repo paths beside
+# 4-column FOUND records (--paths-only), or NUL-separated repo records
+# beside newline-terminated FOUND records (--print0) (#1734). Reshaping
+# FOUND would give the shape flags a new effect on a record kind they
+# never shaped (#1722 rule 5) and a bare-path FOUND record would be
+# indistinguishable from a repo path, so judge both pairs here, after
+# parsing, so both flag orders are covered -- like --status/--user above.
+if [ "$FIND_SET" = "1" ] && [ "$PATHS_ONLY_SET" = "1" ]; then
+  echo "git-discover-repos: --find and --paths-only may not be combined" >&2
+  echo "                    (--paths-only shapes repo/worktree records; --find FOUND records keep their REASON/STATUS columns)" >&2
+  exit 2
+fi
+
+if [ "$FIND_SET" = "1" ] && [ "$PRINT0_SET" = "1" ]; then
+  echo "git-discover-repos: --find and --print0 may not be combined" >&2
+  echo "                    (--print0 separates repo/worktree records with NUL; --find FOUND records are newline-terminated)" >&2
   exit 2
 fi
 
@@ -219,21 +287,30 @@ git_q() { git -c safe.directory='*' "$@"; }
 
 canon() { (cd "$1" 2>/dev/null && pwd -P) || printf '%s\n' "$1"; }
 is_repo() { [ -e "$1/.git" ]; }
+# A bare repo has no .git entry; the directory itself is the object store.
+is_bare_repo() {
+  [ -d "$1" ] || return 1
+  [ -f "$1/HEAD" ] && [ -d "$1/objects" ] && [ -d "$1/refs" ]
+}
 is_numeric() { case "$1" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
 
 build_name_expr PRUNE_EXPR "${ALL_ARTIFACT_NAMES[@]}"
 
-# ONE traversal produces both results. The walk already has to stop at every
-# artifact directory (so a vendored node_modules/*/.git is not mistaken for a
-# repo); printing at that -prune costs nothing and removes the need for the
-# separate artifact find that used to re-walk the whole tree.
+# Two find passes: a candidate pass identifies bare repos from their objects
+# directories, then a discovery pass prints artifact directories and every
+# other directory and the read loop in scan_deep classifies the stream
+# against the candidate list. Checking every directory with find -exec would
+# launch a shell once per dir; the candidate pass only runs the shape checks
+# for directories named objects. Bare candidates are matched in the loop,
+# never in find's argument list, whose size the OS caps.
 #
-#   \( artifacts \) -prune -print   ->  an artifact dir; do not descend
-#   -o -name .git -print            ->  a repo or worktree marker
-#
-# Consumers tell them apart by basename. .git and .worktrees are deliberately
-# NOT pruned: tools stash worktrees inside both.
+# The candidate pass looks one level deeper than --depth because a bare repo
+# at depth N has its objects directory at depth N+1. Artifact directories stay
+# pruned in both passes.
 ARTIFACTS_FILE="$(mktemp)"
+BARE_CANDIDATES_FILE="$(mktemp)"
+
+
 scan_deep() {
   [ -d "$1" ] || return 0
   # A failed find enumeration (e.g. an unreadable subdirectory) must not be
@@ -244,42 +321,168 @@ scan_deep() {
   # seed_path turns the status into the script's exit status. --auto is
   # best-effort by design, so seed_auto ignores the status and the
   # failure stays quiet there.
-  local status_file stderr_file find_status
+  local candidate_status_file candidate_stderr_file
+  local status_file stderr_file find_status bare_maxdepth
+  local hits_file candidate_list filtered_file err_line err_path cand_path keep
+  # shellcheck disable=SC2016
+  local bare_candidate_probe='
+parent="${1%/objects}"
+case "${parent##*/}" in
+  .git|.worktrees) exit 0 ;;
+esac
+case "$parent" in
+  */.git/modules/*) exit 0 ;;
+esac
+if [ -d "$1" ] && [ -f "$parent/HEAD" ] && [ -d "$parent/refs" ]; then
+  printf "%s\n" "$parent" >> "$2"
+else
+  exit 1
+fi
+'
+  local -a bare_depth_args=()
+  : > "$BARE_CANDIDATES_FILE"
+  if [ -n "$DEPTH_LIMIT" ]; then
+    if [ "$DEPTH_LIMIT" -lt 2147483647 ]; then
+      bare_maxdepth=$((DEPTH_LIMIT + 1))
+    else
+      # The deepest representable limit cannot have an additional child level
+      # on supported find implementations; avoid overflowing their depth type.
+      bare_maxdepth="$DEPTH_LIMIT"
+    fi
+    bare_depth_args=(-maxdepth "$bare_maxdepth")
+  fi
+
+  # Candidate pass (best-effort): probe only directories named objects. This
+  # pass walks one level deeper than the discovery pass and enters bare-repo
+  # interiors the old -exec implementation pruned at the bare root, so its
+  # own failures must never fail the scan — a directory it cannot read that
+  # the discovery pass also traverses is reported by the discovery pass, and
+  # the rest were never reported before. Status and stderr are discarded.
+  candidate_status_file="$(mktemp)"
+  candidate_stderr_file="$(mktemp)"
+  outcome_enumerate "$candidate_status_file" "$candidate_stderr_file" -- \
+    find -H "$1" "${bare_depth_args[@]}" \
+      \( "${PRUNE_EXPR[@]}" \) -prune -o \
+      \( -name objects -exec sh -c "$bare_candidate_probe" sh {} "$BARE_CANDIDATES_FILE" \; \) -prune
+  rm -f "$candidate_status_file" "$candidate_stderr_file"
+
+  candidate_list="$(mktemp)"
+  LC_ALL=C sort -u "$BARE_CANDIDATES_FILE" > "$candidate_list"
+
+  # Discovery pass: print artifact directories (pruned, as before) and every
+  # other directory, plus .git files (worktree markers). Bare candidates are
+  # classified in the read loop below, never in find's argument list — an
+  # argument per candidate exceeds the OS argument-size limit on scans with
+  # many bare repos and takes the whole scan down with it.
+  hits_file="$(mktemp)"
   status_file="$(mktemp)"
   stderr_file="$(mktemp)"
   outcome_enumerate "$status_file" "$stderr_file" -- \
-    find -H "$1" "${DEPTH_ARGS[@]}" \( "${PRUNE_EXPR[@]}" \) -prune -print -o -name .git -print |
-    while IFS= read -r hit; do
-      # Fast parameter expansion avoids subshell execution of basename in discovery loop
-      case "${hit##*/}" in
-        .git) printf '%s\n' "${hit%/.git}" ;;
-        *)    printf '%s\n' "$hit" >> "$ARTIFACTS_FILE" ;;
+    find -H "$1" "${DEPTH_ARGS[@]}" \
+      \( "${PRUNE_EXPR[@]}" \) -prune -print -o \
+      -type d -print -o \
+      -name .git -print > "$hits_file"
+
+  # Classify the sorted hit stream against the sorted candidate list (both
+  # LC_ALL=C, so the cursor comparisons match the sort order). Output order
+  # does not matter here: every consumer of scan output sorts it. A hit
+  # beneath an emitted bare root is interior and dropped — the old find
+  # pruned bare roots, so nothing beneath them was ever reported.
+  (
+    LC_ALL=C
+    cand="" hit="" base="" root=""
+    declare -a bare_roots=()
+    exec 3< "$candidate_list"
+    IFS= read -r cand <&3 || cand=""
+    LC_ALL=C sort -u "$hits_file" | while IFS= read -r hit; do
+      while [ -n "$cand" ] && [[ "$cand" < "$hit" ]]; do
+        IFS= read -r cand <&3 || cand=""
+      done
+      # Drop bare roots whose subtree is exhausted: every descendant of a
+      # root R sorts below R0 (the '/' separator incremented), so once the
+      # stream passes that bound no later hit can be interior to R. Siblings
+      # such as a.git-other sort between a root and its descendants, so a
+      # single last-root variable is not enough — keep the open set.
+      open=()
+      for root in "${bare_roots[@]}"; do
+        [[ "$hit" < "${root}0" ]] && open+=("$root")
+      done
+      bare_roots=("${open[@]}")
+      for root in "${bare_roots[@]}"; do
+        case "$hit" in "$root"/*) continue 2 ;; esac
+      done
+      base="${hit##*/}"
+      if [ "$base" = ".git" ]; then
+        printf '%s\n' "${hit%/.git}"
+        continue
+      fi
+      if [ "$hit" = "$cand" ]; then
+        printf '%s\n' "$hit"
+        bare_roots+=("$hit")
+        IFS= read -r cand <&3 || cand=""
+        continue
+      fi
+      # The pre-candidate loop re-checked every hit with is_bare_repo; that
+      # is what reported bare repos the candidate search cannot see
+      # (artifact-named roots the passes prune, roots under .git/modules).
+      # Three builtin tests per directory is still far cheaper than the old
+      # shell launch per directory.
+      if is_bare_repo "$hit"; then
+        printf '%s\n' "$hit"
+        bare_roots+=("$hit")
+        continue
+      fi
+      case " ${ALL_ARTIFACT_NAMES[*]} " in
+        *" $base "*) printf '%s\n' "$hit" >> "$ARTIFACTS_FILE"; continue ;;
       esac
     done
+    exec 3<&-
+  )
+
   find_status=0
   IFS= read -r find_status < "$status_file" || find_status=0
   if [ "$find_status" -ne 0 ]; then
-    if [ "$MODE" = "path" ]; then
-      cat "$stderr_file" >&2
-      echo "git-discover-repos: failed to enumerate: $1" >&2
+    # The discovery find also descended into bare-repo interiors (it cannot
+    # prune them without the unbounded argument list above), where the old
+    # implementation never went. Drop error lines naming a bare candidate
+    # path; fail only if a genuine discovery error remains.
+    filtered_file="$(mktemp)"
+    while IFS= read -r err_line; do
+      keep=1
+      # Extract the pathname find is complaining about ("find: <path>: …",
+      # optionally quoted) and drop the line only when that path is a bare
+      # candidate or beneath one — a substring match would also silence
+      # siblings such as a.git-locked next to a bare a.git.
+      err_path="${err_line#find: }"
+      err_path="${err_path#\'}"
+      err_path="${err_path#‘}"
+      err_path="${err_path%%: *}"
+      err_path="${err_path%\'}"
+      err_path="${err_path%’}"
+      while IFS= read -r cand_path; do
+        if [ "$err_path" = "$cand_path" ]; then keep=0; break; fi
+        case "$err_path" in "$cand_path"/*) keep=0; break ;; esac
+      done < "$candidate_list"
+      [ "$keep" = "1" ] && printf '%s\n' "$err_line" >> "$filtered_file"
+    done < "$stderr_file"
+    if [ -s "$filtered_file" ]; then
+      if [ "$MODE" = "path" ]; then
+        cat "$filtered_file" >&2
+        echo "git-discover-repos: failed to enumerate: $1" >&2
+      fi
+      rm -f "$status_file" "$stderr_file" "$hits_file" "$candidate_list" "$filtered_file"
+      return 1
     fi
-    rm -f "$status_file" "$stderr_file"
-    return 1
+    rm -f "$filtered_file"
   fi
-  rm -f "$status_file" "$stderr_file"
+  rm -f "$status_file" "$stderr_file" "$hits_file" "$candidate_list"
   return 0
-}
-
-# A bare repo has no .git entry; the directory itself is the object store.
-is_bare_repo() {
-  [ -d "$1" ] || return 1
-  [ -f "$1/HEAD" ] && [ -d "$1/objects" ] && [ -d "$1/refs" ]
 }
 
 SEEN_FILE="$(mktemp)"
 OUT_FILE="$(mktemp)"
 QUEUE_FILE="$(mktemp)"
-trap 'rm -f "$SEEN_FILE" "$OUT_FILE" "$QUEUE_FILE" "$ARTIFACTS_FILE"' EXIT
+trap 'rm -f "$SEEN_FILE" "$OUT_FILE" "$QUEUE_FILE" "$ARTIFACTS_FILE" "$BARE_CANDIDATES_FILE"' EXIT
 
 seen() { grep -qxF "$1" "$SEEN_FILE" 2>/dev/null; }
 mark_seen() { printf '%s\n' "$1" >> "$SEEN_FILE"; }
@@ -287,7 +490,26 @@ mark_seen() { printf '%s\n' "$1" >> "$SEEN_FILE"; }
 # classify PATH -> prints "repo" or "worktree", or nothing if neither
 classify() {
   local d="$1"
-  if [ -f "$d/.git" ]; then echo worktree
+  if [ -f "$d/.git" ]; then
+    # A .git file is a gitdir pointer: read where it points (#1511).
+    # A linked worktree points at <repo>/.git/worktrees/<name> and
+    # shares that repo's object store, so it stays a worktree. A
+    # submodule checkout points at <super>/.git/modules/<name> and
+    # owns an independent object store, so it is a repo in its own
+    # right: maintenance must target it (via the checkout path)
+    # exactly once.
+    local line target
+    line="$(head -n 1 "$d/.git" 2>/dev/null)"
+    target="${line#gitdir: }"
+    case "$target" in
+      /*) ;;
+      *) target="$d/$target" ;;
+    esac
+    target="$(canon "$target")"
+    case "$target" in
+      */.git/modules/*) echo repo ;;
+      *) echo worktree ;;
+    esac
   elif [ -d "$d/.git" ]; then echo repo
   elif is_bare_repo "$d"; then echo repo
   fi
@@ -305,6 +527,14 @@ emit() {
 consider() {
   local d="$1" kind
   [ -d "$d" ] || return 0
+  # Never emit a record inside a .git/modules tree (#1511): that is a
+  # submodule's object store, and its canonical record is the
+  # submodule checkout (kind repo). The follow hop reaches here with
+  # the modules path because `git worktree list` run inside a
+  # submodule names the gitdir as the worktree path.
+  case "$d" in
+    */.git/modules/*) return 0 ;;
+  esac
   kind="$(classify "$d")"
   [ -z "$kind" ] && return 0
   if [ "$kind" = "repo" ] && [ "$INCLUDE_BARE" = "0" ] && is_bare_repo "$d"; then return 0; fi
@@ -444,10 +674,20 @@ if [ "$FOLLOW" = "1" ]; then
       fi
       rm -f "$common_err"
       if [ -n "$common" ] && [ -d "$common" ]; then
-        main="${common%/.git}"
-        [ "$main" = "$common" ] || consider "$main"
-        # a bare repo's common dir IS the repo
-        [ "$main" = "$common" ] && is_bare_repo "$common" && consider "$common"
+        case "$common" in
+          */.git/modules/*)
+            # A submodule's common dir lives inside the superproject's
+            # .git/modules (#1511): the submodule checkout itself is
+            # the canonical repo record (classify kinds it repo), so
+            # never emit a record inside another repo's .git.
+            ;;
+          *)
+            main="${common%/.git}"
+            [ "$main" = "$common" ] || consider "$main"
+            # a bare repo's common dir IS the repo
+            [ "$main" = "$common" ] && is_bare_repo "$common" && consider "$common"
+            ;;
+        esac
       fi
       # repository -> every worktree attached to it
       # `worktree list` used to run in a process substitution, whose
@@ -489,8 +729,14 @@ filter_out() {
 }
 
 if [ "$COUNT_ONLY" = "1" ]; then
-  r=$(awk -F'\t' '$1=="repo"' "$OUT_FILE" | wc -l | tr -d ' ')
-  w=$(awk -F'\t' '$1=="worktree"' "$OUT_FILE" | wc -l | tr -d ' ')
+  # Count exactly the records this invocation would print without
+  # --count: the same sort -u | filter_out pipeline as the emit path
+  # below, so a record filter (--repos-only/--worktrees-only/--bare-only)
+  # narrows the counts too (#1590). Previously this branch counted the
+  # raw unfiltered OUT_FILE.
+  counts=$(sort -u "$OUT_FILE" | filter_out | awk -F'\t' '$1=="repo" { r++ } $1=="worktree" { w++ } END { printf "%d %d", r, w }')
+  r=${counts% *}
+  w=${counts#* }
   echo "repos=$r worktrees=$w total=$((r + w))"
   if [ "$SEED_STATUS" -ne 0 ]; then
     exit "$SEED_STATUS"

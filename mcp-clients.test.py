@@ -31,14 +31,38 @@ Covers the two PR #904 fallout bugs:
   clients still enforced, exit 1; the #905 unbalanced-object warn-and-leave
   at exit 0 is unchanged.
 
+- #1749: a Zed settings.json with two live top-level context_servers
+  keys is a #906 per-client failure -- named on stderr as duplicate,
+  file byte-for-byte unchanged, other clients still enforced, exit 1;
+  replacing only the first key would leave the second (which json.loads
+  resolves last-key-wins) in place while reporting success.
+
 - #1217: a JSON client whose mcpServers is present but not an object
   (string, list, number, bool) is a #906 per-client failure -- named on
   stderr, file byte-for-byte unchanged, other clients still enforced,
   exit 1; absent or null mcpServers is still treated as no servers.
 
+- #1570: a JSON client whose whole document is valid JSON but not an
+  object (list, string, number, null) is a #906 per-client failure --
+  named on stderr with the deliberate top-level not-an-object message
+  (never a raw AttributeError), file byte-for-byte unchanged, other
+  clients still enforced, exit 1.
+
+- #1608: the Codex skipping branch tracks bracket depth for a
+  dropped table's values -- a header-shaped line inside a dropped
+  server's multi-line array or inline table (e.g. a nested-array
+  element line) is value content, never a table header, so the
+  dropped table is removed whole and the result parses as TOML.
+
 - #1133: any argument other than the single optional --dry-run is
   rejected before any file is read or written -- usage on stderr naming
   the offending argument, exit 2, seeded files byte-unchanged, no backup.
+
+- #1562: a client config reached through a symlink is enforced in the
+  symlink's target (temp+rename in the target's directory), not by
+  replacing the link with a detached regular file; the link stays a
+  symlink, the pre-change backup is kept, and the target's mode is
+  preserved.
 
 Run: python3 mcp-clients.test.py  (exit 0 = all probes passed)
 """
@@ -115,6 +139,32 @@ for shape, label in (('"notanobject"', "string"), ('["a", "b"]', "list"),
           "Claude Code" in r.stderr and ".claude.json" in r.stderr, r.stderr)
     check(f"1217 {label} bad file byte-for-byte unchanged", read(claude_path) == seeded)
     check(f"1217 {label} Copilot still enforced",
+          '"mcpx"' in read(os.path.join(home, ".copilot/mcp-config.json")))
+    shutil.rmtree(home)
+
+# #1570: a JSON client document whose top level is valid JSON but not
+# an object (list, string, number, null) -- a #906 failure for that
+# client only: exit 1, Claude Code and its file named on stderr with
+# the deliberate not-an-object message naming the actual type (never
+# the raw AttributeError), the bad file byte-for-byte unchanged, and
+# the well-formed Copilot client still enforced.
+for shape, label, typename in (('[1, 2]', "list", "list"),
+                               ('"hello"', "string", "str"),
+                               ('42', "number", "int"),
+                               ('null', "null", "NoneType")):
+    home = fresh_home()
+    seed(home, ".copilot/mcp-config.json", '{"mcpServers": {"other": {"command": "x"}}}')
+    claude_path = seed(home, ".claude.json", shape)
+    seeded = read(claude_path)
+    r = run(home)
+    check(f"1570 {label} top level exits 1", r.returncode == 1, f"exit={r.returncode} stderr={r.stderr}")
+    check(f"1570 {label} stderr names Claude Code and its file",
+          "Claude Code" in r.stderr and ".claude.json" in r.stderr, r.stderr)
+    check(f"1570 {label} stderr gives the deliberate top-level message",
+          f"top-level value is a {typename}, not an object; not changed" in r.stderr
+          and "AttributeError" not in r.stderr and "has no attribute" not in r.stderr, r.stderr)
+    check(f"1570 {label} bad file byte-for-byte unchanged", read(claude_path) == seeded)
+    check(f"1570 {label} Copilot still enforced",
           '"mcpx"' in read(os.path.join(home, ".copilot/mcp-config.json")))
     shutil.rmtree(home)
 
@@ -242,6 +292,31 @@ check("1228 comment before string exits 1", r.returncode == 1, f"exit={r.returnc
 check("1228 comment before string names not-an-object", "not an object" in r.stderr, r.stderr)
 check("1228 comment before string file unchanged", read(zed_path) == seeded)
 shutil.rmtree(home)
+
+# #1749: two live top-level context_servers keys in Zed -- a #906 failure
+# for Zed only: exit 1, Zed and its file named on stderr as duplicate,
+# the bad file byte-for-byte unchanged, and the well-formed Copilot
+# client still enforced. Any second live key triggers it, whatever
+# either value holds (foreign+foreign, mcpx+foreign, foreign+mcpx).
+MCPX_BLOCK = '{"mcpx": {"command": "mcpx"}}'
+for first, second, label in (
+        ('{"old": {"command": "old"}}', '{"foreign": {"command": "bypass"}}', "foreign+foreign"),
+        (MCPX_BLOCK, '{"foreign": {"command": "bypass"}}', "mcpx+foreign"),
+        ('{"foreign": {"command": "bypass"}}', MCPX_BLOCK, "foreign+mcpx")):
+    home = fresh_home()
+    seed(home, ".copilot/mcp-config.json", '{"mcpServers": {"other": {"command": "x"}}}')
+    zed_path = seed(home, ".config/zed/settings.json",
+                    '{\n  "theme": "Dark",\n  "context_servers": ' + first +
+                    ',\n  "context_servers": ' + second + '\n}\n')
+    seeded = read(zed_path)
+    r = run(home)
+    check(f"1749 {label} duplicate keys exits 1", r.returncode == 1, f"exit={r.returncode} stderr={r.stderr}")
+    check(f"1749 {label} stderr names Zed, its file, and duplicate",
+          "Zed" in r.stderr and ".config/zed/settings.json" in r.stderr and "duplicate" in r.stderr, r.stderr)
+    check(f"1749 {label} bad file byte-for-byte unchanged", read(zed_path) == seeded)
+    check(f"1749 {label} Copilot still enforced",
+          '"mcpx"' in read(os.path.join(home, ".copilot/mcp-config.json")))
+    shutil.rmtree(home)
 
 # #929: a commented-out context_servers block before a live foreign block --
 # the live block is replaced, the comment is preserved byte-for-byte.
@@ -829,6 +904,59 @@ check("990rrr escaped-delimiter second run no-op", r2.returncode == 0 and read(c
       f"stdout={r2.stdout!r}")
 shutil.rmtree(home)
 
+# #1608: a header-shaped line inside a dropped server's multi-line
+# array -- the skipping branch never tracked bracket depth, so the
+# nested-array element line '[1, 2]' was read as a table header, ended
+# the skip, and leaked it, the closing ']' and the following dropped
+# key into the rewritten config as invalid TOML while reporting the
+# server removed.
+home = fresh_home()
+codex_path = seed(home, ".codex/config.toml",
+                  "[mcp_servers.foo]\n"
+                  "command = \"foo\"\n"
+                  "args = [\n"
+                  "[1, 2]\n"
+                  "]\n"
+                  "other = \"keepme-not\"\n"
+                  "\n"
+                  "[profiles.demo]\n"
+                  "model = \"gpt-5-mini\"\n")
+r = run(home)
+out = read(codex_path)
+check("1608 dropped multi-line array removed whole",
+      "[mcp_servers.foo]" not in out and "keepme-not" not in out and "[1, 2]" not in out, out)
+check("1608 report names the dropped server", "removed: foo" in r.stdout, r.stdout)
+check("1608 following table survives", "[profiles.demo]" in out and 'model = "gpt-5-mini"' in out, out)
+check("1608 result parses with only mcpx", codex_server_names(out) == {"mcpx"}, out)
+r2 = run(home)
+check("1608 second run no-op", r2.returncode == 0 and read(codex_path) == out and r2.stdout == "",
+      f"stdout={r2.stdout!r}")
+shutil.rmtree(home)
+
+# #1608: the same for a dropped multi-line inline table -- a
+# header-shaped line inside it must not end the skip either.
+home = fresh_home()
+codex_path = seed(home, ".codex/config.toml",
+                  "[mcp_servers.bar]\n"
+                  "command = \"bar\"\n"
+                  "env = {\n"
+                  "[1, 2]\n"
+                  "}\n"
+                  "other = \"keepme-not\"\n"
+                  "\n"
+                  "[profiles.demo]\n"
+                  "model = \"gpt-5-mini\"\n")
+r = run(home)
+out = read(codex_path)
+check("1608 dropped multi-line inline table removed whole",
+      "[mcp_servers.bar]" not in out and "keepme-not" not in out and "[1, 2]" not in out, out)
+check("1608 inline-table report names the dropped server", "removed: bar" in r.stdout, r.stdout)
+check("1608 inline-table result parses with only mcpx", codex_server_names(out) == {"mcpx"}, out)
+r2 = run(home)
+check("1608 inline-table second run no-op", r2.returncode == 0 and read(codex_path) == out and r2.stdout == "",
+      f"stdout={r2.stdout!r}")
+shutil.rmtree(home)
+
 # #1133: unknown arguments are rejected before any file is touched.
 for bad_args, offending in ((("--dryrun",), "--dryrun"),
                             (("--bogus",), "--bogus"),
@@ -885,6 +1013,129 @@ r = run(home, "--dry-run")
 check("1133 --dry-run exit 0 and previews", r.returncode == 0 and "(dry run)" in r.stdout,
       f"exit={r.returncode} stdout={r.stdout!r} stderr={r.stderr!r}")
 check("1133 --dry-run leaves file byte-unchanged", read(claude_path) == seeded)
+shutil.rmtree(home)
+
+
+# #1562: a symlinked JSON client config (relative link) is enforced in
+# its target -- the target becomes mcpx-only, the link stays a symlink,
+# the one-time backup holds the pre-change content, and the target's
+# mode is preserved.
+home = fresh_home()
+target = seed(home, "link-targets/claude.json", '{"mcpServers": {"other": {"command": "x"}}}')
+os.chmod(target, 0o600)
+original = read(target)
+link_path = os.path.join(home, ".claude.json")
+os.symlink("link-targets/claude.json", link_path)
+r = run(home)
+check("1562 symlinked JSON exit 0", r.returncode == 0, f"exit={r.returncode} stderr={r.stderr}")
+check("1562 symlinked JSON link intact",
+      os.path.islink(link_path) and os.readlink(link_path) == "link-targets/claude.json")
+out = read(target)
+check("1562 symlinked JSON target enforced mcpx-only", '"mcpx"' in out and '"other"' not in out, out)
+check("1562 symlinked JSON read through link matches target", read(link_path) == out)
+backup = os.path.join(home, ".local/state/mcp-clients/backup", link_path.replace("/", "%"))
+check("1562 symlinked JSON backup holds pre-change content",
+      os.path.exists(backup) and read(backup) == original)
+check("1562 symlinked JSON target mode preserved", (os.stat(target).st_mode & 0o777) == 0o600,
+      oct(os.stat(target).st_mode & 0o777))
+r2 = run(home)
+check("1562 symlinked JSON second run no-op",
+      r2.returncode == 0 and read(target) == out and r2.stdout == "",
+      f"stdout={r2.stdout!r}")
+shutil.rmtree(home)
+
+# #1562: a symlinked Codex config.toml (absolute link) is enforced in
+# its target with the link intact.
+home = fresh_home()
+target = seed(home, "link-targets/config.toml", '[mcp_servers.other]\ncommand = "x"\n')
+original = read(target)
+link_path = os.path.join(home, ".codex/config.toml")
+os.makedirs(os.path.dirname(link_path), exist_ok=True)
+os.symlink(target, link_path)
+r = run(home)
+check("1562 symlinked Codex exit 0", r.returncode == 0, f"exit={r.returncode} stderr={r.stderr}")
+check("1562 symlinked Codex link intact",
+      os.path.islink(link_path) and os.readlink(link_path) == target)
+out = read(target)
+check("1562 symlinked Codex target enforced mcpx-only",
+      "[mcp_servers.mcpx]" in out and codex_server_names(out) == {"mcpx"}, out)
+check("1562 symlinked Codex read through link matches target", read(link_path) == out)
+backup = os.path.join(home, ".local/state/mcp-clients/backup", link_path.replace("/", "%"))
+check("1562 symlinked Codex backup holds pre-change content",
+      os.path.exists(backup) and read(backup) == original)
+r2 = run(home)
+check("1562 symlinked Codex second run no-op",
+      r2.returncode == 0 and read(target) == out and r2.stdout == "",
+      f"stdout={r2.stdout!r}")
+shutil.rmtree(home)
+
+# #1591: a dangling-symlinked client config is a present but broken
+# config, not an absent one. Each entry point used to guard on
+# os.path.exists (which follows links), so the link read as absent and
+# the client was silently skipped at exit 0. Now the guards use
+# os.path.lexists, the open below fails, and the #906 per-client path
+# names the client and file and exits non-zero -- link untouched, no
+# target created, the other clients still enforced.
+home = fresh_home()
+seed(home, ".copilot/mcp-config.json", '{"mcpServers": {"other": {"command": "x"}}}')
+seed(home, ".codex/config.toml", "[mcp_servers.other]\ncommand = \"x\"\n")
+claude_link = os.path.join(home, ".claude.json")
+os.symlink("missing/claude.json", claude_link)
+zed_link = os.path.join(home, ".config/zed/settings.json")
+os.makedirs(os.path.dirname(zed_link), exist_ok=True)
+os.symlink(os.path.join(home, "missing/settings.json"), zed_link)
+r = run(home)
+check("1591 dangling configs exit 1", r.returncode == 1, f"exit={r.returncode} stderr={r.stderr}")
+check("1591 stderr names Claude Code and its file",
+      "Claude Code" in r.stderr and ".claude.json" in r.stderr, r.stderr)
+check("1591 stderr names Zed and its file",
+      "Zed" in r.stderr and "settings.json" in r.stderr, r.stderr)
+check("1591 summary counts both unenforced clients",
+      "2 of 4 clients not enforced" in r.stderr, r.stderr)
+check("1591 Claude link untouched and target still absent",
+      os.path.islink(claude_link) and os.readlink(claude_link) == "missing/claude.json"
+      and not os.path.exists(os.path.join(home, "missing/claude.json")))
+check("1591 Zed link untouched and target still absent",
+      os.path.islink(zed_link) and not os.path.exists(zed_link))
+check("1591 Copilot still enforced", "\"mcpx\"" in read(os.path.join(home, ".copilot/mcp-config.json")))
+check("1591 Codex still enforced", "[mcp_servers.mcpx]" in read(os.path.join(home, ".codex/config.toml")))
+shutil.rmtree(home)
+
+# #1593: the #1591 dangling-symlink scenario above covers json_client
+# (Claude Code) and zed, but Codex was only seeded as a regular file --
+# codex()'s own lexists guard (mcp-clients.py:419) was never reached in
+# its broken-config form. Companion scenario: Codex is the dangling
+# link, the other three clients are regular files and still enforced.
+# Mutation oracle: reverting codex()'s guard to os.path.exists makes
+# this scenario fail (Codex silently skipped, exit 0).
+home = fresh_home()
+seed(home, ".copilot/mcp-config.json", '{"mcpServers": {"other": {"command": "x"}}}')
+seed(home, ".claude.json", '{"mcpServers": {"other": {"command": "x"}}}')
+seed(home, ".config/zed/settings.json", '{\n  "theme": "Dark"\n}\n')
+codex_link = os.path.join(home, ".codex/config.toml")
+os.makedirs(os.path.dirname(codex_link), exist_ok=True)
+os.symlink(os.path.join(home, "missing/config.toml"), codex_link)
+r = run(home)
+check("1593 dangling Codex config exits 1", r.returncode == 1, f"exit={r.returncode} stderr={r.stderr}")
+check("1593 stderr names Codex and its file",
+      "Codex" in r.stderr and "config.toml" in r.stderr, r.stderr)
+check("1593 summary counts the unenforced Codex client",
+      "1 of 4 clients not enforced" in r.stderr, r.stderr)
+check("1593 Codex link untouched and target still absent",
+      os.path.islink(codex_link) and os.readlink(codex_link) == os.path.join(home, "missing/config.toml")
+      and not os.path.exists(codex_link))
+check("1593 Copilot still enforced", "\"mcpx\"" in read(os.path.join(home, ".copilot/mcp-config.json")))
+check("1593 Claude Code still enforced", "\"mcpx\"" in read(os.path.join(home, ".claude.json")))
+check("1593 Zed still enforced", '"context_servers"' in read(os.path.join(home, ".config/zed/settings.json")))
+shutil.rmtree(home)
+
+# #1591 control: a genuinely absent config (no file, no link) still
+# skips silently -- an empty HOME is a successful no-op run.
+home = fresh_home()
+r = run(home)
+check("1591 absent configs exit 0 silently",
+      r.returncode == 0 and r.stdout == "" and r.stderr == "",
+      f"exit={r.returncode} stdout={r.stdout!r} stderr={r.stderr!r}")
 shutil.rmtree(home)
 
 print(f"\n{'ALL PASS' if not FAILURES else 'FAILURES: ' + ', '.join(FAILURES)}")

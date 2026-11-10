@@ -107,7 +107,28 @@ const LANG_TO_EXT: Record<string, string> = {
 };
 
 function langToExtension(languageId: string): string {
-  return LANG_TO_EXT[languageId] || `.${languageId}`;
+  // #1721: judge the lookup by own property only. LANG_TO_EXT is a
+  // plain object literal, so a bare index walks the prototype chain:
+  // prototype-named languageIds (toString, constructor, __proto__,
+  // hasOwnProperty, valueOf) returned inherited functions/objects
+  // instead of a string, bypassing the #1649 sanitizer below and
+  // landing coerced garbage in the backup filename and fileExtension
+  // meta. (Object.hasOwn would do, but the ES2020 lib target predates
+  // its types; hasOwnProperty.call is the same own-property test.)
+  const known = Object.prototype.hasOwnProperty.call(LANG_TO_EXT, languageId)
+    ? LANG_TO_EXT[languageId]
+    : undefined;
+  if (known) return known;
+  // #1649: the fallback is spliced into the backup filename in
+  // backupDoc, and a languageId is extension/user-supplied data
+  // (contributed languages, files.associations), not a validated
+  // identifier. Interpolating it verbatim let a separator-bearing
+  // id ("a/b", "../../../evil") break out of the filename — an
+  // ENOENT at write time, or a backup written outside the day
+  // directory where listBackups never sees it. Sanitize it the
+  // way backupDoc sanitizes the uri path.
+  const safe = languageId.replace(/[^a-zA-Z0-9-]/g, "_");
+  return safe ? `.${safe}` : ".txt";
 }
 
 interface Duration {
@@ -120,35 +141,83 @@ interface Duration {
 }
 
 function durationToSeconds(d: Duration): number {
-  return (
-    d.years * 365 * 86400 +
-    d.months * 30 * 86400 +
-    d.days * 86400 +
-    d.hours * 3600 +
-    d.minutes * 60 +
-    d.seconds
-  );
+  // Keep both maxAgeSec and cleanupAge's milliseconds/cutoff arithmetic
+  // finite. At this cap (about 253,000 years), even multiplying by 1000
+  // stays below JavaScript Date's representable range; larger configured
+  // durations saturate and therefore do not expire real backup timestamps.
+  const maxSeconds = 8_000_000_000_000;
+  const components = [
+    [d.years, 365 * 86400],
+    [d.months, 30 * 86400],
+    [d.days, 86400],
+    [d.hours, 3600],
+    [d.minutes, 60],
+    [d.seconds, 1],
+  ];
+  let total = 0;
+  for (const [value, secondsPerUnit] of components) {
+    const safeValue = Number.isFinite(value) ? Math.max(0, value) : 0;
+    if (safeValue > (maxSeconds - total) / secondsPerUnit) {
+      return maxSeconds;
+    }
+    total += safeValue * secondsPerUnit;
+  }
+  return total;
+}
+
+// VS Code returns a hand-edited settings.json value verbatim even when
+// it violates the package.json schema, so a numeric setting can arrive
+// as a string/object and its arithmetic yields NaN -- and NaN fails
+// open in the cleanup passes (#1574). Validate where settings are read:
+// anything that is not a finite number falls back to the setting's
+// documented default, so a Config can never carry NaN/Infinity.
+function finiteNumberOr(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+// Same validate-where-read rule for the one string setting (#1580):
+// backupDir's old `|| DEFAULT` guard caught only falsy values, so a
+// truthy non-string (123, true, {}, ["x"]) reached fs.mkdirSync in
+// activate() and threw TypeError -- the extension never started and
+// no backups were taken. Anything that is not a non-empty string
+// falls back to the documented default, so Config.backupDir is
+// always a string.
+function nonEmptyStringOr(value: unknown, fallback: string): string {
+  return typeof value === "string" && value !== "" ? value : fallback;
 }
 
 function getDuration(section: string): number {
   const c = vscode.workspace.getConfiguration(section);
+  // A negative component is treated as 0, its documented default
+  // (#1620): finiteNumberOr alone passes negatives through, so one
+  // hand-edited negative component could cancel the positive ones in
+  // the sum below — days=1 with hours=-25 summed to -3600, and
+  // cleanupAge reads maxAgeSec <= 0 as "disabled", so the configured
+  // retention silently never ran.
+  // Components are integer-declared; floor finite fractional edits as
+  // well as keeping negative values at their documented 0 default.
+  const component = (key: string): number =>
+    Math.floor(Math.max(0, finiteNumberOr(c.get(key, 0), 0)));
   return durationToSeconds({
-    years: c.get<number>("years", 0),
-    months: c.get<number>("months", 0),
-    days: c.get<number>("days", 0),
-    hours: c.get<number>("hours", 0),
-    minutes: c.get<number>("minutes", 0),
-    seconds: c.get<number>("seconds", 0),
+    years: component("years"),
+    months: component("months"),
+    days: component("days"),
+    hours: component("hours"),
+    minutes: component("minutes"),
+    seconds: component("seconds"),
   });
 }
 
 function getInterval(key: string): number {
   const c = vscode.workspace.getConfiguration("bufferBackup");
-  const v = c.get<number | null>(key, null);
-  if (v === null || v === undefined || v === 0) {
+  const v: unknown = c.get(key, null);
+  if (typeof v !== "number" || !Number.isFinite(v) || v === 0) {
     return 5000;
   }
-  return Math.max(1, v) * 1000;
+  // Clamp to Node's 32-bit timer ceiling (#1588): a delay above
+  // 2,147,483,647 ms is clamped by Node itself to 1 ms, so a
+  // ~25-day-or-longer interval would become a 1 ms cleanup loop.
+  return Math.min(Math.max(1, v) * 1000, 2147483647);
 }
 
 interface Config {
@@ -167,13 +236,19 @@ interface Config {
 function getConfig(): Config {
   const c = vscode.workspace.getConfiguration("bufferBackup");
   return {
-    backupDir: c.get("backupDir", "") || DEFAULT_BACKUP_DIR,
+    backupDir: nonEmptyStringOr(c.get("backupDir", ""), DEFAULT_BACKUP_DIR),
     maxAgeSec: getDuration("bufferBackup.maxAge"),
-    maxTotalMb: c.get("maxTotalMb", 0),
-    rolloutMb: c.get("rolloutMb", 0),
-    maxFileCount: c.get("maxFileCount", 0),
-    rolloutFileCount: c.get("rolloutFileCount", 0),
-    debounceMs: c.get("debounceMs", 3000),
+    maxTotalMb: finiteNumberOr(c.get("maxTotalMb", 0), 0),
+    rolloutMb: finiteNumberOr(c.get("rolloutMb", 0), 0),
+    // File counts are integer-declared; don't let fractions alter the
+    // cleanup threshold or count as part of a rollout.
+    maxFileCount: Math.floor(finiteNumberOr(c.get("maxFileCount", 0), 0)),
+    rolloutFileCount: Math.floor(finiteNumberOr(c.get("rolloutFileCount", 0), 0)),
+    // Clamp to the timer-safe range [0, 2^31-1] (#1594): Node
+    // collapses a negative or overflowing setTimeout delay to
+    // ~1 ms, which would defeat the debounce entirely. Floor schema-
+    // violating fractions to the integer milliseconds the setting declares.
+    debounceMs: Math.min(Math.max(0, Math.floor(finiteNumberOr(c.get("debounceMs", 3000), 3000))), 2147483647),
     ageCleanupMs: getInterval("ageCleanupIntervalSeconds"),
     sizeCleanupMs: getInterval("sizeCleanupIntervalSeconds"),
     countCleanupMs: getInterval("countCleanupIntervalSeconds"),
@@ -201,7 +276,10 @@ function listBackups(dir: string): BackupEntry[] {
   for (const sub of subs) {
     const subFull = path.join(dir, sub);
     try {
-      if (!fs.statSync(subFull).isDirectory()) {
+      // lstat, not stat (#1524): a symlinked day-directory must not be
+      // descended into — its target lives outside the backup dir, and
+      // the cleanup passes unlink whatever listBackups returns.
+      if (!fs.lstatSync(subFull).isDirectory()) {
         continue;
       }
     } catch {
@@ -216,7 +294,9 @@ function listBackups(dir: string): BackupEntry[] {
     for (const name of files) {
       const full = path.join(subFull, name);
       try {
-        const st = fs.statSync(full);
+        // lstat, not stat (#1524): a symlinked file is not a backup
+        // entry; returning it would let cleanup delete its target.
+        const st = fs.lstatSync(full);
         if (st.isFile()) {
           results.push({ name, full, mtimeMs: st.mtimeMs, size: st.size });
         }
@@ -268,9 +348,23 @@ function cleanupAge(cfg: Config): void {
 }
 
 function cleanupSize(cfg: Config): void {
-  if (cfg.maxTotalMb <= 0 || cfg.rolloutMb <= 0) {
+  // Defence in depth (#1574): a non-finite limit/rollout is disabled,
+  // never unbounded deletion -- NaN comparisons are all false, so an
+  // unguarded NaN target makes every loop guard fail open.
+  if (
+    !Number.isFinite(cfg.maxTotalMb) ||
+    !Number.isFinite(cfg.rolloutMb) ||
+    cfg.maxTotalMb <= 0
+  ) {
     return;
   }
+  // A finite rollout of 0 is the documented default (#1612): it means
+  // zero headroom, not disabled - a limit set on its own must still
+  // enforce, deleting down to exactly the limit. A negative rollout
+  // is clamped to 0 (zero headroom), mirroring the negative-component
+  // handling in getDuration (#1620); only the limit documents 0 as
+  // disabled, and only a non-finite rollout disables the pass above.
+  const rolloutMb = Math.max(0, cfg.rolloutMb);
   const entries = listBackups(cfg.backupDir);
   let total = entries.reduce((s, e) => s + e.size, 0);
   const maxB = cfg.maxTotalMb * 1024 * 1024;
@@ -279,11 +373,16 @@ function cleanupSize(cfg: Config): void {
   // can only reach by emptying the directory — it deleted every
   // backup, newest included. The newest backup always survives.
   const newestB = entries.length ? entries[entries.length - 1].size : 0;
-  const targetB = Math.max(maxB - cfg.rolloutMb * 1024 * 1024, newestB);
+  const targetB = Math.max(maxB - rolloutMb * 1024 * 1024, newestB);
   if (total <= maxB) {
     return;
   }
-  for (const e of entries) {
+  // Iterate all but the newest entry (#1530): the arithmetic floor
+  // alone does not protect the newest backup, because a failed unlink
+  // (#1014 accounting) leaves the budget unchanged and the loop walks
+  // one entry further — far enough to reach and delete the newest.
+  // cleanupAge has always excluded it structurally via slice(0, -1).
+  for (const e of entries.slice(0, -1)) {
     if (total <= targetB) {
       break;
     }
@@ -300,9 +399,17 @@ function cleanupSize(cfg: Config): void {
 }
 
 function cleanupCount(cfg: Config): void {
-  if (cfg.maxFileCount <= 0 || cfg.rolloutFileCount <= 0) {
+  // Defence in depth (#1574): as in cleanupSize, a non-finite
+  // limit/rollout disables the pass instead of deleting everything.
+  if (
+    !Number.isFinite(cfg.maxFileCount) ||
+    !Number.isFinite(cfg.rolloutFileCount) ||
+    cfg.maxFileCount <= 0
+  ) {
     return;
   }
+  // Finite rollout 0 = zero headroom, not disabled (#1612, as in
+  // cleanupSize); a negative rollout clamps to 0. See cleanupSize.
   const entries = listBackups(cfg.backupDir);
   if (entries.length <= cfg.maxFileCount) {
     return;
@@ -315,9 +422,13 @@ function cleanupCount(cfg: Config): void {
   // Floor the target at 1 (#1211): with rolloutFileCount >=
   // maxFileCount the raw target is 0 and the pass deleted every
   // backup, newest included. The newest backup always survives.
-  const target = Math.max(cfg.maxFileCount - cfg.rolloutFileCount, 1);
+  const target = Math.max(cfg.maxFileCount - Math.max(0, cfg.rolloutFileCount), 1);
   let remaining = entries.length;
-  for (const e of entries) {
+  // All but the newest entry, as in cleanupSize (#1530): with #1014
+  // accounting a failed unlink does not decrement `remaining`, so an
+  // unguarded loop that started over target walks into the newest
+  // entry and deletes the backup the floor exists to protect.
+  for (const e of entries.slice(0, -1)) {
     if (remaining <= target) {
       break;
     }
@@ -332,16 +443,193 @@ function cleanupCount(cfg: Config): void {
   }
 }
 
-function utcDayDir(base: string): string {
-  const d = new Date();
-  const day = d.toISOString().slice(0, 10);
-  const dir = path.join(base, day);
+// The day directory's path, independent of whether it can be created or
+// safely used (#1658): the failure signal has to name the directory even
+// when utcDayDir refuses it or mkdir throws.
+function utcDayDirPath(base: string): string {
+  return path.join(base, new Date().toISOString().slice(0, 10));
+}
+
+function utcDayDir(base: string, dir: string = utcDayDirPath(base)): string {
+  // lstat, not stat (#1603): a symlinked day-directory must not be
+  // written through - its target lives outside the backup dir, where
+  // the backup would be invisible to listBackups and every cleanup
+  // pass (the read side was hardened in #1524; this is the write
+  // side). lstat also sees a dangling link, which mkdirSync would
+  // otherwise surface as a raw ENOENT out of backupDoc.
+  //
+  // Checked twice on purpose (#1709): mkdirSync({recursive: true})
+  // succeeds silently when the day directory already exists, including
+  // when it is now a symlink to a directory - so the pre-check alone
+  // left the #1603 invariant holding only if nothing changed between
+  // the two calls. Re-checking after the mkdir makes it true by
+  // construction: a link swapped in during the window is refused with
+  // the same named error, and backupDoc's existing containment handles
+  // it exactly like the pre-planted case.
+  const refuseLink = (): void => {
+    throw new Error(
+      `buffer-backup: refusing to write through symlinked day directory: ${dir}`
+    );
+  };
+  const isLinkNow = (): boolean => {
+    try {
+      return fs.lstatSync(dir).isSymbolicLink();
+    } catch {
+      return false;
+    }
+  };
+  if (isLinkNow()) {
+    refuseLink();
+  }
   fs.mkdirSync(dir, { recursive: true });
+  if (isLinkNow()) {
+    refuseLink();
+  }
   return dir;
 }
 
 function contentHash(s: string): string {
   return crypto.createHash("sha256").update(s).digest("hex");
+}
+
+// A contained day-directory failure (#1658): #1603 containment keeps a
+// bad day directory from throwing out of backupDoc into the event
+// handlers, but silent containment is data loss with no trace - the
+// extension has no logging surface at all. Every contained failure is
+// therefore reported once per day directory through the extension
+// host's console (VS Code: "Developer: Show Logs… > Extension Host",
+// and it lands in the per-window exthost log on disk).
+interface DayDirFailure {
+  dir: string;
+  trigger: BackupTrigger;
+  message: string;
+  code: string | null;
+  // close / will-save are the last-chance triggers: there is no later
+  // trigger for that document, so a failure there means the final
+  // snapshot was lost. That is judged here rather than claimed away in
+  // a comment: the old comment promised "a later trigger retries this
+  // document", which is false on exactly those two triggers.
+  finalSnapshotLost: boolean;
+}
+
+const DAY_DIR_FAILURE_PREFIX = "buffer-backup: contained day-directory failure";
+
+function dayDirErrorMessage(err: unknown): string {
+  if (err !== null && typeof err === "object" && "message" in err) {
+    const m = err.message;
+    if (typeof m === "string" && m.length > 0) {
+      return m;
+    }
+  }
+  return String(err);
+}
+
+function dayDirErrorCode(err: unknown): string | null {
+  if (err !== null && typeof err === "object" && "code" in err) {
+    const c = err.code;
+    if (typeof c === "string") {
+      return c;
+    }
+  }
+  return null;
+}
+
+function describeDayDirFailure(
+  dir: string,
+  trigger: BackupTrigger,
+  err: unknown
+): DayDirFailure {
+  return {
+    dir,
+    trigger,
+    message: dayDirErrorMessage(err),
+    code: dayDirErrorCode(err),
+    finalSnapshotLost: trigger === "close" || trigger === "will-save",
+  };
+}
+
+function formatDayDirFailure(f: DayDirFailure): string {
+  const parts = [
+    `${DAY_DIR_FAILURE_PREFIX}: dir=${f.dir}`,
+    `trigger=${f.trigger}`,
+    `error=${f.message}`,
+  ];
+  if (f.code !== null) {
+    parts.push(`code=${f.code}`);
+  }
+  if (f.finalSnapshotLost) {
+    parts.push("final-snapshot-lost=true");
+  }
+  return parts.join(" ");
+}
+
+// First failure per day directory, per activation: a retry storm (a
+// failing day directory is hit by every change event of every untitled
+// buffer) must not flood the log, but a new day directory - or a fresh
+// activation - must still report. One escalation is allowed on top of
+// that suppression: if the first reported failure for a directory was
+// non-final (a retryable change/focus/init failure), a later
+// close/will-save failure for the same directory is reported once
+// more, because it carries the distinct final-snapshot-lost signal -
+// without it, a document that closes unbacked-up would leave only the
+// earlier, retryable warning in the log (Codex review on PR #1717).
+function shouldReportDayDirFailure(
+  seen: Set<string>,
+  f: DayDirFailure
+): boolean {
+  const finalKey = f.dir + "::final-snapshot";
+  if (!seen.has(f.dir)) {
+    seen.add(f.dir);
+    if (f.finalSnapshotLost) {
+      seen.add(finalKey);
+    }
+    return true;
+  }
+  if (f.finalSnapshotLost && !seen.has(finalKey)) {
+    seen.add(finalKey);
+    return true;
+  }
+  return false;
+}
+
+const reportedDayDirFailures = new Set<string>();
+
+// Resolve the day directory for one write, containing any failure (#1603)
+// but reporting it once per day directory (#1658). Returns null when the
+// write must be skipped.
+function resolveDayDirForWrite(
+  base: string,
+  trigger: BackupTrigger
+): string | null {
+  const dir = utcDayDirPath(base);
+  try {
+    return utcDayDir(base, dir);
+  } catch (err) {
+    // Contained (#1603): a symlinked day directory must not throw out of
+    // backupDoc - its callers are event handlers, backupAll, and
+    // activate(), and one bad day directory must not stop the other
+    // documents in the same backupAll pass.
+    //
+    // But contained is not silent (#1658): every contained failure is
+    // reported once per day directory, naming the directory, the trigger
+    // and the underlying error, so a backup dir that cannot be written is
+    // discoverable instead of invisible. The catch covers the
+    // #1603/#1709 symlink refusal and every mkdir failure
+    // (EACCES/ENOSPC/EEXIST/ENOTDIR) alike; the reported `code` keeps
+    // those distinguishable.
+    //
+    // Retry semantics (#1658): on change/focus/tab-switch/init the hash
+    // stays unset, so a later trigger for the same document does retry.
+    // On close/will-save there is no later trigger - these are the
+    // last-chance snapshots - so a failure there is the final snapshot
+    // lost, which the signal states explicitly instead of letting the old
+    // comment imply a retry that cannot happen.
+    const failure = describeDayDirFailure(dir, trigger, err);
+    if (shouldReportDayDirFailure(reportedDayDirFailures, failure)) {
+      console.error(formatDayDirFailure(failure));
+    }
+    return null;
+  }
 }
 
 const lastHash = new Map<string, string>();
@@ -378,7 +666,19 @@ function getFirstLine(text: string): string {
   for (const line of lines) {
     const trimmed = line.trim();
     if (trimmed.length > 0) {
-      return trimmed.length > 120 ? trimmed.slice(0, 120) + "..." : trimmed;
+      if (trimmed.length <= 120) return trimmed;
+      // #1735: a raw slice(0, 120) can split a surrogate pair straddling
+      // the cut, leaving a lone high surrogate that JSON.stringify then
+      // persists into the backup meta line. Back off one code unit when
+      // the cut would split a pair, so the pre-ellipsis text never ends
+      // in a lone surrogate.
+      let cut = 120;
+      const last = trimmed.charCodeAt(cut - 1);
+      if (last >= 0xd800 && last <= 0xdbff) {
+        const next = trimmed.charCodeAt(cut);
+        if (next >= 0xdc00 && next <= 0xdfff) cut -= 1;
+      }
+      return trimmed.slice(0, cut) + "...";
     }
   }
   return "";
@@ -498,13 +798,31 @@ function backupDoc(
   const name = doc.uri.path.replace(/[^a-zA-Z0-9]/g, "_") || "untitled";
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
   const ext = langToExtension(doc.languageId || "txt");
-  const dayDir = utcDayDir(dir);
+  const dayDir = resolveDayDirForWrite(dir, trigger);
+  if (dayDir === null) {
+    return;
+  }
 
   const meta = buildMeta(doc, text, h, trigger);
   const content = formatMetaLine(meta) + "\n" + text;
 
   const backupFilePath = path.join(dayDir, `${name}_${ts}${ext}`);
-  fs.writeFileSync(backupFilePath, content);
+  try {
+    fs.writeFileSync(backupFilePath, content);
+  } catch (err) {
+    // Contained (#1729, #1603 shape): a failed write (ENOSPC/EACCES/
+    // ENAMETOOLONG) must not throw out of backupDoc - its callers are
+    // event handlers and backupAll, and one failed write must not stop
+    // the other documents in the same backupAll pass. The hash stays
+    // unset, so a later trigger retries this document. The failure is
+    // not silent: it leaves the discoverable signal #1658 requires on
+    // the surface its fix chose (console.error naming the path, the
+    // trigger and the underlying error).
+    console.error(
+      `buffer-backup: contained write failure path=${backupFilePath} trigger=${trigger} error=${err instanceof Error ? err.message : String(err)}`
+    );
+    return;
+  }
   lastHash.set(key, h);
   lastBackupPath.set(key, backupFilePath);
 }

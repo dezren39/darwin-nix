@@ -5,7 +5,7 @@
 // real ~/.config/nix/tool-definitions and never spawns the CLI.
 
 import assert from "node:assert/strict"
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -59,6 +59,20 @@ const makeCtx = () => {
   return { ctx, rec }
 }
 
+// Capture console.warn calls made during a plugin setup() (load() runs
+// inside setup), returning the list of messages.
+const captureWarns = async (fn) => {
+  const warns = []
+  const orig = console.warn
+  console.warn = (...args) => warns.push(args.join(" "))
+  try {
+    await fn()
+  } finally {
+    console.warn = orig
+  }
+  return warns
+}
+
 const fixtureDir = async (name, files) => {
   const dir = join(ROOT, name)
   await mkdir(dir, { recursive: true })
@@ -77,7 +91,8 @@ await test("v1 alias files map to v2 ids; plain files keep their id; bodies untr
   const plugin = await loadPlugin(dir)
   assert.equal(plugin.id, "tool-definitions")
   const { ctx, rec } = makeCtx()
-  await plugin.setup(ctx)
+  const warns = await captureWarns(async () => plugin.setup(ctx))
+  assert.deepEqual(warns, [], "all-valid case produces no spurious signal")
   assert.equal(rec.updates.get("shell"), "SHELL BODY\n")
   assert.equal(rec.updates.get("subagent"), "SUBAGENT BODY")
   assert.equal(rec.updates.get("edit"), "EDIT BODY\n\n") // deliberately NOT trimmed
@@ -134,10 +149,45 @@ await test("a dir with no usable definitions registers nothing and does not thro
 await test("missing definitions dir registers nothing and does not throw", async () => {
   const plugin = await loadPlugin(join(ROOT, "does-not-exist"))
   const { ctx, rec } = makeCtx()
-  await plugin.setup(ctx)
+  const warns = await captureWarns(async () => plugin.setup(ctx))
+  assert.deepEqual(warns, [], "missing-directory case stays silent")
   assert.equal(rec.transforms, 0)
   assert.equal(rec.hooks.size, 0)
   assert.equal(rec.updates.size, 0)
+})
+
+await test("a dangling-symlink .txt entry is skipped; its valid neighbours still load (#1622)", async () => {
+  const dir = await fixtureDir("dangling", [
+    ["aaa.txt", "AAA BODY"],
+    ["zzz.txt", "ZZZ BODY"],
+  ])
+  await symlink(join(dir, "no-such-target.txt"), join(dir, "broken.txt"))
+  const plugin = await loadPlugin(dir)
+  const { ctx, rec } = makeCtx()
+  const warns = await captureWarns(async () => plugin.setup(ctx))
+  assert.equal(warns.length, 1, `expected one warn naming the skipped file, got: ${JSON.stringify(warns)}`)
+  assert.ok(warns[0].includes("broken.txt"), `warn names the skipped file: ${warns[0]}`)
+  assert.equal(rec.updates.get("aaa"), "AAA BODY")
+  assert.equal(rec.updates.get("zzz"), "ZZZ BODY")
+  assert.equal(rec.updates.has("broken"), false)
+  assert.equal(rec.updates.size, 2)
+})
+
+await test("a directory named *.txt is skipped; its valid neighbours still load (#1622)", async () => {
+  const dir = await fixtureDir("dir-entry", [
+    ["aaa.txt", "AAA BODY"],
+    ["zzz.txt", "ZZZ BODY"],
+  ])
+  await mkdir(join(dir, "mid.txt"))
+  const plugin = await loadPlugin(dir)
+  const { ctx, rec } = makeCtx()
+  const warns = await captureWarns(async () => plugin.setup(ctx))
+  assert.equal(warns.length, 1, `expected one warn naming the skipped file, got: ${JSON.stringify(warns)}`)
+  assert.ok(warns[0].includes("mid.txt"), `warn names the skipped file: ${warns[0]}`)
+  assert.equal(rec.updates.get("aaa"), "AAA BODY")
+  assert.equal(rec.updates.get("zzz"), "ZZZ BODY")
+  assert.equal(rec.updates.has("mid"), false)
+  assert.equal(rec.updates.size, 2)
 })
 
 console.log("\n# tool-definitions: session reapply hooks")

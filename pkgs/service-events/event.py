@@ -4,7 +4,7 @@ As a command (`service-event SOURCE EVENT [key=value ...]`) it is how the
 switch script, home-manager activation and the agents' start wrappers record
 what they do; monitor.py imports the same functions. Values that look like
 integers are stored as numbers, everything else as strings. Never pass a
-secret: this log is meant to be read and pasted into issues. dezren39/nix#670.
+secret: this log is meant to be read and pasted into issues. dezren39/darwin-nix#670.
 """
 
 import datetime
@@ -33,6 +33,12 @@ def rotate(path, max_bytes, keep, copy_truncate=False):
     (launchd's StandardErrorPath): the file is copied, then truncated in
     place, so the writer carries on at the new end. Returns the size rotated,
     or 0.
+
+    #1643: in copy_truncate mode a symlinked path is NOT rotated: copying
+    and truncating would follow the link and empty the target file, which
+    is not the log being rotated. The skip is reported on stderr and 0 is
+    returned. (The rename mode is unaffected: os.replace moves the link
+    itself, never its target.)
     """
     try:
         size = os.path.getsize(path)
@@ -40,10 +46,23 @@ def rotate(path, max_bytes, keep, copy_truncate=False):
         return 0
     if size < max_bytes:
         return 0
+    if copy_truncate and os.path.islink(path):
+        print(
+            f"service-event: not rotating {path}: it is a symlink to "
+            f"{os.readlink(path)}; copy-truncate rotation would truncate "
+            "the target file",
+            file=sys.stderr,
+        )
+        return 0
     for i in range(keep - 1, 0, -1):
         if os.path.exists(f"{path}.{i}"):
             os.replace(f"{path}.{i}", f"{path}.{i + 1}")
     if copy_truncate:
+        # A symlinked rotation slot would make copyfile write through to
+        # its target (#1643, same class): replace the link itself with the
+        # fresh regular file instead.
+        if os.path.islink(f"{path}.1"):
+            os.unlink(f"{path}.1")
         shutil.copyfile(path, f"{path}.1")
         with open(path, "r+") as fh:
             fh.truncate(0)

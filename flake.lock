@@ -530,11 +530,11 @@
     "mcpx-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1794220696,
-        "narHash": "sha256-IsOsz3gmeSWrVM3xSRcpekfgs/FO1NSbR2PQL4Sg20o=",
+        "lastModified": 1794343629,
+        "narHash": "sha256-SNJLqzE4h3mtpRvkGC1QZDsTFIR9eSv5wc0C/PyqlNQ=",
         "owner": "developing-today",
         "repo": "code",
-        "rev": "d9e0f3920a04a6458fb9fc48d082891521d69a71",
+        "rev": "f8957acd4c1964ca2e8492c33096f40b73283ff1",
         "type": "github"
       },
       "original": {

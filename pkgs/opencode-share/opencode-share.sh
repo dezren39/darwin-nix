@@ -459,6 +459,19 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Mode-effectiveness judge (#1772, #1722 contract rule 4): --dry-run is
+# consumed only by the mount/unmount paths; do_status never reads it, so
+# in status mode it was parsed and silently dropped -- refuse it
+# post-parse, naming the flag and the mode, exit 2. Message shape mirrors
+# lib/common.sh arg_refuse_in_mode (this tool is packaged standalone and
+# cannot source it). --source is deliberately NOT judged here: it is a
+# global option the test corpus passes with every action (scenarios K,
+# L, N), so it stays accepted in all modes; see #1772.
+if [[ "$ACTION" == "status" ]] && $DRY_RUN; then
+  echo "$PROG: --status conflicts with mode flags: --dry-run (--status changes nothing, so there is nothing to preview)" >&2
+  exit 2
+fi
+
 if [[ ${#TARGETS[@]} -eq 0 ]]; then
   err "No target directories specified"
   echo ""

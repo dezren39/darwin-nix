@@ -38,3 +38,28 @@ On the task worktree at baseline `6069f19084b9`:
 - Fresh isolated `symlinker --undo --dry-run` control with and without `--simple` — both exited 0 with byte-identical stdout; source inspection shows `SIMPLE` has no undo-path consumer.
 
 The inventory records decisions only; no mode behavior was changed in this triage task.
+
+## Phase 4 — pkgs/** shell scripts (2026-11-10, task 14462 for #1722)
+
+Review baseline: `main` at `ce6a2bebc042`. The 2026-11-08 inventory above
+left `pkgs/**` as phase-4 territory. The shell surface there is exactly
+three scripts — `pkgs/adopt/adopt.sh`, `pkgs/brew-repair/brew-repair.sh`,
+`pkgs/opencode-share/opencode-share.sh` — none of which sources
+`lib/common.sh` (they are packaged as standalone tools). The remaining
+`pkgs/**` programs are not shell (buffer-backup TypeScript, flake-tidy
+and service-events Python, fleet-brokers/laptop-agent packaged sources,
+pin/lock checker scripts with no modes) and are out of this contract's
+mechanism; they are listed here so the exclusion is a decision, not an
+oversight.
+
+| Surface / combination | Disposition | Evidence and decision | In-repo callers |
+|---|---|---|---|
+| `adopt.sh`: `--host` / `--flake` / `--dry-run` | **No gap** | Single mode; every flag is consumed before both exits. `--dry-run` is judged after the already-adopted check (:182), which is correct: for an adopted host nothing would be added, and the "nothing to do" message is the dry-run truth. Parse already refuses missing/empty/repeated values at exit 2. | `justfile` adopt recipes; no invalid caller found. |
+| `brew-repair.sh`: `-n/--dry-run` / `-q/--quiet` / `-s/--skip` | **No gap** | Single mode; the scan loop is shared between real and dry runs — `QUIET` gates the same lines (:203-255) and `SKIP_LIST` the same decisions in both, `DRY_RUN` gates only the reinstall (:279). No mode exists in which a flag loses its consumer. | None in-repo (user-invoked tool). |
+| `opencode-share.sh`: `--source` with `--unmount` / `--status`; `--dry-run` with `--status` | **Per-site issue filed: [#1772](https://github.com/dezren39/darwin-nix/issues/1772)** | `--source` is consumed only in `do_mount` (:175, :207-221); probe `--status --source /nonexistent-xyz-123 <target>` exited 0 with normal status output, where mount mode errors on a missing source. `do_status` has no `DRY_RUN` consumer; probe `--status --dry-run <target>` exited 0, output identical to `--status` apart from the dependency-check warning. `--dry-run` is effective in mount and unmount modes (probed), and conflicting action flags are already refused (#1106). Fix filed separately per the contract: refuse both dead combinations post-parse, naming flag and mode, exit 2. | `justfile` share recipes pass action flags without `--source`; no invalid caller found. |
+
+The contract itself now lives in one place in the repo:
+`lib/common.sh` (:164-190, landed by #1723) states the five rules and
+provides the shared `arg_used` / `arg_refuse_in_mode` judge. With this
+phase, every shell script in the repo has a recorded disposition
+against it; remaining adoption work is the per-site fix on #1772.

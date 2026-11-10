@@ -60,13 +60,13 @@ rec {
     };
     mac-app-util = {
       url = "github:hraban/mac-app-util";
-      # nixpkgs not followed — mac-app-util uses its own tested nixpkgs for SBCL/CL compat
+      # SBCL >= 2.6.6 fixes fixed-address allocation failures on newer macOS.
       inputs.treefmt-nix.follows = "treefmt-nix";
       inputs.cl-nix-lite.follows = "cl-nix-lite";
       inputs.flake-utils.follows = "flake-utils";
       inputs.flake-compat.follows = "flake-compat-hoisted";
       inputs.systems.follows = "systems-hoisted";
-      inputs.nixpkgs.follows = "nixpkgs-hoisted";
+      inputs.nixpkgs.follows = "nixpkgs";
     };
     brew-src = {
       # Track upstream so ./r's flake update advances Homebrew automatically.
@@ -1292,6 +1292,15 @@ rec {
         # their suites moved with them.
       }
       // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
+        # #1768: build the Lisp dependencies and run upstream's --help install check.
+        mac-app-util =
+          assert pkgs.lib.assertMsg (
+            pkgs.lib.versionAtLeast
+              inputs.mac-app-util.inputs.nixpkgs.legacyPackages.${pkgs.stdenv.hostPlatform.system}.sbcl.version
+              "2.6.6"
+          ) "mac-app-util requires SBCL >= 2.6.6 on newer macOS";
+          inputs.mac-app-util.packages.${pkgs.stdenv.hostPlatform.system}.default;
+        mcpx = (mkPackages pkgs).mcpx;
         sidepulse = (mkPackages pkgs).sidepulse;
         sidepulse-wrapper =
           let

@@ -98,6 +98,28 @@ python3Packages.buildPythonApplication rec {
     "test_custom_animation_editor_installs_native_edit_shortcuts"
     "test_custom_editor_device_preview_applies_device_brightness"
     "test_edit_animation_clones_builtins_and_edits_custom_in_place"
+    # Tests that construct or show a real AppKit settings/setup
+    # window, like their disabled siblings below: in the headless
+    # build sandbox (no window server) window construction kills
+    # the interpreter with SIGTRAP instead of failing, taking the
+    # whole check phase with it (#1791; the lid test and the
+    # first-launch test were caught trapping, the rest are the same
+    # build_settings_window/build_setup_window family).
+    "test_status_bar_settings_window_has_lid_animation_controls"
+    "test_status_bar_setup_window_has_first_launch_controls"
+    "test_first_launch_setup_window_only_shows_until_completed"
+    "test_hide_and_restore_preserve_controller_and_settings_window"
+    "test_setup_window_builds"
+    "test_settings_window_has_profile_json_controls"
+    "test_settings_animation_previews_use_wasm_programs"
+    "test_every_state_popup_uses_the_same_animation_catalog"
+    "test_finder_reopen_opens_settings"
+    # AdvancedAutosaveTests: its fixture builds the settings window,
+    # so every test in the class hits the same trap.
+    "test_leaving_each_numeric_field_saves_without_a_button"
+    "test_switching_tabs_commits_the_active_field"
+    "test_closing_window_commits_the_active_field"
+    "test_invalid_input_keeps_last_saved_setting"
     "test_settings_window_builds"
     "test_settings_window_is_not_visible"
     "test_settings_window_registers_its_fields"

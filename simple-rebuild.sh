@@ -371,12 +371,16 @@ brew_upgrade() {
   fi
   echo "brew bundle --upgrade $brewfile (as $USER)"
   sudo -v
-  # Cask downloads fail transiently (CDN 403s, connection resets). brew bundle
-  # skips what is already current, so one retry only redoes the failures.
+  # Cask downloads fail transiently (CDN 403s, connection resets). Without
+  # --force, brew bundle skips what is already current, so one retry only
+  # redoes the failures. --force is deliberately absent, for the reason
+  # configuration.nix documents for activation (#1784): it makes brew bundle
+  # reinstall already-installed casks, which fails for self-updating apps
+  # newer than the cask and for casks whose download URL has gone stale.
   local attempt
   for attempt in 1 2; do
     HOMEBREW_NO_AUTO_UPDATE=1 /opt/homebrew/bin/brew bundle install \
-      --file="$brewfile" --upgrade --verbose --force && return 0
+      --file="$brewfile" --upgrade --verbose && return 0
     [[ $attempt -eq 1 ]] && echo "brew upgrade had failures; retrying once" >&2
   done
   echo "brew upgrade failed; the switch itself succeeded" >&2

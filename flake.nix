@@ -152,7 +152,18 @@ rec {
     # below): its node_modules hashes are computed against the bun
     # in that nixpkgs, and a different bun can lay node_modules out
     # differently and miss the fixed-output hash.
-    openchamber.url = "github:developing-today-forks/openchamber";
+    openchamber = {
+      url = "github:developing-today-forks/openchamber";
+      # Pin the chain's mcpx source forward again: the 2026-11-10 full
+      # flake update rolled it back a week (developing-today/code
+      # 031cde2, 2026-11-03), whose pool handoff reads /proc and fails
+      # its tests on aarch64-darwin (no /proc on macOS). The source this
+      # flake carried before the update (code f8957ac, 2026-11-10) is
+      # green on aarch64-darwin. Drop this override once the fork's own
+      # mcpx-src pin catches up.
+      inputs.opencode.inputs.mcpx-src.url =
+        "github:developing-today/code/f8957acd4c1964ca2e8492c33096f40b73283ff1";
+    };
     sidepulse-src = {
       url = "github:inteliwear/sidepulse/ffb1d3c2f3eed3b7e80e32d7876a7e1d67bd5dfb";
       flake = false;

@@ -50,15 +50,11 @@ in
       cfg.laptopAgentPackage
     ];
 
-    # code#5362 cutover (task 12731): ~/.local/bin/repo-queue is the
-    # packaged fleet multicall binary's argv0 alias, managed here so a
-    # home-manager activation converges to it instead of leaving the
-    # hand-built ~/fleet-brokers/bin/repo-queue symlink from the
-    # pre-package cutover in place. The fleet binary itself is
-    # installed out-of-store at ~/.local/bin/fleet, hence
-    # mkOutOfStoreSymlink rather than a store path.
-    home.file.".local/bin/repo-queue".source =
-      config.lib.file.mkOutOfStoreSymlink "${config.home.homeDirectory}/.local/bin/fleet";
+    # code#5362 cutover (task 12731): point the managed alias at the
+    # repo-queue binary in the package this module installs. This keeps
+    # the alias available to consumers without a separate fleet install
+    # and respects the package version selected by the consuming flake.
+    home.file.".local/bin/repo-queue".source = "${cfg.package}/bin/repo-queue";
 
     systemd.user.services.laptop-agent = {
       Unit = {

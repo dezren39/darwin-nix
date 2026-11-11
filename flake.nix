@@ -1623,6 +1623,7 @@ rec {
               qb = eval.config.systemd.user.services.queue-broker.Service;
               sb = eval.config.systemd.user.services.secrets-broker.Service;
               la = eval.config.systemd.user.services.laptop-agent.Service;
+              repoQueueAlias = eval.config.home.file.".local/bin/repo-queue".source;
             in
             pkgs.runCommandLocal "fleet-brokers-home-manager-module-check"
               {
@@ -1631,6 +1632,8 @@ rec {
                 sbPath = pkgs.lib.concatStringsSep ":" sb.Environment;
                 bwsBin = "${pkgs.coreutils}/bin";
                 laExec = la.ExecStart;
+                inherit repoQueueAlias;
+                repoQueueBinary = "${selfPkgs.fleet-brokers}/bin/repo-queue";
                 wantedBy = pkgs.lib.concatStringsSep " " eval.config.systemd.user.services.queue-broker.Install.WantedBy;
               }
               ''
@@ -1662,6 +1665,14 @@ rec {
                   exit 1
                   ;;
                 esac
+                [ "$repoQueueAlias" = "$repoQueueBinary" ] || {
+                  echo "repo-queue alias target=$repoQueueAlias, want packaged binary $repoQueueBinary" >&2
+                  exit 1
+                }
+                [ -x "$repoQueueAlias" ] || {
+                  echo "repo-queue alias target is not an executable provisioned binary: $repoQueueAlias" >&2
+                  exit 1
+                }
                 [ "$wantedBy" = "default.target" ] || { echo "WantedBy=$wantedBy, want default.target" >&2; exit 1; }
                 touch $out
               '';

@@ -98,6 +98,11 @@ python3Packages.buildPythonApplication rec {
     "test_custom_animation_editor_installs_native_edit_shortcuts"
     "test_custom_editor_device_preview_applies_device_brightness"
     "test_edit_animation_clones_builtins_and_edits_custom_in_place"
+    # Builds a real AppKit settings window like its disabled siblings
+    # below; in the headless build sandbox (no window server) window
+    # construction kills the interpreter with SIGTRAP instead of
+    # failing, taking the whole check phase with it (#1791).
+    "test_status_bar_settings_window_has_lid_animation_controls"
     "test_settings_window_builds"
     "test_settings_window_is_not_visible"
     "test_settings_window_registers_its_fields"

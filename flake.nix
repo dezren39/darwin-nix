@@ -172,8 +172,7 @@ rec {
       # pin branch for that tree (fork PR #2269, merged) carries the
       # corrected nix/hashes.json and nothing else. Drop this override
       # once the chain's own opencode resolution moves past 6c43550.
-      inputs.opencode.url =
-        "github:developing-today-forks/opencode/b80e509fed9dce48d739887b3821cbba36ccc5d8";
+      inputs.opencode.url = "github:developing-today-forks/opencode/b80e509fed9dce48d739887b3821cbba36ccc5d8";
     };
     sidepulse-src = {
       url = "github:inteliwear/sidepulse/ffb1d3c2f3eed3b7e80e32d7876a7e1d67bd5dfb";
@@ -1318,10 +1317,9 @@ rec {
       // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
         # #1768: build the Lisp dependencies and run upstream's --help install check.
         mac-app-util =
-          assert pkgs.lib.assertMsg (
-            pkgs.lib.versionAtLeast
-              inputs.mac-app-util.inputs.nixpkgs.legacyPackages.${pkgs.stdenv.hostPlatform.system}.sbcl.version
-              "2.6.6"
+          assert pkgs.lib.assertMsg (pkgs.lib.versionAtLeast
+            inputs.mac-app-util.inputs.nixpkgs.legacyPackages.${pkgs.stdenv.hostPlatform.system}.sbcl.version
+            "2.6.6"
           ) "mac-app-util requires SBCL >= 2.6.6 on newer macOS";
           inputs.mac-app-util.packages.${pkgs.stdenv.hostPlatform.system}.default;
         mcpx = (mkPackages pkgs).mcpx;

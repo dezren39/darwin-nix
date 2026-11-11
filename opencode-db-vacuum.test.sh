@@ -299,6 +299,191 @@ cmp -s "$db" "$fx/icflood-compact.before" || fail "compacted-copy integrity floo
 [ ! -e "${db}.old" ] || fail "compacted-copy integrity flood created ${db}.old (swap happened)"
 ok_if_clean "$before" "many-line integrity_check on the compacted copy dies at exit 1 with the verification verdict, original untouched"
 
+# --- Swap failure must restore the original at the active path (#1780).
+# The swap used to be `mv "$DB" "${DB}.old"` then `mv "$COMPACT" "$DB"`:
+# with --into on another volume the second mv is a copy onto the database
+# volume, and a failure there (ENOSPC on the volume the user said was
+# tight) exited under `set -e` with the active path missing. The script
+# now puts the verified copy on the database's filesystem before any
+# rename -- a byte-compared staging copy when --into is on another
+# filesystem, the copy itself (renamed in) when it already shares the
+# database's filesystem -- then swaps with two same-filesystem renames
+# and an explicit rollback. PATH shims inject the failure points,
+# following
+# the count-fail shim precedent above: an mv that fails only when its
+# source is the staging file (the swap-in rename), and a cp that fails
+# only when its destination is the staging file (the staging copy).
+real_mv="$(command -v mv)"
+real_cp="$(command -v cp)"
+
+mk_swap_mv_fail_shim() { # $1 = shim dir
+  mkdir -p "$1"
+  cat >"$1/mv" <<EOF
+#!/bin/sh
+for a in "\$@"; do
+  case "\$a" in
+    *.staging|*.compact) echo "mv: No space left on device (simulated swap failure)" >&2; exit 1 ;;
+  esac
+done
+exec $real_mv "\$@"
+EOF
+  chmod +x "$1/mv"
+}
+
+mk_stage_cp_fail_shim() { # $1 = shim dir
+  mkdir -p "$1"
+  cat >"$1/cp" <<EOF
+#!/bin/sh
+last=""
+for a in "\$@"; do last="\$a"; done
+case "\$last" in
+  *.staging) echo "cp: No space left on device (simulated staging failure)" >&2; exit 1 ;;
+esac
+exec $real_cp "\$@"
+EOF
+  chmod +x "$1/cp"
+}
+
+before=$failures
+db="$fx/swapfail.db"; mk_fixture "$db"
+cp "$db" "$fx/swapfail.before"
+shimdir="$HOME/swapfail-shim"
+mk_swap_mv_fail_shim "$shimdir"
+out="$(PATH="$shimdir:$PATH" bash "$VACUUM" --db "$db" -y 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] || fail "swap-in mv failure exited 0, expected rollback + failure: $out"
+case "$out" in
+  *"swap failed; the original database has been restored"*) ;;
+  *) fail "swap-in mv failure did not report the restore: $out" ;;
+esac
+cmp -s "$db" "$fx/swapfail.before" || fail "swap-in mv failure left the active path missing or changed"
+counts_ok "$db" || fail "row counts after swap-in mv rollback are not 500/500/500/10"
+[ ! -e "${db}.old" ] || fail "swap-in mv rollback left ${db}.old behind (original not restored?)"
+[ ! -e "${db}.staging" ] || fail "swap-in mv rollback left the staging file behind"
+ok_if_clean "$before" "injected swap-in mv failure rolls back: original restored byte-identical at the active path, no .old or .staging left"
+
+# A second filesystem for the cross-filesystem cases below: /dev/shm is
+# the usual one on Linux, and the device numbers must actually differ
+# or a case would silently be same-filesystem.
+xdir=""
+if [ -d /dev/shm ] && [ -w /dev/shm ]; then
+  dev_of() { stat -c %d "$1" 2>/dev/null || df -P "$1" | awk 'NR==2 {print $1}'; }
+  if [ "$(dev_of "$fx")" != "$(dev_of /dev/shm)" ]; then xdir="/dev/shm"; fi
+fi
+
+# The staging copy exists only on the cross-filesystem path (a
+# same-filesystem copy is renamed in, never copied), so the staging
+# failure is injected with --into on the second filesystem.
+if [ -n "$xdir" ]; then
+before=$failures
+db="$fx/stagefail.db"; mk_fixture "$db"
+cp "$db" "$fx/stagefail.before"
+shimdir="$HOME/stagefail-shim"
+mk_stage_cp_fail_shim "$shimdir"
+out="$(PATH="$shimdir:$PATH" bash "$VACUUM" --db "$db" --into "$xdir/stagefail-$$.compact" -y 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] || fail "staging cp failure exited 0, expected failure before any rename: $out"
+case "$out" in
+  *"could not stage the compacted copy"*) ;;
+  *) fail "staging cp failure did not name the staging failure: $out" ;;
+esac
+cmp -s "$db" "$fx/stagefail.before" || fail "staging cp failure changed the DB (a rename happened?)"
+[ ! -e "${db}.old" ] || fail "staging cp failure created ${db}.old (a rename happened?)"
+[ ! -e "${db}.staging" ] || fail "staging cp failure left a partial staging file behind"
+rm -f "$xdir/stagefail-$$.compact"
+ok_if_clean "$before" "injected staging cp failure (cross-filesystem --into) aborts before any rename, original untouched, no partial staging file"
+else
+  echo "skip: staging cp failure case (no second filesystem available)"
+fi
+
+# --- Same-filesystem swap never copies (Codex review on #1781).
+# The preflight used to budget one compacted copy while the swap then
+# made a second one beside the database, so a volume with room for
+# exactly one copy passed preflight and failed staging with ENOSPC
+# after the expensive vacuum. The swap now renames the verified copy
+# in when it already shares the database's filesystem. A cp shim that
+# fails EVERY cp proves no copy is attempted on that path: the run
+# must still succeed end to end.
+mk_no_cp_shim() { # $1 = shim dir
+  mkdir -p "$1"
+  cat >"$1/cp" <<EOF
+#!/bin/sh
+echo "cp: No space left on device (simulated: no copy may happen here)" >&2; exit 1
+EOF
+  chmod +x "$1/cp"
+}
+
+before=$failures
+db="$fx/renamein.db"; mk_fixture "$db"
+orig_size="$(size_of "$db")"
+shimdir="$HOME/renamein-shim"
+mk_no_cp_shim "$shimdir"
+out="$(PATH="$shimdir:$PATH" bash "$VACUUM" --db "$db" -y 2>&1)"; rc=$?
+[ "$rc" -eq 0 ] || fail "same-filesystem run with cp disabled exited $rc (a staging copy was attempted?): $out"
+[ "$(size_of "$db")" -lt "$orig_size" ] || fail "same-filesystem rename-in swap did not shrink the DB"
+counts_ok "$db" || fail "row counts after rename-in swap are not 500/500/500/10"
+[ -f "${db}.old" ] || fail "rename-in swap missing backup ${db}.old"
+[ ! -e "${db}.staging" ] || fail "rename-in swap left a staging file behind"
+[ ! -e "${db}.compact" ] || fail "rename-in swap left the compact copy behind (it should BE the active DB now)"
+ok_if_clean "$before" "same-filesystem swap renames the verified copy in with cp disabled entirely: no second copy is ever made"
+
+# --- Symlinked --into parent on another filesystem is cross-filesystem
+# (Codex review on #1781). fs_id stat'ed the --into parent without
+# dereferencing, so a parent directory that is a symlink onto another
+# filesystem reported the link's own device and read as same-filesystem:
+# the swap then renamed the original away and copied the compacted copy
+# in, skipping both the database-volume space check and safe staging.
+# The run must take the staging path instead.
+if [ -n "$xdir" ]; then
+  before=$failures
+  db="$fx/xlink.db"; mk_fixture "$db"
+  orig_size="$(size_of "$db")"
+  mkdir -p "$xdir/vacuum-xlink-$$"
+  ln -s "$xdir/vacuum-xlink-$$" "$fx/xlink-parent"
+  into="$fx/xlink-parent/xlink.compact"
+  out="$(bash "$VACUUM" --db "$db" --into "$into" --force -y 2>&1)"; rc=$?
+  [ "$rc" -eq 0 ] || fail "symlinked cross-filesystem --into exited $rc: $out"
+  case "$out" in
+    *"staging the verified copy beside the database"*) ;;
+    *) fail "symlinked cross-filesystem --into did not take the staging path: $out" ;;
+  esac
+  case "$out" in
+    *"already on the database filesystem"*) fail "symlinked cross-filesystem --into was misread as same-filesystem: $out" ;;
+  esac
+  [ "$(size_of "$db")" -lt "$orig_size" ] || fail "symlinked cross-filesystem swap did not shrink the DB"
+  counts_ok "$db" || fail "row counts after symlinked cross-filesystem swap are not 500/500/500/10"
+  [ -f "${db}.old" ] || fail "symlinked cross-filesystem swap missing backup ${db}.old"
+  [ ! -e "$into" ] || fail "symlinked cross-filesystem --into copy was left behind after the swap"
+  [ ! -e "${db}.staging" ] || fail "symlinked cross-filesystem swap left a staging file behind"
+  rm -rf "$xdir/vacuum-xlink-$$"
+  ok_if_clean "$before" "symlinked --into parent on another filesystem is treated as cross-filesystem: staged swap, DB shrunk, counts intact, no leftovers"
+fi
+
+# --- Cross-filesystem --into succeeds through the staging swap (#1780).
+# The documented low-space route: compacted copy written to another
+# volume, staged back beside the database, swapped in by rename. Runs
+# only when a genuinely different filesystem is available; /dev/shm is
+# the usual second filesystem on Linux, and the device numbers must
+# actually differ or the case would silently be same-filesystem.
+if [ -n "$xdir" ]; then
+  before=$failures
+  db="$fx/xfs.db"; mk_fixture "$db"
+  orig_size="$(size_of "$db")"
+  into="$xdir/vacuum-xfs-$$.compact"
+  out="$(bash "$VACUUM" --db "$db" --into "$into" --force -y 2>&1)"; rc=$?
+  if [ "$rc" -ne 0 ]; then
+    fail "cross-filesystem --into run exited $rc: $out"
+  else
+    [ "$(size_of "$db")" -lt "$orig_size" ] || fail "cross-filesystem swap did not shrink the DB"
+    counts_ok "$db" || fail "row counts after cross-filesystem swap are not 500/500/500/10"
+    [ -f "${db}.old" ] || fail "cross-filesystem swap missing backup ${db}.old"
+    [ ! -e "$into" ] || fail "cross-filesystem --into copy was left behind after the swap"
+    [ ! -e "${db}.staging" ] || fail "cross-filesystem swap left the staging file behind"
+  fi
+  rm -f "$into"
+  ok_if_clean "$before" "cross-filesystem --into (DB on one volume, copy on /dev/shm) swaps in via staging, backup kept, no leftovers"
+else
+  echo "skip: cross-filesystem --into case (no second filesystem available)"
+fi
+
 if [ "$failures" -ne 0 ]; then
   echo "$failures failure(s)" >&2
   exit 1

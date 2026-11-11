@@ -617,6 +617,22 @@ lib.recursiveUpdate {
     Defaults timestamp_timeout=15
   '';
 
+  # macFUSE has to be installed before nix-darwin's `brew bundle` runs, because
+  # bindfs-mac (brews.nix) refuses to install without it and bundle installs
+  # every formula before any cask, so the macfuse cask in casks.nix is too late
+  # on a fresh Mac. nix-homebrew's setup-homebrew is mkBefore (order 500) in
+  # activationScripts.homebrew and nix-darwin's own text is order 1000, so order
+  # 600 runs after brew exists and before the bundle. Failure only warns.
+  system.activationScripts.homebrew.text = lib.mkOrder 600 ''
+    if [ -x /opt/homebrew/bin/brew ] && ! /usr/bin/sudo --user=${config.system.primaryUser} --set-home \
+      /opt/homebrew/bin/brew list --cask macfuse >/dev/null 2>&1; then
+      echo "installing macfuse cask before brew bundle (bindfs-mac requires it)..." >&2
+      /usr/bin/sudo --user=${config.system.primaryUser} --set-home \
+        env HOMEBREW_NO_AUTO_UPDATE=1 /opt/homebrew/bin/brew install --cask macfuse ||
+        echo "warning: macfuse install failed; bindfs-mac may fail" >&2
+    fi
+  '';
+
   # Restart skhd after rebuild so config changes take effect
   # Fix Spotlight indexing and exclude noisy directories
   # Clean up stale Caskroom artifacts before homebrew runs (e.g. after cask renames)

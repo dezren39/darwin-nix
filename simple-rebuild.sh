@@ -599,13 +599,19 @@ phase_activate() {
     log="$log_dir/switch-$(date +%Y%m%dT%H%M%S).log"
     service_event switch.begin system="$system_config" \
       previous="$(readlink -f /run/current-system)" log="$log"
-    local -a st
-    sudo "$system_config/sw/bin/darwin-rebuild" activate 2>&1 | tee "$log"
-    st=("${pipestatus[@]}")
+    # This script runs with `set -e` (ERR_EXIT), under which a failing bare
+    # pipeline would kill the script before $pipestatus could be read -- no
+    # retry, no switch.fail event. Guard each activation run with `||` and
+    # capture the pipeline's statuses from the exempt branch instead
+    # (verified against zsh 5.9: success, fail, and retry paths).
+    local -a st=(0)
+    sudo "$system_config/sw/bin/darwin-rebuild" activate 2>&1 | tee "$log" ||
+      st=("${pipestatus[@]}")
     if [[ ${st[1]} -ne 0 && $macfuse_ready -eq 0 ]] && ensure_macfuse; then
       echo "activation failed before macFUSE was installed; retrying once"
-      sudo "$system_config/sw/bin/darwin-rebuild" activate 2>&1 | tee -a "$log"
-      st=("${pipestatus[@]}")
+      st=(0)
+      sudo "$system_config/sw/bin/darwin-rebuild" activate 2>&1 | tee -a "$log" ||
+        st=("${pipestatus[@]}")
     fi
     if [[ ${st[1]} -eq 0 ]]; then
       service_event switch.activated system="$system_config"

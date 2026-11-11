@@ -44,9 +44,6 @@ script_dir="${0:A:h}"
 cd "${script_dir}" || exit 1
 echo "entered: $script_dir"
 
-echo "git add ."
-git add .
-
 echo "nix flake update"
 # As you, not root. Under sudo, Nix reads root's config instead of
 # ~/.config/nix/nix.conf, so it fetched all github: inputs without the access

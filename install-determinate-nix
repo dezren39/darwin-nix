@@ -6,7 +6,8 @@
 # set as HostName and ComputerName so darwin-rebuild finds the flake host.
 # It also removes the comment-only /etc/nix/nix.custom.conf the installer
 # writes (nix-darwin refuses to activate over it) and runs ./adopt to add the
-# host to the flake. Afterwards run ./s to switch.
+# host to the flake, then runs ./s to switch (which installs the macFUSE cask
+# bindfs-mac needs, retrying activation once on a fresh Mac).
 set -eu
 
 url="https://install.determinate.systems/determinate-pkg/stable/Universal"
@@ -32,4 +33,6 @@ if [[ -f $conf && ! -L $conf ]] && ! grep -qvE '^[[:space:]]*(#.*)?$' "$conf"; t
 fi
 
 "${0:A:h}/adopt" --host "$host"
-echo "done: installed, hostname $host adopted, stub config cleared; run ./s"
+echo "installed, hostname $host adopted, stub config cleared; running ./s"
+cd "${0:A:h}"
+exec ./s

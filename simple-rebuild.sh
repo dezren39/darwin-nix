@@ -316,6 +316,17 @@ phase_build() {
   commit_marker "$(hostname) build ${built}"
 }
 
+# Install the macFUSE cask (needed by bindfs-mac) as you; succeeds when it is
+# present afterwards, fails when brew is missing or the install fails.
+ensure_macfuse() {
+  local brew=/opt/homebrew/bin/brew
+  [[ -x $brew ]] || return 1
+  "$brew" list --cask macfuse >/dev/null 2>&1 && return 0
+  echo "brew install --cask macfuse (bindfs-mac requires it)"
+  HOMEBREW_NO_AUTO_UPDATE=1 "$brew" install --cask macfuse ||
+    { echo "macfuse install failed" >&2; return 1; }
+}
+
 # Upgrade Homebrew formulae and casks, as you, on this terminal.
 #
 # configuration.nix sets homebrew.onActivation.upgrade = false because inside
@@ -573,20 +584,26 @@ phase_activate() {
     fi
     # brew bundle installs formulae before casks, and bindfs-mac refuses to
     # install without macFUSE, so the cask has to be there before activation.
-    if [[ -x /opt/homebrew/bin/brew ]] && ! /opt/homebrew/bin/brew list --cask macfuse >/dev/null 2>&1; then
-      echo "brew install --cask macfuse (bindfs-mac requires it)"
-      HOMEBREW_NO_AUTO_UPDATE=1 /opt/homebrew/bin/brew install --cask macfuse ||
-        echo "macfuse install failed; bindfs-mac will fail until it is installed" >&2
-    fi
+    # On a fresh Mac brew does not exist until activation's nix-homebrew step
+    # has run, so a failed first activation is retried once after installing it.
+    local macfuse_ready=0
+    ensure_macfuse && macfuse_ready=1
     local log_dir="$HOME/Library/Logs/nix-services" log
     mkdir -p "$log_dir"
     log="$log_dir/switch-$(date +%Y%m%dT%H%M%S).log"
     service_event switch.begin system="$system_config" \
       previous="$(readlink -f /run/current-system)" log="$log"
-    if sudo "$system_config/sw/bin/darwin-rebuild" activate 2>&1 | tee "$log"; then
+    local -a st
+    sudo "$system_config/sw/bin/darwin-rebuild" activate 2>&1 | tee "$log"
+    st=("${pipestatus[@]}")
+    if [[ ${st[1]} -ne 0 && $macfuse_ready -eq 0 ]] && ensure_macfuse; then
+      echo "activation failed before macFUSE was installed; retrying once"
+      sudo "$system_config/sw/bin/darwin-rebuild" activate 2>&1 | tee -a "$log"
+      st=("${pipestatus[@]}")
+    fi
+    if [[ ${st[1]} -eq 0 ]]; then
       service_event switch.activated system="$system_config"
     else
-      local -a st=("${pipestatus[@]}")
       service_event switch.fail system="$system_config" exit="${st[1]}" log="$log"
       echo "darwin-rebuild activate failed (exit ${st[1]}); its output is in $log" >&2
       return 1

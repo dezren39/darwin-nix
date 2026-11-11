@@ -114,6 +114,12 @@ python3Packages.buildPythonApplication rec {
     "test_settings_animation_previews_use_wasm_programs"
     "test_every_state_popup_uses_the_same_animation_catalog"
     "test_finder_reopen_opens_settings"
+    # AdvancedAutosaveTests: its fixture builds the settings window,
+    # so every test in the class hits the same trap.
+    "test_leaving_each_numeric_field_saves_without_a_button"
+    "test_switching_tabs_commits_the_active_field"
+    "test_closing_window_commits_the_active_field"
+    "test_invalid_input_keeps_last_saved_setting"
     "test_settings_window_builds"
     "test_settings_window_is_not_visible"
     "test_settings_window_registers_its_fields"

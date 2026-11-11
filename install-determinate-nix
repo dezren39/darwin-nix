@@ -1,0 +1,25 @@
+#!/usr/bin/env zsh
+# ./install-determinate-nix [HOSTNAME] -- install Determinate Nix from the
+# official universal pkg, then adopt this Mac's hostname for the flake.
+#
+# HOSTNAME defaults to the current `scutil --get LocalHostName`; it is also
+# set as HostName and ComputerName so darwin-rebuild finds the flake host.
+# Afterwards run ./adopt to add the host, then ./s to switch.
+set -eu
+
+url="https://install.determinate.systems/determinate-pkg/stable/Universal"
+host="${1:-$(scutil --get LocalHostName)}"
+
+if [[ ! -x /nix/var/nix/profiles/default/bin/nix ]]; then
+  pkg="$(mktemp -d)/determinate-nix.pkg"
+  curl --fail --location --silent --show-error --output "$pkg" "$url"
+  sudo installer -pkg "$pkg" -target /
+  rm -f "$pkg"
+else
+  echo "Nix is already installed; skipping the pkg"
+fi
+
+for key in HostName LocalHostName ComputerName; do
+  sudo scutil --set "$key" "$host"
+done
+echo "hostname adopted: $host (run ./adopt, then ./s)"

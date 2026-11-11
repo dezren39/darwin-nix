@@ -532,9 +532,13 @@ lib.recursiveUpdate {
       # terminal returned 0. Run from the script, brew's sudo calls reuse the
       # one approval. Installing missing casks still happens in activation.
       upgrade = false;
+      # No "--force": it makes `brew bundle` reinstall casks that are already
+      # installed, which fails for self-updating apps that are newer than the
+      # cask (google-chrome: permission denied on its own bundle; onedrive:
+      # "A newer version is already installed") and for casks whose download
+      # URL has gone stale (safari-technology-preview 403), aborting activation.
       extraFlags = [
         "--verbose"
-        "--force"
       ];
     };
     # caskArgs
@@ -615,6 +619,22 @@ lib.recursiveUpdate {
   # Defaults, so nothing contends.
   security.sudo.extraConfig = ''
     Defaults timestamp_timeout=15
+  '';
+
+  # macFUSE has to be installed before nix-darwin's `brew bundle` runs, because
+  # bindfs-mac (brews.nix) refuses to install without it and bundle installs
+  # every formula before any cask, so the macfuse cask in casks.nix is too late
+  # on a fresh Mac. nix-homebrew's setup-homebrew is mkBefore (order 500) in
+  # activationScripts.homebrew and nix-darwin's own text is order 1000, so order
+  # 600 runs after brew exists and before the bundle. Failure only warns.
+  system.activationScripts.homebrew.text = lib.mkOrder 600 ''
+    if [ -x /opt/homebrew/bin/brew ] && ! /usr/bin/sudo --user=${config.system.primaryUser} --set-home \
+      /opt/homebrew/bin/brew list --cask macfuse >/dev/null 2>&1; then
+      echo "installing macfuse cask before brew bundle (bindfs-mac requires it)..." >&2
+      /usr/bin/sudo --user=${config.system.primaryUser} --set-home \
+        env HOMEBREW_NO_AUTO_UPDATE=1 /opt/homebrew/bin/brew install --cask macfuse ||
+        echo "warning: macfuse install failed; bindfs-mac may fail" >&2
+    fi
   '';
 
   # Restart skhd after rebuild so config changes take effect

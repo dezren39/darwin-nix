@@ -316,6 +316,17 @@ phase_build() {
   commit_marker "$(hostname) build ${built}"
 }
 
+# Install the macFUSE cask (needed by bindfs-mac) as you; succeeds when it is
+# present afterwards, fails when brew is missing or the install fails.
+ensure_macfuse() {
+  local brew=/opt/homebrew/bin/brew
+  [[ -x $brew ]] || return 1
+  "$brew" list --cask macfuse >/dev/null 2>&1 && return 0
+  echo "brew install --cask macfuse (bindfs-mac requires it)"
+  HOMEBREW_NO_AUTO_UPDATE=1 "$brew" install --cask macfuse ||
+    { echo "macfuse install failed" >&2; return 1; }
+}
+
 # Upgrade Homebrew formulae and casks, as you, on this terminal.
 #
 # configuration.nix sets homebrew.onActivation.upgrade = false because inside
@@ -338,9 +349,15 @@ brew_upgrade() {
   fi
   echo "brew bundle --upgrade $brewfile (as $USER)"
   sudo -v
-  HOMEBREW_NO_AUTO_UPDATE=1 /opt/homebrew/bin/brew bundle install \
-    --file="$brewfile" --upgrade --verbose --force ||
-    echo "brew upgrade failed; the switch itself succeeded" >&2
+  # Cask downloads fail transiently (CDN 403s, connection resets). brew bundle
+  # skips what is already current, so one retry only redoes the failures.
+  local attempt
+  for attempt in 1 2; do
+    HOMEBREW_NO_AUTO_UPDATE=1 /opt/homebrew/bin/brew bundle install \
+      --file="$brewfile" --upgrade --verbose --force && return 0
+    [[ $attempt -eq 1 ]] && echo "brew upgrade had failures; retrying once" >&2
+  done
+  echo "brew upgrade failed; the switch itself succeeded" >&2
 }
 
 # Install or update Xcode from the Mac App Store, as you, after the switch.
@@ -571,15 +588,34 @@ phase_activate() {
       echo "removing comment-only /etc/nix/nix.custom.conf so activation can manage it"
       sudo rm -f /etc/nix/nix.custom.conf
     fi
+    # brew bundle installs formulae before casks, and bindfs-mac refuses to
+    # install without macFUSE, so the cask has to be there before activation.
+    # On a fresh Mac brew does not exist until activation's nix-homebrew step
+    # has run, so a failed first activation is retried once after installing it.
+    local macfuse_ready=0
+    ensure_macfuse && macfuse_ready=1
     local log_dir="$HOME/Library/Logs/nix-services" log
     mkdir -p "$log_dir"
     log="$log_dir/switch-$(date +%Y%m%dT%H%M%S).log"
     service_event switch.begin system="$system_config" \
       previous="$(readlink -f /run/current-system)" log="$log"
-    if sudo "$system_config/sw/bin/darwin-rebuild" activate 2>&1 | tee "$log"; then
+    # This script runs with `set -e` (ERR_EXIT), under which a failing bare
+    # pipeline would kill the script before $pipestatus could be read -- no
+    # retry, no switch.fail event. Guard each activation run with `||` and
+    # capture the pipeline's statuses from the exempt branch instead
+    # (verified against zsh 5.9: success, fail, and retry paths).
+    local -a st=(0)
+    sudo "$system_config/sw/bin/darwin-rebuild" activate 2>&1 | tee "$log" ||
+      st=("${pipestatus[@]}")
+    if [[ ${st[1]} -ne 0 && $macfuse_ready -eq 0 ]] && ensure_macfuse; then
+      echo "activation failed before macFUSE was installed; retrying once"
+      st=(0)
+      sudo "$system_config/sw/bin/darwin-rebuild" activate 2>&1 | tee -a "$log" ||
+        st=("${pipestatus[@]}")
+    fi
+    if [[ ${st[1]} -eq 0 ]]; then
       service_event switch.activated system="$system_config"
     else
-      local -a st=("${pipestatus[@]}")
       service_event switch.fail system="$system_config" exit="${st[1]}" log="$log"
       echo "darwin-rebuild activate failed (exit ${st[1]}); its output is in $log" >&2
       return 1

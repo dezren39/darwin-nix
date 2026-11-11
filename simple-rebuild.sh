@@ -562,6 +562,15 @@ phase_activate() {
     # service event log: three switches on 2026-10-22 registered generations
     # 305-307 and never made them current, and nothing said where they
     # stopped (dezren39/darwin-nix#656, #670).
+    # nix-darwin aborts activation when /etc/nix/nix.custom.conf exists with
+    # content it does not recognise. The Determinate installer writes one that
+    # is only comments (dezren39/darwin-nix#1782); a file with no real content
+    # carries nothing to lose, so remove it and let activation write its own.
+    if [[ -f /etc/nix/nix.custom.conf && ! -L /etc/nix/nix.custom.conf ]] \
+      && ! grep -qvE '^[[:space:]]*(#.*)?$' /etc/nix/nix.custom.conf; then
+      echo "removing comment-only /etc/nix/nix.custom.conf so activation can manage it"
+      sudo rm -f /etc/nix/nix.custom.conf
+    fi
     local log_dir="$HOME/Library/Logs/nix-services" log
     mkdir -p "$log_dir"
     log="$log_dir/switch-$(date +%Y%m%dT%H%M%S).log"

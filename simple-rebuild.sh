@@ -210,6 +210,28 @@ else
   echo "no usable git (missing, or the Xcode CLT shim on a clean install); skipping git add + marker commits for this run"
 fi
 
+# Accept a pending Xcode license BEFORE anything builds (#1791). Every
+# other acceptance in this flow runs at switch time or later --
+# configuration.nix's postActivation, and xcode_mas at the end of
+# phase_activate -- so a run whose build never finishes never reaches
+# any of them. That ordering deadlocks the script against itself: an
+# Xcode update re-pends the license (configuration.nix's comment), a
+# build that calls xcodebuild then waits on the unaccepted license,
+# and the acceptance that would clear it sits behind the build. The
+# probe mirrors configuration.nix's: a developer directory is selected
+# and `xcodebuild -license check` fails. When no license is pending
+# this is two silent probes and phase_build keeps its no-sudo,
+# unattended property; sudo is asked for only when there is a license
+# to accept, the same conditional-sudo shape as reclaim_root_owned.
+# Selection of Xcode.app and -runFirstLaunch stay in xcode_mas: the
+# build needs the license accepted for whichever developer directory
+# is selected, not a different selection.
+if /usr/bin/xcode-select -p >/dev/null 2>&1 && ! /usr/bin/xcodebuild -license check >/dev/null 2>&1; then
+  echo "accepting the Xcode license before building (sudo xcodebuild -license accept)"
+  sudo /usr/bin/xcodebuild -license accept ||
+    echo "warning: Xcode license acceptance failed; builds that call xcodebuild will fail or wait until it is accepted" >&2
+fi
+
 # Keep Nix's GitHub token current. nix.conf (this directory, so tracked)
 # `include`s ~/.local/share/nix/access-tokens.conf, which holds the token and
 # must never be inside the repo: `git add .` above would commit it. Rewritten
@@ -405,9 +427,17 @@ xcode_mas() {
   fi
   if [[ -d /Applications/Xcode.app/Contents/Developer ]]; then
     echo "xcode-select -s Xcode.app, xcodebuild -license accept + -runFirstLaunch (as root)"
-    sudo /usr/bin/xcode-select -s /Applications/Xcode.app/Contents/Developer 2>/dev/null || true
-    sudo /usr/bin/xcodebuild -license accept 2>/dev/null || true
-    sudo /usr/bin/xcodebuild -runFirstLaunch 2>/dev/null || true
+    # Failures here used to be invisible (2>/dev/null || true on all
+    # three): a failed license accept left the machine in exactly the
+    # unaccepted state the pre-build acceptance above exists to clear,
+    # with nothing in the log saying so (#1791). Report each failure;
+    # none of them undoes the switch that already happened.
+    sudo /usr/bin/xcode-select -s /Applications/Xcode.app/Contents/Developer ||
+      echo "warning: xcode-select -s Xcode.app failed" >&2
+    sudo /usr/bin/xcodebuild -license accept ||
+      echo "warning: xcodebuild -license accept failed; the Xcode license is still pending" >&2
+    sudo /usr/bin/xcodebuild -runFirstLaunch ||
+      echo "warning: xcodebuild -runFirstLaunch failed" >&2
   fi
 }
 

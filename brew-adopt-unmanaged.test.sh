@@ -102,6 +102,10 @@ reset_state() {
   UPSTREAM_VERSION="26.189.0928.0009"
 }
 
+# BREW_ADOPT_PATH puts the stub bin first and keeps the ambient PATH
+# behind it: the /usr/bin:/bin of a nix build sandbox are not the
+# host's (#1099), so the script must still find the build env's
+# env/sed/head there — the same tools it finds in /usr/bin on a Mac.
 run_script() {
   cat >"$tmp/taps/homebrew/homebrew-cask/Casks/o/onedrive.rb" <<RB
 cask "onedrive" do
@@ -109,7 +113,7 @@ cask "onedrive" do
 end
 RB
   STUB_STATE="$tmp/state" \
-    BREW_ADOPT_PATH="$tmp/bin:/usr/bin:/bin" \
+    BREW_ADOPT_PATH="$tmp/bin:$PATH" \
     BREW_ADOPT_BREW="$tmp/bin/brew" \
     BREW_ADOPT_SUDO="$tmp/bin/sudo" \
     BREW_ADOPT_PLISTBUDDY="$tmp/bin/plistbuddy" \
@@ -121,10 +125,16 @@ RB
 }
 
 # run: like run_script but never aborts the harness under `set -e`;
-# the script's exit code lands in $rc for the checks.
+# the script's exit code lands in $rc for the checks. Output is also
+# appended to $tmp/all-out, dumped at the end when any check failed —
+# in the nix sandbox the build log is otherwise the only evidence.
 run() {
   rc=0
   run_script || rc=$?
+  {
+    echo "--- run (rc=$rc) ---"
+    cat "$tmp/out"
+  } >>"$tmp/all-out"
 }
 
 calls_has() { grep -q "$1" "$tmp/state/calls"; }
@@ -215,6 +225,8 @@ check "fresh machine: onedrive fresh-install note" out_has "brew bundle will ins
 
 if [ $failures -gt 0 ]; then
   echo "$failures check(s) failed" >&2
+  echo "--- captured script output ---" >&2
+  cat "$tmp/all-out" >&2
   exit 1
 fi
 echo "all checks passed"

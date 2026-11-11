@@ -154,7 +154,7 @@ rec {
     # differently and miss the fixed-output hash.
     openchamber.url = "github:developing-today-forks/openchamber";
     sidepulse-src = {
-      url = "github:inteliwear/sidepulse/main";
+      url = "github:inteliwear/sidepulse/ffb1d3c2f3eed3b7e80e32d7876a7e1d67bd5dfb";
       flake = false;
     };
     # nixpkgs-helium = {

@@ -11,8 +11,8 @@ python3Packages.buildPythonApplication rec {
   version = "0.1.0.dev20261013";
   pyproject = true;
 
-  # `sidepulse-src` follows upstream main while flake.lock pins the compatible
-  # revision used by this ordered patch stack (ffb1d3c, 2026-10-13). Patches
+  # `sidepulse-src` is pinned to the compatible revision used by this ordered
+  # patch stack (ffb1d3c, 2026-10-13). Patches
   # named `sidepulse-pr-N` carry upstream PR inteliwear/sidepulse#N; patches
   # named `sidepulse-dezren39-nix-N` are local and documented in
   # dezren39/darwin-nix#N. Each patch's header records its source and base, and all

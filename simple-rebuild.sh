@@ -349,9 +349,15 @@ brew_upgrade() {
   fi
   echo "brew bundle --upgrade $brewfile (as $USER)"
   sudo -v
-  HOMEBREW_NO_AUTO_UPDATE=1 /opt/homebrew/bin/brew bundle install \
-    --file="$brewfile" --upgrade --verbose --force ||
-    echo "brew upgrade failed; the switch itself succeeded" >&2
+  # Cask downloads fail transiently (CDN 403s, connection resets). brew bundle
+  # skips what is already current, so one retry only redoes the failures.
+  local attempt
+  for attempt in 1 2; do
+    HOMEBREW_NO_AUTO_UPDATE=1 /opt/homebrew/bin/brew bundle install \
+      --file="$brewfile" --upgrade --verbose --force && return 0
+    [[ $attempt -eq 1 ]] && echo "brew upgrade had failures; retrying once" >&2
+  done
+  echo "brew upgrade failed; the switch itself succeeded" >&2
 }
 
 # Install or update Xcode from the Mac App Store, as you, after the switch.

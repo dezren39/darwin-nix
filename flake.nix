@@ -161,8 +161,13 @@ rec {
       # flake carried before the update (code f8957ac, 2026-11-10) is
       # green on aarch64-darwin. Drop this override once the fork's own
       # mcpx-src pin catches up.
+      # Pinned forward 2026-11-11 to the merge of developing-today/code
+      # PR 8775 (darwin-nix issue 1815): at f8957ac the mcpx
+      # touch-reopen test expired its own task before the reopen
+      # under builder load and failed the mcpx-home-manager-module
+      # flake check (run 43098524363).
       inputs.opencode.inputs.mcpx-src.url =
-        "github:developing-today/code/f8957acd4c1964ca2e8492c33096f40b73283ff1";
+        "github:developing-today/code/67d9d908b080cba7231ef668e0a8692928e7cbd3";
       # Pin the chain's opencode to the #1791 hash-fix rev: the rev the
       # chain otherwise resolves (6c43550) records an aarch64-darwin
       # node_modules fixed-output hash that does not match its own

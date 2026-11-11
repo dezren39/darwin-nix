@@ -74,8 +74,13 @@ sql_literal_escape() {
 # rename, never a copy. GNU stat first, BSD stat second, df's
 # filesystem column as the last resort (the device-comparison idiom
 # opencode-db-vacuum.test.sh already uses).
+# The stat calls dereference (-L): without it, stat reports a symlinked
+# directory's own device, not its target's, so an --into parent that is a
+# symlink onto another filesystem read as same-filesystem and the swap
+# skipped staging for what was really a cross-filesystem copy (Codex
+# review on #1781). df resolves the path itself; no flag needed there.
 fs_id() {
-  stat -c %d "$1" 2>/dev/null || stat -f %d "$1" 2>/dev/null || df -P "$1" | awk 'NR==2 {print $1}'
+  stat -L -c %d "$1" 2>/dev/null || stat -L -f %d "$1" 2>/dev/null || df -P "$1" | awk 'NR==2 {print $1}'
 }
 note() { printf '  %s\n' "$*"; }
 step() { printf '\n==> %s\n' "$*"; }

@@ -425,6 +425,38 @@ counts_ok "$db" || fail "row counts after rename-in swap are not 500/500/500/10"
 [ ! -e "${db}.compact" ] || fail "rename-in swap left the compact copy behind (it should BE the active DB now)"
 ok_if_clean "$before" "same-filesystem swap renames the verified copy in with cp disabled entirely: no second copy is ever made"
 
+# --- Symlinked --into parent on another filesystem is cross-filesystem
+# (Codex review on #1781). fs_id stat'ed the --into parent without
+# dereferencing, so a parent directory that is a symlink onto another
+# filesystem reported the link's own device and read as same-filesystem:
+# the swap then renamed the original away and copied the compacted copy
+# in, skipping both the database-volume space check and safe staging.
+# The run must take the staging path instead.
+if [ -n "$xdir" ]; then
+  before=$failures
+  db="$fx/xlink.db"; mk_fixture "$db"
+  orig_size="$(size_of "$db")"
+  mkdir -p "$xdir/vacuum-xlink-$$"
+  ln -s "$xdir/vacuum-xlink-$$" "$fx/xlink-parent"
+  into="$fx/xlink-parent/xlink.compact"
+  out="$(bash "$VACUUM" --db "$db" --into "$into" --force -y 2>&1)"; rc=$?
+  [ "$rc" -eq 0 ] || fail "symlinked cross-filesystem --into exited $rc: $out"
+  case "$out" in
+    *"staging the verified copy beside the database"*) ;;
+    *) fail "symlinked cross-filesystem --into did not take the staging path: $out" ;;
+  esac
+  case "$out" in
+    *"already on the database filesystem"*) fail "symlinked cross-filesystem --into was misread as same-filesystem: $out" ;;
+  esac
+  [ "$(size_of "$db")" -lt "$orig_size" ] || fail "symlinked cross-filesystem swap did not shrink the DB"
+  counts_ok "$db" || fail "row counts after symlinked cross-filesystem swap are not 500/500/500/10"
+  [ -f "${db}.old" ] || fail "symlinked cross-filesystem swap missing backup ${db}.old"
+  [ ! -e "$into" ] || fail "symlinked cross-filesystem --into copy was left behind after the swap"
+  [ ! -e "${db}.staging" ] || fail "symlinked cross-filesystem swap left a staging file behind"
+  rm -rf "$xdir/vacuum-xlink-$$"
+  ok_if_clean "$before" "symlinked --into parent on another filesystem is treated as cross-filesystem: staged swap, DB shrunk, counts intact, no leftovers"
+fi
+
 # --- Cross-filesystem --into succeeds through the staging swap (#1780).
 # The documented low-space route: compacted copy written to another
 # volume, staged back beside the database, swapped in by rename. Runs

@@ -571,6 +571,13 @@ phase_activate() {
       echo "removing comment-only /etc/nix/nix.custom.conf so activation can manage it"
       sudo rm -f /etc/nix/nix.custom.conf
     fi
+    # brew bundle installs formulae before casks, and bindfs-mac refuses to
+    # install without macFUSE, so the cask has to be there before activation.
+    if [[ -x /opt/homebrew/bin/brew ]] && ! /opt/homebrew/bin/brew list --cask macfuse >/dev/null 2>&1; then
+      echo "brew install --cask macfuse (bindfs-mac requires it)"
+      HOMEBREW_NO_AUTO_UPDATE=1 /opt/homebrew/bin/brew install --cask macfuse ||
+        echo "macfuse install failed; bindfs-mac will fail until it is installed" >&2
+    fi
     local log_dir="$HOME/Library/Logs/nix-services" log
     mkdir -p "$log_dir"
     log="$log_dir/switch-$(date +%Y%m%dT%H%M%S).log"

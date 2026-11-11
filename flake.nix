@@ -163,6 +163,17 @@ rec {
       # mcpx-src pin catches up.
       inputs.opencode.inputs.mcpx-src.url =
         "github:developing-today/code/f8957acd4c1964ca2e8492c33096f40b73283ff1";
+      # Pin the chain's opencode to the #1791 hash-fix rev: the rev the
+      # chain otherwise resolves (6c43550) records an aarch64-darwin
+      # node_modules fixed-output hash that does not match its own
+      # content — two independent native darwin builds (the Mac in
+      # #1791 and darwin-nix run 42965438016) agree the output is
+      # sha256-g9J6PY3Bv1i8K6e8chtUwj/lvdVifAGf/VbtAnxnp2A=. The fork's
+      # pin branch for that tree (fork PR #2269, merged) carries the
+      # corrected nix/hashes.json and nothing else. Drop this override
+      # once the chain's own opencode resolution moves past 6c43550.
+      inputs.opencode.url =
+        "github:developing-today-forks/opencode/b80e509fed9dce48d739887b3821cbba36ccc5d8";
     };
     sidepulse-src = {
       url = "github:inteliwear/sidepulse/ffb1d3c2f3eed3b7e80e32d7876a7e1d67bd5dfb";

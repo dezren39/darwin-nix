@@ -532,9 +532,13 @@ lib.recursiveUpdate {
       # terminal returned 0. Run from the script, brew's sudo calls reuse the
       # one approval. Installing missing casks still happens in activation.
       upgrade = false;
+      # No "--force": it makes `brew bundle` reinstall casks that are already
+      # installed, which fails for self-updating apps that are newer than the
+      # cask (google-chrome: permission denied on its own bundle; onedrive:
+      # "A newer version is already installed") and for casks whose download
+      # URL has gone stale (safari-technology-preview 403), aborting activation.
       extraFlags = [
         "--verbose"
-        "--force"
       ];
     };
     # caskArgs

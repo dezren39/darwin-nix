@@ -166,6 +166,20 @@ def main():
             os.path.join("package-lock.json"),
         )
 
+        # Malformed JSON (#1494): a raw JSONDecodeError message names
+        # no file -- exit 2 must still name the offending file, for
+        # package-lock.json and for package.json alike.
+        for name, filename in (
+            ("malformed package-lock.json", "package-lock.json"),
+            ("malformed package.json", "package.json"),
+        ):
+            d = os.path.join(tmp, name.replace(" ", "-").replace(".", "_"))
+            seed_package(d)
+            write(os.path.join(d, filename), "{ not json")
+            expect_invocation_error(
+                name, run(d), os.path.join(d, filename)
+            )
+
         # Non-string entry version (#1204): malformed input, exit 2
         # naming package-lock.json -- never exit-1 drift with the
         # "Regenerate bun.lock" remedy, which cannot fix a bad file.

@@ -143,8 +143,9 @@ def main() -> int:
     for name in ("package.json", "package-lock.json", "bun.lock"):
         if not (root / name).is_file():
             return invocation_error(f"{root / name}: no such file")
+    current = root / "package.json"
     try:
-        package = json.loads(read_text(root / "package.json"))
+        package = json.loads(read_text(current))
         # Shape validation (#1159), as in npm_versions: wrong-shaped
         # package.json content is an invocation error, not a traceback.
         if not isinstance(package, dict):
@@ -156,9 +157,15 @@ def main() -> int:
                 return invocation_error(
                     f"{root / 'package.json'}: '{field}' must be an object"
                 )
-        npm = npm_versions(root / "package-lock.json")
-        bun = bun_versions(root / "bun.lock")
-    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        current = root / "package-lock.json"
+        npm = npm_versions(current)
+        current = root / "bun.lock"
+        bun = bun_versions(current)
+    except json.JSONDecodeError as exc:
+        # A raw parser message names no file; the docstring contract
+        # is one line naming the offending file (#1494).
+        return invocation_error(f"{current}: {exc}")
+    except (OSError, ValueError) as exc:
         return invocation_error(str(exc))
     deps = {
         **package.get("dependencies", {}),

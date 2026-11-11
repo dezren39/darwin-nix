@@ -57,6 +57,9 @@ name: buffer-backup renovate bun sync
 #   2. Every per-PR job starts with check-lock-sync.py: if the locks
 #      already agree the job is a green no-op and commits nothing,
 #      so a later scan that re-selects the same PR cannot loop.
+#      Only exit 1 (drift) proceeds to the sync steps; an invocation
+#      error (exit 2, or any other non-0/1 exit) fails the check
+#      step itself, so broken input is never regenerated over (#1494).
 #
 # The gate stays a gate: this workflow is Renovate-only (author +
 # branch + same-repo eligibility above). A hand-made PR that desyncs
@@ -153,13 +156,28 @@ jobs:
       - name: Check whether the lockfiles already agree
         id: check
         run: |
-          if python3 pkgs/buffer-backup/check-lock-sync.py; then
-            echo "in_sync=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::bun.lock and package-lock.json already agree — nothing to sync."
-          else
-            echo "in_sync=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Lockfiles disagree — regenerating bun.lock."
-          fi
+          # Three-way exit contract of check-lock-sync.py (#1141,
+          # #1494): 0 = in sync, 1 = drift, anything else (2 =
+          # invocation error, or a crash) is NOT drift -- fail this
+          # step so no token/bun/regeneration step runs on input the
+          # checker just declared missing, unreadable, or malformed.
+          # The checker's own stderr stays on this step's log.
+          rc=0
+          python3 pkgs/buffer-backup/check-lock-sync.py || rc=$?
+          case "$rc" in
+            0)
+              echo "in_sync=true" >> "$GITHUB_OUTPUT"
+              echo "::notice::bun.lock and package-lock.json already agree — nothing to sync."
+              ;;
+            1)
+              echo "in_sync=false" >> "$GITHUB_OUTPUT"
+              echo "::notice::Lockfiles disagree — regenerating bun.lock."
+              ;;
+            *)
+              echo "::error::check-lock-sync failed with exit $rc (invocation error, not drift) — see the checker's message above."
+              exit "$rc"
+              ;;
+          esac
 
       - name: Require the sync token before changing anything
         if: steps.check.outputs.in_sync == 'false'

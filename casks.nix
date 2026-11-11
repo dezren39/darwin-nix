@@ -39,16 +39,18 @@ _: {
     # "gitkraken"
     # "gitkraken-cli"
     "github@beta"
-    # "google-chrome" # removed 2026-11: the Chrome on this machine is NOT
-    # brew-managed — its bundle is root-owned (delivered outside brew), so
-    # brew's cask install dies on it: `chgrp: /Applications/Google
-    # Chrome.app/...: Operation not permitted` on every file in the existing
-    # bundle, and the failed `brew bundle` fails darwin-rebuild activation
-    # (#1791, 2026-11-11 run: cask 157.0.8103.51 over installed
-    # 157.0.8103.40). Chrome self-updates on its own; the google-chrome-cdp
-    # wrapper (systemPackages.nix) execs the installed app either way.
-    # cleanup = "none", so this only stops brew bundle from trying —
-    # nothing is uninstalled.
+    # "google-chrome" is brew-managed again (#1791): the bundle on this
+    # machine arrived root-owned (delivered outside brew), which killed
+    # every activation's brew bundle — `chgrp: /Applications/Google
+    # Chrome.app/...: Operation not permitted` on every file of the
+    # existing bundle (cask 157.0.8103.51 over installed 157.0.8103.40).
+    # brew-adopt-unmanaged.sh (order-600 activation text, before the bundle)
+    # chowns the bundle to the user and adopts it: for auto_updates
+    # casks `brew install --cask --adopt` writes only the Caskroom
+    # receipt, bundle untouched. The profile was never at risk — it
+    # lives in ~/Library/Application Support/Google/Chrome, not in the
+    # bundle — and Keystone keeps the app itself current either way.
+    "google-chrome"
     "hammerspoon"
     "handbrake-app"
     # "homebrew/cask/docker-desktop" # removed 2026-09: uninstalled on request.
@@ -77,13 +79,17 @@ _: {
     # "nextcloud"
     # "ngrok"
     "notion"
-    # "onedrive" # removed 2026-11: the installed OneDrive (26.198.1011) is
-    # newer than the cask (26.189.0928.0009) and was not installed by brew,
-    # so every activation's `brew bundle` tries to install the cask and its
-    # pkg refuses: "A newer version of OneDrive is already installed" —
-    # failing the switch (#1791, 2026-11-11 run). OneDrive self-updates
-    # outside brew. cleanup = "none": nothing is uninstalled; brew just
-    # stops trying.
+    # Vendored cask (#1791): upstream homebrew-cask tracks Microsoft's
+    # Deferred ring (26.189.0928.0009) while this machine's OneDrive —
+    # installed outside brew — self-updates on the Production ring
+    # (26.198.1011.0006), so with no brew receipt the upstream pkg
+    # refused the downgrade on every activation. homebrew-local/
+    # Casks/onedrive.rb (tap dezren39/homebrew-local, wired in
+    # configuration.nix) pins the installed build: the same-version
+    # install writes brew's receipt and brew manages OneDrive from
+    # then on; brew-adopt-unmanaged.sh guards the pin at activation.
+    # Retire the vendored cask once upstream reaches that version.
+    "dezren39/local/onedrive"
     "onyx" # system maintenance, cache cleaning, Spotlight reindexing
     # "onlyoffice"
     # openchamber: built from developing-today-forks/openchamber instead (openchamber.nix)

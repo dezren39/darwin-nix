@@ -1241,6 +1241,30 @@ rec {
               bash ./system-activation-helper.test.sh
               touch $out
             '';
+        # #1791: brew-adopt-unmanaged.test.sh drives the real
+        # brew-adopt-unmanaged.sh against stub stat/chown/sudo/brew/
+        # PlistBuddy — the root-owned-Chrome chown+adopt path, the
+        # adopt→force fallback, and the OneDrive self-updated-past-the-
+        # vendored-pin guard are what stand between Drew and the
+        # every-activation brew bundle failure coming back, so they
+        # cannot regress silently.
+        brew-adopt-unmanaged-tests =
+          pkgs.runCommandLocal "brew-adopt-unmanaged-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.coreutils
+                pkgs.gnugrep
+                pkgs.gnused
+              ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/brew-adopt-unmanaged.sh $src/brew-adopt-unmanaged.test.sh ./
+              chmod u+w ./brew-adopt-unmanaged.test.sh
+              bash ./brew-adopt-unmanaged.test.sh
+              touch $out
+            '';
         # #907: opencode-share.test.sh drives the real opencode-share.sh
         # in --dry-run mode through [good, missing, good], all-good, and
         # all-fail target lists — the post-increment error counter used

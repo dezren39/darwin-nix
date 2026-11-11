@@ -477,6 +477,16 @@ lib.recursiveUpdate {
       "Dimentium/homebrew-autoraise" = inputs.homebrew-autoraise;
       "gromgit/homebrew-fuse" = inputs.homebrew-fuse;
       "gabrimatic/homebrew-local-whisper" = inputs.homebrew-local-whisper;
+      # In-repo tap (#1791): vendors the onedrive cask at the build
+      # installed on this machine (26.198.1011.0006). Upstream
+      # homebrew-cask tracks Microsoft's Deferred ring and lags the
+      # Production-ring build the machine self-updates to, so its pkg
+      # refused the "downgrade" on every activation. See
+      # homebrew-local/Casks/onedrive.rb for the retirement condition.
+      "dezren39/homebrew-local" = pkgs.runCommandLocal "homebrew-local-tap" { } ''
+        mkdir -p $out/Casks
+        cp ${./homebrew-local/Casks/onedrive.rb} $out/Casks/onedrive.rb
+      '';
 
     };
     mutableTaps = false;
@@ -486,6 +496,9 @@ lib.recursiveUpdate {
     # survives fresh setups. Prefer specific formulae over whole-tap trust.
     # ref: https://github.com/zhaofengli/nix-homebrew README "trust" + https://docs.brew.sh/Tap-Trust
     trust = {
+      casks = [
+        "dezren39/local/onedrive"
+      ];
       formulae = [
         "null-dev/firefox-profile-switcher/firefox-profile-switcher-connector"
         "dimentium/autoraise/autoraise"
@@ -634,6 +647,28 @@ lib.recursiveUpdate {
       /usr/bin/sudo --user=${config.system.primaryUser} --set-home \
         env HOMEBREW_NO_AUTO_UPDATE=1 /opt/homebrew/bin/brew install --cask macfuse ||
         echo "warning: macfuse install failed; bindfs-mac may fail" >&2
+    fi
+
+    # #1791: google-chrome and onedrive exist on this machine outside
+    # brew, and `brew bundle` reads both as missing, so it used to fail
+    # on them every activation (root-owned Chrome bundle: chgrp
+    # "Operation not permitted" on every file; OneDrive newer than the
+    # upstream cask: its pkg refuses the downgrade).
+    # brew-adopt-unmanaged.sh brings both under brew here, still before
+    # the bundle: it chowns Chrome's bundle to the primary user and
+    # adopts it (`brew install --cask --adopt`: receipt-only for
+    # auto_updates casks), and for OneDrive it guards the vendored pin
+    # in the dezren39/homebrew-local tap (same-version pkg install by
+    # the bundle writes the receipt). Unlike the macfuse install above
+    # it is NOT warn-only: its two exit-1 states (Chrome still
+    # foreign-owned after chown; OneDrive self-updated past the
+    # vendored pin before adoption) are exactly the states that would
+    # fail the bundle anyway, and failing here names the remedy in
+    # plain words instead of brew's chgrp wall or the installer's
+    # refusal. (Same text block as macfuse because a module file can
+    # only define this option once.)
+    if [ -x /opt/homebrew/bin/brew ]; then
+      /run/current-system/sw/bin/bash ${./brew-adopt-unmanaged.sh} ${config.system.primaryUser}
     fi
   '';
 

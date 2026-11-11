@@ -68,6 +68,15 @@ uri_escape_path() {
 sql_literal_escape() {
   printf '%s' "$1" | sed -e "s/'/''/g"
 }
+
+# Filesystem identity of the path at $1: its device id. Two paths with
+# the same id live on the same filesystem, so a move between them is a
+# rename, never a copy. GNU stat first, BSD stat second, df's
+# filesystem column as the last resort (the device-comparison idiom
+# opencode-db-vacuum.test.sh already uses).
+fs_id() {
+  stat -c %d "$1" 2>/dev/null || stat -f %d "$1" 2>/dev/null || df -P "$1" | awk 'NR==2 {print $1}'
+}
 note() { printf '  %s\n' "$*"; }
 step() { printf '\n==> %s\n' "$*"; }
 
@@ -304,6 +313,20 @@ fi
 # VACUUM INTO writes a full copy of the live data. Require headroom for it.
 target_dir="$(dirname "${INTO:-$DB}")"
 [ -d "$target_dir" ] || die "target directory does not exist: $target_dir"
+db_dir="$(dirname "$DB")"
+# Whether the compacted copy lands on the database's own filesystem
+# decides both the space accounting here and the swap mechanics in
+# step 5. Same filesystem: the swap renames the verified copy straight
+# in, so no second copy ever exists and the filesystem only needs room
+# for the one copy VACUUM INTO writes. Different filesystem: the copy
+# is staged beside the database before the swap, so the database
+# volume needs room for a copy of its own. (Codex review on #1781:
+# accounting by directory string got both wrong -- with the default
+# --into beside the database the staging copy the old swap made was
+# budgeted nowhere, and two directories sharing one filesystem were
+# checked as if they were independent pools.)
+same_fs=0
+[ "$(fs_id "$target_dir")" = "$(fs_id "$db_dir")" ] && same_fs=1
 avail_kb="$(df -Pk "$target_dir" | awk 'NR==2 {print $4}')"
 avail_bytes=$(( avail_kb * 1024 ))
 needed_bytes=$(( live_bytes + live_bytes / 10 ))   # live + 10% margin
@@ -318,13 +341,12 @@ if [ "$avail_bytes" -lt "$needed_bytes" ]; then
     Use --into /path/on/another/volume, or free space first."
 fi
 
-# The swap stages the verified copy beside the database before renaming
-# anything (#1780), so the database's own volume also needs room for one
-# copy of the live data -- even when --into points at another volume.
-# Without this the staging copy is where a tight database volume failed,
-# after the original had already been renamed away.
-db_dir="$(dirname "$DB")"
-if [ "$target_dir" != "$db_dir" ]; then
+# Cross-filesystem only: the swap stages the verified copy beside the
+# database before renaming anything (#1780), so the database's own
+# volume also needs room for one copy of the live data. Without this
+# the staging copy is where a tight database volume failed, after the
+# original had already been renamed away.
+if [ "$same_fs" -eq 0 ]; then
   db_avail_kb="$(df -Pk "$db_dir" | awk 'NR==2 {print $4}')"
   db_avail_bytes=$(( db_avail_kb * 1024 ))
   note "database volume: $db_dir"
@@ -432,21 +454,29 @@ fi
 
 step "Swapping"
 
-# Stage the verified copy on the database's own filesystem BEFORE the
+# Put the verified copy on the database's own filesystem BEFORE the
 # original is renamed (#1780). The old swap renamed $DB to ${DB}.old and
 # then moved $COMPACT in; with --into on another volume that second move
 # is a copy onto the database volume, and if it failed (ENOSPC on the
 # very volume the user said was tight) `set -e` exited with the active
 # path missing. A staging copy that fails here fails safe: the original
-# has not been touched.
-note "staging the verified copy beside the database: $STAGED"
-if ! cp "$COMPACT" "$STAGED"; then
-  rm -f "$STAGED"
-  die "could not stage the compacted copy on the database volume; original untouched at $DB, compacted copy left at $COMPACT"
-fi
-if ! cmp -s "$COMPACT" "$STAGED"; then
-  rm -f "$STAGED"
-  die "staged copy does not match the verified compacted copy; original untouched at $DB, compacted copy left at $COMPACT"
+# has not been touched. When $COMPACT is already on the database's
+# filesystem no staging copy is made at all -- the swap renames it
+# straight in, so a tight database volume never has to hold two
+# compacted copies at once (Codex review on #1781).
+if [ "$same_fs" -eq 1 ]; then
+  STAGED="$COMPACT"
+  note "compacted copy is already on the database filesystem; swapping it in by rename, no staging copy needed"
+else
+  note "staging the verified copy beside the database: $STAGED"
+  if ! cp "$COMPACT" "$STAGED"; then
+    rm -f "$STAGED"
+    die "could not stage the compacted copy on the database volume; original untouched at $DB, compacted copy left at $COMPACT"
+  fi
+  if ! cmp -s "$COMPACT" "$STAGED"; then
+    rm -f "$STAGED"
+    die "staged copy does not match the verified compacted copy; original untouched at $DB, compacted copy left at $COMPACT"
+  fi
 fi
 
 # From here the swap is two renames on one filesystem. Arm a rollback
@@ -472,15 +502,19 @@ fi
 if ! mv "$STAGED" "$DB"; then
   if mv "${DB}.old" "$DB"; then
     SWAP_ARMED=0
-    rm -f "$STAGED"
+    # Remove the staging copy only when it is one; when the swap was a
+    # rename, $STAGED is $COMPACT itself and stays for inspection.
+    [ "$STAGED" != "$COMPACT" ] && rm -f "$STAGED"
     die "swap failed; the original database has been restored at $DB, compacted copy left at $COMPACT"
   fi
   die "swap failed AND the original could not be moved back; the original database is at ${DB}.old -- restore it with: mv '${DB}.old' '$DB'"
 fi
 SWAP_ARMED=0
-# The staged copy is now the active database; the VACUUM INTO output it
-# was copied from is a duplicate (on whatever volume --into named).
-rm -f "$COMPACT"
+# The staged copy is now the active database. When it was copied from
+# the VACUUM INTO output, that output is a duplicate (on whatever
+# volume --into named) and goes; when the swap was a rename, $COMPACT
+# is the active database itself and nothing remains to remove.
+[ "$STAGED" != "$COMPACT" ] && rm -f "$COMPACT"
 # Safe only now: clean checkpoint above, no process attached. opencode
 # re-enables WAL on next open.
 rm -f "${DB}-wal" "${DB}-shm"

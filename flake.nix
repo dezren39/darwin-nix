@@ -507,6 +507,35 @@ rec {
               bash ./simple-rebuild.test.sh
               touch $out
             '';
+        # #1804: install-determinate-nix.test.sh pins
+        # install-determinate-nix's argument validation -- extra
+        # arguments and flag-shaped hostnames exit 2 naming the
+        # offending argument before any side effect, -h/--help
+        # prints usage with exit 0, and valid default/explicit
+        # hostname invocations parse exactly as before. The suite
+        # extracts the real parse segment from the script and runs
+        # it under zsh (the script's interpreter) with scutil
+        # stubbed, so it needs zsh but no Mac and installs nothing.
+        install-determinate-nix-tests =
+          pkgs.runCommandLocal "install-determinate-nix-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.zsh
+                pkgs.coreutils
+                pkgs.gnugrep
+                pkgs.gawk
+              ];
+            }
+            ''
+              cp ${./install-determinate-nix} install-determinate-nix
+              cp ${./install-determinate-nix.test.sh} install-determinate-nix.test.sh
+              chmod u+w install-determinate-nix install-determinate-nix.test.sh
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./install-determinate-nix.test.sh
+              touch $out
+            '';
         # #1148: check-pin-sync.test.py — the probes for
         # pkgs/bun-bin/check-pin-sync.py (missing workflow / missing
         # hashes / malformed hashes must exit 2, never traceback at

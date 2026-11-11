@@ -10,8 +10,47 @@
 # bindfs-mac needs, retrying activation once on a fresh Mac).
 set -eu
 
-url="https://install.determinate.systems/determinate-pkg/stable/Universal"
+# Parse-time argument validation (#1804) — extracted verbatim by
+# install-determinate-nix.test.sh and run under zsh with a stubbed
+# scutil. Everything in this segment runs before any subprocess,
+# network, filesystem, or privileged operation: this script can
+# install Nix, rewrite all three hostname keys, delete
+# /etc/nix/nix.custom.conf, adopt the host, and switch the system,
+# so a typoed extra argument (e.g. a stray --help) must stop it
+# here instead of being silently ignored while $1 is used.
+install_usage() {
+  echo "usage: install-determinate-nix [HOSTNAME]"
+}
+case "${1:-}" in
+  -h|--help)
+    if (( $# > 1 )); then
+      echo "install-determinate-nix: unexpected argument: $2" >&2
+      install_usage >&2
+      exit 2
+    fi
+    install_usage
+    echo "Install Determinate Nix from the official universal pkg, then adopt"
+    echo "HOSTNAME (default: the current scutil LocalHostName) for this flake:"
+    echo "it is also set as HostName and ComputerName."
+    exit 0
+    ;;
+esac
+if (( $# > 1 )); then
+  echo "install-determinate-nix: unexpected argument: $2" >&2
+  install_usage >&2
+  exit 2
+fi
+case "${1:-}" in
+  -*)
+    echo "install-determinate-nix: unknown option: $1" >&2
+    install_usage >&2
+    exit 2
+    ;;
+esac
 host="${1:-$(scutil --get LocalHostName)}"
+# End of parse-time validation (#1804) — everything below has side effects.
+
+url="https://install.determinate.systems/determinate-pkg/stable/Universal"
 
 if [[ ! -x /nix/var/nix/profiles/default/bin/nix ]]; then
   pkg="$(mktemp -d)/determinate-nix.pkg"

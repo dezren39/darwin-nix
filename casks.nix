@@ -39,7 +39,16 @@ _: {
     # "gitkraken"
     # "gitkraken-cli"
     "github@beta"
-    "google-chrome"
+    # "google-chrome" # removed 2026-11: the Chrome on this machine is NOT
+    # brew-managed — its bundle is root-owned (delivered outside brew), so
+    # brew's cask install dies on it: `chgrp: /Applications/Google
+    # Chrome.app/...: Operation not permitted` on every file in the existing
+    # bundle, and the failed `brew bundle` fails darwin-rebuild activation
+    # (#1791, 2026-11-11 run: cask 157.0.8103.51 over installed
+    # 157.0.8103.40). Chrome self-updates on its own; the google-chrome-cdp
+    # wrapper (systemPackages.nix) execs the installed app either way.
+    # cleanup = "none", so this only stops brew bundle from trying —
+    # nothing is uninstalled.
     "hammerspoon"
     "handbrake-app"
     # "homebrew/cask/docker-desktop" # removed 2026-09: uninstalled on request.
@@ -68,7 +77,13 @@ _: {
     # "nextcloud"
     # "ngrok"
     "notion"
-    "onedrive"
+    # "onedrive" # removed 2026-11: the installed OneDrive (26.198.1011) is
+    # newer than the cask (26.189.0928.0009) and was not installed by brew,
+    # so every activation's `brew bundle` tries to install the cask and its
+    # pkg refuses: "A newer version of OneDrive is already installed" —
+    # failing the switch (#1791, 2026-11-11 run). OneDrive self-updates
+    # outside brew. cleanup = "none": nothing is uninstalled; brew just
+    # stops trying.
     "onyx" # system maintenance, cache cleaning, Spotlight reindexing
     # "onlyoffice"
     # openchamber: built from developing-today-forks/openchamber instead (openchamber.nix)

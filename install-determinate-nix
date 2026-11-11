@@ -4,7 +4,9 @@
 #
 # HOSTNAME defaults to the current `scutil --get LocalHostName`; it is also
 # set as HostName and ComputerName so darwin-rebuild finds the flake host.
-# Afterwards run ./adopt to add the host, then ./s to switch.
+# It also removes the comment-only /etc/nix/nix.custom.conf the installer
+# writes (nix-darwin refuses to activate over it) and runs ./adopt to add the
+# host to the flake. Afterwards run ./s to switch.
 set -eu
 
 url="https://install.determinate.systems/determinate-pkg/stable/Universal"
@@ -22,4 +24,12 @@ fi
 for key in HostName LocalHostName ComputerName; do
   sudo scutil --set "$key" "$host"
 done
-echo "hostname adopted: $host (run ./adopt, then ./s)"
+
+conf=/etc/nix/nix.custom.conf
+if [[ -f $conf && ! -L $conf ]] && ! grep -qvE '^[[:space:]]*(#.*)?$' "$conf"; then
+  echo "removing comment-only $conf so activation can manage it"
+  sudo rm -f "$conf"
+fi
+
+"${0:A:h}/adopt" --host "$host"
+echo "done: installed, hostname $host adopted, stub config cleared; run ./s"

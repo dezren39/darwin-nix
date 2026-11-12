@@ -132,6 +132,83 @@ else
   fail "valid default hostname: status=$STATUS out='$OUT' stub='$STUB'"
 fi
 
+# --- Temp-dir cleanup (#1821): success + both failure paths -----------
+# The install block used to rm only the pkg file on success and, under
+# set -e, nothing at all when curl or installer failed -- the mktemp
+# directory (and a partial or full pkg) leaked in ${TMPDIR}. The block
+# now traps EXIT to rm -rf the directory it created, and clears the
+# trap after an explicit cleanup on success (the script later execs
+# ./s, across which a trap would not run).
+#
+# Same extraction discipline as the parse segment above: the REAL
+# install segment (from `url=` through the block's closing `fi`) is
+# extracted from the shipped script and run under zsh with mktemp,
+# curl, installer (via a sudo pass-through) stubbed. The only edit to
+# the extracted text substitutes the hard-coded nix profile path with
+# a path that never exists, so the install branch runs on any machine.
+# Oracle per case: exit status (the original curl/installer status,
+# unmasked), the stub log, and the stub temp directory being GONE.
+SEGMENT2="$TMP_ROOT/install.zsh"
+awk '/^url=/{f=1} f{print} f&&/^fi$/{exit}' "$SCRIPT" \
+  | sed "s|/nix/var/nix/profiles/default/bin/nix|$TMP_ROOT/no-nix-here|g" >"$SEGMENT2"
+[ -s "$SEGMENT2" ] || { echo "could not extract install segment from install-determinate-nix" >&2; exit 1; }
+grep -q 'mktemp -d' "$SEGMENT2" || fail "extracted install segment lacks the mktemp -d call"
+grep -q "trap 'rm -rf" "$SEGMENT2" || fail "extracted install segment lacks the #1821 cleanup trap"
+
+PROBE2="$TMP_ROOT/probe2.zsh"
+cat >"$PROBE2" <<'EOF'
+#!/usr/bin/env zsh
+set -eu
+mktemp() { mkdir -p "$TEST_TMP/stubtmpdir"; print -r -- "$TEST_TMP/stubtmpdir"; }
+curl() {
+  local out=""
+  while (( $# > 0 )); do
+    case "$1" in
+      --output) out="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  print -r -- "curl output=$out" >> "$STUB_LOG"
+  print -r -- "partial-pkg" > "$out"
+  if [[ "$MODE" == curlfail ]]; then exit 22; fi
+}
+installer() {
+  print -r -- "installer $*" >> "$STUB_LOG"
+  if [[ "$MODE" == installerfail ]]; then exit 1; fi
+}
+sudo() { "$@"; }
+source "$SEG2"
+echo "segment-ok"
+EOF
+
+run_install_case() { # run_install_case <mode> -- sets OUT, STATUS, STUB
+  local mode="$1"
+  rm -rf "$TMP_ROOT/case"; mkdir -p "$TMP_ROOT/case"
+  : >"$STUB_LOG"
+  OUT="$(MODE="$mode" TEST_TMP="$TMP_ROOT/case" STUB_LOG="$STUB_LOG" SEG2="$SEGMENT2" zsh "$PROBE2" 2>&1)"; STATUS=$?
+  STUB="$(cat "$STUB_LOG")"
+}
+
+before=$failures
+run_install_case success
+[ "$STATUS" -eq 0 ] || fail "install success case exited $STATUS (want 0): $OUT"
+case "$OUT" in *"segment-ok"*) ;; *) fail "install success case did not complete the segment: $OUT" ;; esac
+case "$STUB" in *"installer -pkg $TMP_ROOT/case/stubtmpdir/determinate-nix.pkg -target /"*) ;; *) fail "install success case: installer not called with the stub pkg: $STUB" ;; esac
+[ ! -e "$TMP_ROOT/case/stubtmpdir" ] || fail "install success case left the temp directory behind"
+[ "$failures" -eq "$before" ] && ok "install success: pkg installed, temp directory removed (#1821)"
+
+before=$failures
+run_install_case curlfail
+[ "$STATUS" -eq 22 ] || fail "curl failure case exited $STATUS (want 22, the original curl status): $OUT"
+[ ! -e "$TMP_ROOT/case/stubtmpdir" ] || fail "curl failure case left the temp directory (and partial pkg) behind"
+[ "$failures" -eq "$before" ] && ok "curl failure: exit 22 preserved, temp directory and partial pkg removed (#1821)"
+
+before=$failures
+run_install_case installerfail
+[ "$STATUS" -eq 1 ] || fail "installer failure case exited $STATUS (want 1, the original installer status): $OUT"
+[ ! -e "$TMP_ROOT/case/stubtmpdir" ] || fail "installer failure case left the temp directory behind"
+[ "$failures" -eq "$before" ] && ok "installer failure: exit 1 preserved, temp directory removed (#1821)"
+
 if [ "$failures" -gt 0 ]; then
   echo "$failures failure(s)" >&2
   exit 1

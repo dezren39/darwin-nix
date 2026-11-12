@@ -49,8 +49,30 @@ status=0
 # blocks with a SyntaxError and no patch applied.
 
 PATCH_TARGET_FILE="$CSS_FILE" python3 -c "
-import os, sys
+import os, shutil, sys, tempfile
 path = os.environ['PATCH_TARGET_FILE']
+
+def atomic_write(path, content, kind):
+    fd, temp_path = tempfile.mkstemp(prefix='.patch-vscode-insiders-', dir=os.path.dirname(path))
+    try:
+        with os.fdopen(fd, 'w') as f:
+            fail_for = os.environ.get('PATCH_WRITE_FAIL_FOR')
+            if fail_for == kind:
+                f.write(content[:max(1, len(content) // 2)])
+                f.flush()
+                raise OSError('injected write failure for ' + kind)
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        shutil.copystat(path, temp_path)
+        os.replace(temp_path, path)
+    except BaseException:
+        try:
+            os.unlink(temp_path)
+        except FileNotFoundError:
+            pass
+        raise
+
 with open(path, 'r') as f:
     content = f.read()
 original = content
@@ -109,8 +131,7 @@ else:
     print('  ~ Patch 4: Already applied')
 
 if content != original:
-    with open(path, 'w') as f:
-        f.write(content)
+    atomic_write(path, content, 'css')
 
 print(f'\nDone. {patches_applied} new patch(es) applied.')
 if patches_applied > 0:
@@ -127,8 +148,30 @@ JS_FILE="$APP_DIR/Contents/Resources/app/out/vs/workbench/workbench.desktop.main
 if [ -f "$JS_FILE" ]; then
   echo "Patching VSCode Insiders workbench JS..."
   PATCH_TARGET_FILE="$JS_FILE" python3 -c "
-import os, sys
+import os, shutil, sys, tempfile
 path = os.environ['PATCH_TARGET_FILE']
+
+def atomic_write(path, content, kind):
+    fd, temp_path = tempfile.mkstemp(prefix='.patch-vscode-insiders-', dir=os.path.dirname(path))
+    try:
+        with os.fdopen(fd, 'w') as f:
+            fail_for = os.environ.get('PATCH_WRITE_FAIL_FOR')
+            if fail_for == kind:
+                f.write(content[:max(1, len(content) // 2)])
+                f.flush()
+                raise OSError('injected write failure for ' + kind)
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        shutil.copystat(path, temp_path)
+        os.replace(temp_path, path)
+    except BaseException:
+        try:
+            os.unlink(temp_path)
+        except FileNotFoundError:
+            pass
+        raise
+
 with open(path, 'r') as f:
     content = f.read()
 original = content
@@ -146,8 +189,7 @@ else:
     sys.exit(1)
 
 if content != original:
-    with open(path, 'w') as f:
-        f.write(content)
+    atomic_write(path, content, 'js')
 " || status=1
 else
   # #931: a missing JS file is Patch 5's target missing in its most

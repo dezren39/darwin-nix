@@ -212,6 +212,30 @@ esac
 [ "$(count_of "$db")" = "6" ] || fail "post-delete case deleted $(count_of "$db") event rows remaining, expected 6 (the 4 eligible rows were deleted before verification)"
 [ "$failures" -eq "$before" ] && ok "many-line integrity_check after the delete dies at exit 1 with the FAILED verdict and the restore guidance"
 
+# --- Failing ps snapshot: --apply refuses, DB byte-identical (#1816). -
+# The guard used to count a failed ps as zero processes, so --apply ran
+# under an unknown writer state. The valid-empty counterpart is the
+# exit-0 stub ps the whole suite above runs under.
+before=$failures
+failbin="$HOME/failbin"; mkdir -p "$failbin"
+printf '#!/bin/sh\necho "ps: simulated snapshot failure" >&2\nexit 1\n' >"$failbin/ps"; chmod +x "$failbin/ps"
+db="$fx/psfail.db"; mk_fixture "$db"
+cp "$db" "$fx/psfail.before"
+out="$(PATH="$failbin:$PATH" bash "$PRUNE" --db "$db" --protect-days 0 --apply -y --no-backup 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] || fail "failing ps: --apply exited 0, expected refusal: $out"
+case "$out" in *"ps snapshot failed"*) ;; *) fail "failing ps: --apply refusal does not name the failed snapshot: $out" ;; esac
+cmp -s "$db" "$fx/psfail.before" || fail "failing ps: --apply mutated the fixture DB"
+[ "$(count_of "$db")" = "10" ] || fail "failing ps: event count $(count_of "$db"), expected 10"
+[ "$failures" -eq "$before" ] && ok "failing ps snapshot: --apply refuses, fixture DB byte-identical"
+
+# --- Failing ps snapshot: dry run reports UNKNOWN, changes nothing. ----
+before=$failures
+out="$(PATH="$failbin:$PATH" bash "$PRUNE" --db "$db" --protect-days 0 2>&1)"; rc=$?
+[ "$rc" -eq 0 ] || fail "failing ps: dry run exited $rc, expected 0: $out"
+case "$out" in *UNKNOWN*) ;; *) fail "failing ps: dry run does not report the unknown guard state: $out" ;; esac
+cmp -s "$db" "$fx/psfail.before" || fail "failing ps: dry run mutated the fixture DB"
+[ "$failures" -eq "$before" ] && ok "failing ps snapshot: dry run reports UNKNOWN and changes nothing"
+
 if [ "$failures" -ne 0 ]; then
   echo "$failures failure(s)" >&2
   exit 1

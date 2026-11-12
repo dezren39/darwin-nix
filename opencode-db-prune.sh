@@ -306,6 +306,12 @@ opencode_pids() {
         print pid
       }
     }'
+  local -a _snap_status=("${PIPESTATUS[@]}")
+  # A failed ps (or awk) means the snapshot is UNKNOWN, not empty
+  # (#1816): propagate the failure so write-mode callers refuse instead
+  # of reading silence as "no writer". PIPESTATUS is read explicitly so
+  # the verdict does not depend on the caller's pipefail setting.
+  [ "${_snap_status[0]}" -eq 0 ] && [ "${_snap_status[1]}" -eq 0 ]
 }
 opencode_list() {
   local pid
@@ -314,15 +320,38 @@ opencode_list() {
   done
 }
 
+# Prints the count of candidate opencode processes, or "unknown" when
+# the process snapshot failed (#1816). A failed or incomplete snapshot
+# must never read as zero: zero is the one answer that licenses writes.
+opencode_running_count() {
+  local pids
+  if ! pids="$(opencode_pids)"; then
+    printf 'unknown\n'
+    return 0
+  fi
+  if [ -z "$pids" ]; then
+    printf '0\n'
+  else
+    printf '%s\n' "$pids" | wc -l | tr -d ' '
+  fi
+}
+
 # Deleting or inserting under a live writer risks tearing an in-flight stream's
 # snapshot sequence, so any write mode refuses while opencode is running.
 check_not_running() {
   local running
-  # pgrep exits 1 when nothing matches, and under `pipefail` a bare assignment
-  # would inherit that and abort the script -- i.e. exactly when opencode IS
-  # stopped, which is the only case in which --apply is allowed to proceed.
-  running="$(opencode_pids | wc -l | tr -d ' ' || true)"
-  running="${running:-0}"
+  # A failed ps snapshot is UNKNOWN, not zero (#1816): write modes
+  # refuse; a dry run reports the unknown state and stays read-only.
+  running="$(opencode_running_count)"
+  if [ "$running" = "unknown" ]; then
+    if [ "$APPLY" -eq 1 ]; then
+      die "could not read the process table (ps snapshot failed) -- refusing to write while the opencode writer state is unknown"
+    fi
+    note "NOTE: could not read the process table (ps snapshot failed) -- whether"
+    note "      opencode is running is UNKNOWN. Dry run is read-only and safe;"
+    note "      --apply would refuse until the process snapshot succeeds."
+    return 0
+  fi
   [ "$running" -gt 0 ] || return 0
 
   # Only a writer holding THIS database matters. Guarding on "any opencode

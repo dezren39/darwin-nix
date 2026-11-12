@@ -527,5 +527,82 @@ run --path "$REG" --quick
 echo "ok: full-scope control run exits 0"
 unset GIT_STUB_MAINT_START_RC
 
+# ─── Bash 3.2 compatibility: no Bash 4-only constructs (#1834) ────
+# git-maintain-repos is invoked directly by the just git-maintain /
+# git-maintain-quick recipes via `#!/usr/bin/env bash`, which on macOS
+# can resolve to the stock Bash 3.2. It used the Bash 4-only mapfile
+# builtin at the discovery and failed-repo dedupe sites, and the
+# lib/common.sh outcome accumulator it sources kept its failures in a
+# Bash 4-only associative array -- all invisible to this suite because
+# it always runs under a modern Nix Bash (the search.sh fix for #1825
+# is the precedent). Two guards pin the contract:
+#   1. a static scan rejects the Bash 4-only constructs in the two
+#      files git-maintain-repos exercises;
+#   2. a runtime harness in the style of search.test.sh masks the
+#      mapfile/readarray builtins through BASH_ENV, so any use fails
+#      with 127, and drives both a discovery run and a two-failed-repo
+#      run (the dedupe/sort path) under the mask.
+BASH32_GUARD="$TMP_ROOT/no-bash4.bash"
+cat > "$BASH32_GUARD" <<'EOF'
+mapfile() {
+  echo "mapfile is unavailable in this compatibility harness" >&2
+  return 127
+}
+readarray() {
+  echo "readarray is unavailable in this compatibility harness" >&2
+  return 127
+}
+EOF
+
+if grep -nE '(^|[[:space:];])mapfile[[:space:]]|(^|[[:space:];])readarray[[:space:]]|declare +-[a-zA-Z]*[Ag]([[:space:]]|$)' "$SCRIPT" "$SELF_DIR/lib/common.sh" > "$TMP_ROOT/bash4-scan.out"; then
+  fail "Bash 4-only construct(s) in git-maintain-repos / lib/common.sh: $(cat "$TMP_ROOT/bash4-scan.out")"
+else
+  echo "ok: no Bash 4-only constructs in git-maintain-repos or lib/common.sh (#1834)"
+fi
+
+run_bash32() { # run_bash32 <args...> — like run(), under the builtin mask
+  OUT="$(BASH_ENV="$BASH32_GUARD" bash "$SCRIPT" "$@" 2>"$TMP_ROOT/err")"; STATUS=$?
+  ERR="$(cat "$TMP_ROOT/err")"
+}
+
+# Discovery path (the former mapfile at the discovery site): a dry run
+# over the fixture must still find its repo under the mask.
+run_bash32 --dry-run --path "$VALID"
+[ "$STATUS" -eq 0 ] || fail "Bash 3.2 harness dry-run exited $STATUS (stderr: $ERR)"
+case "$OUT" in
+  *"1 repos"*) echo "ok: Bash 3.2 harness dry-run discovers the fixture repo" ;;
+  *) fail "Bash 3.2 harness dry-run did not report 1 repo (got: $OUT)" ;;
+esac
+
+# Failed-repo dedupe path (the former mapfile at the dedupe site): two
+# corrupt repos fail, and the driver must aggregate both exactly once.
+B32ROOT="$TMP_ROOT/bash32-failrepos"
+for r in bad1 bad2; do
+  mkdir -p "$B32ROOT/$r"
+  git init -q "$B32ROOT/$r"
+  git -C "$B32ROOT/$r" config user.email test@example.invalid
+  git -C "$B32ROOT/$r" config user.name test
+  echo x > "$B32ROOT/$r/file"
+  git -C "$B32ROOT/$r" add file
+  git -C "$B32ROOT/$r" commit -qm init
+  b32blob="$(git -C "$B32ROOT/$r" rev-parse HEAD:file)"
+  b32obj="$B32ROOT/$r/.git/objects/${b32blob:0:2}/${b32blob:2}"
+  chmod +w "$b32obj"
+  printf garbage > "$b32obj"
+done
+run_bash32 --no-system --path "$B32ROOT" --deep --no-register
+[ "$STATUS" -ne 0 ] || fail "Bash 3.2 harness run over two corrupt repos exited 0"
+case "$ERR" in
+  *"maintenance failed for 2 of 2 repo(s)"*) echo "ok: Bash 3.2 harness aggregates both failed repos" ;;
+  *) fail "Bash 3.2 harness did not aggregate both failed repos (stderr: $ERR)" ;;
+esac
+for r in bad1 bad2; do
+  if [ "$(printf '%s\n' "$ERR" | grep -c "failed repo: $B32ROOT/$r\$")" -eq 1 ]; then
+    echo "ok: Bash 3.2 harness summary names $r exactly once"
+  else
+    fail "Bash 3.2 harness summary does not name $r exactly once (stderr: $ERR)"
+  fi
+done
+
 [ "$failures" -eq 0 ] || { echo "$failures failure(s)" >&2; exit 1; }
 echo "all git-maintain-repos flag-shaped-value checks passed"

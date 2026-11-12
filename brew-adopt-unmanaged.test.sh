@@ -206,7 +206,18 @@ run
 check "onedrive managed: exit 0 despite newer app" test $rc -eq 0
 check "onedrive managed: nothing to do logged" out_has "already brew-managed via the vendored cask"
 
-# 8. Upstream cask caught up: retirement tripwire logs, exit stays 0.
+# 8. OneDrive is present but neither bundle-version field is readable:
+# fail closed before handing control to brew bundle.
+reset_state
+echo drewry.pope >"$tmp/state/chrome_owner"
+touch "$tmp/state/receipt_google-chrome"
+OD_CFVERSION="" OD_CFSHORT=""
+run
+check "onedrive unreadable: exit 1" test $rc -eq 1
+check "onedrive unreadable: actionable diagnostic" out_has "ERROR: cannot read OneDrive version from"
+check "onedrive unreadable: no bundle handoff" out_has -v "brew bundle will install the vendored pkg"
+
+# 9. Upstream cask caught up: retirement tripwire logs, exit stays 0.
 reset_state
 echo drewry.pope >"$tmp/state/chrome_owner"
 touch "$tmp/state/receipt_google-chrome" "$tmp/state/receipt_dezren39_local_onedrive"
@@ -215,7 +226,7 @@ run
 check "upstream caught up: exit 0" test $rc -eq 0
 check "upstream caught up: retire logged" out_has "retire homebrew-local"
 
-# 9. No apps at all (fresh machine): both skip cleanly.
+# 10. No apps at all (fresh machine): both skip cleanly.
 reset_state
 rm -rf "$tmp/apps/Google Chrome.app" "$tmp/apps/OneDrive.app"
 run

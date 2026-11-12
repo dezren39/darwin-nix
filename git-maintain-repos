@@ -527,7 +527,12 @@ fi
 rm -f "$DISCOVER_ERR"
 repos=()
 if [ -n "$discover_out" ]; then
-  mapfile -t repos < <(printf '%s\n' "$discover_out" | cut -f2)
+  # Read into the array with a Bash 3.2-compatible loop. `mapfile` was
+  # added in Bash 4, while macOS's system `/usr/bin/env bash` is 3.2
+  # (#1834; the search.sh fix for #1825 is the precedent).
+  while IFS= read -r _discovered_repo; do
+    repos+=("$_discovered_repo")
+  done < <(printf '%s\n' "$discover_out" | cut -f2)
 fi
 
 echo "git-maintain-repos: $ROOT — ${#repos[@]} repos, scope=$SCOPE, depth=$DEPTH, jobs=$JOBS, reflog=$REFLOG_EXPIRE"
@@ -587,21 +592,30 @@ if [ "$fanout_rc" -ne 0 ] && ! outcome_has_failures; then
 fi
 maint_failed_repos=()
 unnamed_worker_failure=0
-for _outcome_key in "${!OUTCOME_FAILURES[@]}"; do
-  case "$_outcome_key" in
-    __outcome_unnamed_worker_death__) unnamed_worker_failure=1 ;;
-    registration:*) : ;;
-    *) maint_failed_repos+=("$_outcome_key") ;;
-  esac
-done
+# The count guard keeps the array expansion off the empty path: Bash 3.2
+# treats expanding an empty array under `set -u` as an unbound variable.
+if [ "${#OUTCOME_FAILURE_KEYS[@]}" -gt 0 ]; then
+  for _outcome_key in "${OUTCOME_FAILURE_KEYS[@]}"; do
+    case "$_outcome_key" in
+      __outcome_unnamed_worker_death__) unnamed_worker_failure=1 ;;
+      registration:*) : ;;
+      *) maint_failed_repos+=("$_outcome_key") ;;
+    esac
+  done
+fi
 if [ "${#maint_failed_repos[@]}" -gt 1 ]; then
-  mapfile -t maint_failed_repos < <(printf '%s\n' "${maint_failed_repos[@]}" | sort -u)
+  # Same Bash 3.2-compatible read loop as repo discovery above (#1834).
+  _maint_sorted=()
+  while IFS= read -r _maint_repo; do
+    _maint_sorted+=("$_maint_repo")
+  done < <(printf '%s\n' "${maint_failed_repos[@]}" | sort -u)
+  maint_failed_repos=("${_maint_sorted[@]}")
 fi
 maint_failures=${#maint_failed_repos[@]}
 [ "$unnamed_worker_failure" -eq 0 ] || maint_failures=$((maint_failures + 1))
 rm -rf "$GMR_FAIL_DIR"
 # The fail dir is deleted; stop publishing to it (#1437). Registration
-# below counts its failures in-process (the OUTCOME_FAILURES loop), and
+# below counts its failures in-process (the OUTCOME_FAILURE_KEYS loop), and
 # a still-set OUTCOME_FAIL_DIR would make outcome_fail recreate the
 # deleted dir (lib/common.sh mkdir -p) and publish records nothing
 # reads -- one leaked temp dir per registration-failing run.
@@ -633,9 +647,11 @@ if [ "$REGISTER" = "1" ]; then
   done
   # One distinct registration failure per repo, however many of its steps
   # failed -- the accumulator's item keying supplies the dedupe.
-  for _outcome_key in "${!OUTCOME_FAILURES[@]}"; do
-    case "$_outcome_key" in registration:*) register_failures=$((register_failures + 1)) ;; esac
-  done
+  if [ "${#OUTCOME_FAILURE_KEYS[@]}" -gt 0 ]; then
+    for _outcome_key in "${OUTCOME_FAILURE_KEYS[@]}"; do
+      case "$_outcome_key" in registration:*) register_failures=$((register_failures + 1)) ;; esac
+    done
+  fi
   if [ "$register_failures" -gt 0 ]; then
     echo "git-maintain-repos: registration failed for $register_failures of ${#repos[@]} repo(s)" >&2
   fi

@@ -244,14 +244,21 @@ arg_refuse_in_mode() {
 
 OUTCOME_PROGRAM="${OUTCOME_PROGRAM:-${0##*/}}"
 OUTCOME_FAIL_DIR="${OUTCOME_FAIL_DIR:-}"
-declare -gA OUTCOME_FAILURES=()
+# Distinct failed items are kept in two parallel indexed arrays (keys and
+# their summaries) rather than one associative array: associative arrays
+# are a Bash 4 feature, and consumers such as git-maintain-repos must also
+# run under macOS's stock Bash 3.2 (#1834). First summary per key wins,
+# matching the old associative assignment's dedupe-by-item contract.
+OUTCOME_FAILURE_KEYS=()
+OUTCOME_FAILURE_SUMMARIES=()
 
 # outcome_init [PROGRAM]
 #   Reset this process's accumulator and set the summary/error prefix.
 outcome_init() {
   OUTCOME_PROGRAM="${1:-${0##*/}}"
   export OUTCOME_PROGRAM
-  OUTCOME_FAILURES=()
+  OUTCOME_FAILURE_KEYS=()
+  OUTCOME_FAILURE_SUMMARIES=()
 }
 
 # outcome_fail_files DIR
@@ -265,11 +272,13 @@ outcome_fail_files() {
 }
 
 _outcome_remember() {
-  local _outcome_key="$1" _outcome_summary="$2"
+  local _outcome_key="$1" _outcome_summary="$2" _outcome_i
   [ -n "$_outcome_key" ] || _outcome_key="__outcome_missing_item__"
-  if [ -z "${OUTCOME_FAILURES["$_outcome_key"]+present}" ]; then
-    OUTCOME_FAILURES["$_outcome_key"]="$_outcome_summary"
-  fi
+  for ((_outcome_i = 0; _outcome_i < ${#OUTCOME_FAILURE_KEYS[@]}; _outcome_i++)); do
+    [ "${OUTCOME_FAILURE_KEYS[$_outcome_i]}" = "$_outcome_key" ] && return 0
+  done
+  OUTCOME_FAILURE_KEYS+=("$_outcome_key")
+  OUTCOME_FAILURE_SUMMARIES+=("$_outcome_summary")
 }
 
 # outcome_fail ITEM OPERATION TARGET STATUS [DETAIL]
@@ -364,7 +373,7 @@ _outcome_load_failures() {
 #   True when this process or a parallel worker recorded at least one item.
 outcome_has_failures() {
   _outcome_load_failures "${1:-}"
-  [ "${#OUTCOME_FAILURES[@]}" -gt 0 ]
+  [ "${#OUTCOME_FAILURE_KEYS[@]}" -gt 0 ]
 }
 
 # outcome_finish [DIR]
@@ -372,15 +381,11 @@ outcome_has_failures() {
 outcome_finish() {
   local _outcome_dir="${1:-${OUTCOME_FAIL_DIR:-}}"
   local _outcome_key _outcome_count _outcome_summary=""
-  local -a _outcome_items=()
   _outcome_load_failures "$_outcome_dir"
-  _outcome_count=${#OUTCOME_FAILURES[@]}
+  _outcome_count=${#OUTCOME_FAILURE_KEYS[@]}
   [ "$_outcome_count" -gt 0 ] || exit 0
 
-  for _outcome_key in "${!OUTCOME_FAILURES[@]}"; do
-    _outcome_items+=("${OUTCOME_FAILURES[$_outcome_key]}")
-  done
-  for _outcome_key in "${_outcome_items[@]}"; do
+  for _outcome_key in "${OUTCOME_FAILURE_SUMMARIES[@]}"; do
     [ -z "$_outcome_summary" ] || _outcome_summary+="; "
     _outcome_summary+="$_outcome_key"
   done

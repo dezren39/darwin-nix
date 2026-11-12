@@ -270,8 +270,32 @@ if [ "$running" -gt 0 ] && command -v lsof >/dev/null 2>&1; then
   # process" would block work on a scratch --db while an unrelated session
   # is open. lsof is the direct question; without it, the (self-excluded)
   # count above stands as the conservative answer.
-  lsof_pids="$(lsof -t -- "$DB" 2>/dev/null)" && lsof_status=0 || lsof_status=$?
-  if [ "$lsof_status" -ne 0 ]; then
+  # Real lsof semantics (verified against lsof 4.x): a query that finds
+  # no holder exits 1 with empty stdout AND empty stderr -- that is a
+  # successful empty result, not a failure. A failed query prints a
+  # diagnostic to stderr (e.g. "lsof: status error on ...") or exits
+  # with a status above 1; only that shape is UNKNOWN, and a failed
+  # query never authorizes a write (#1824). Same rule as prune.
+  lsof_err_file="$(mktemp "${TMPDIR:-/tmp}/opencode-db-vacuum-lsof.XXXXXX" 2>/dev/null || true)"
+  if [ -n "$lsof_err_file" ]; then
+    lsof_pids="$(lsof -t -- "$DB" 2>"$lsof_err_file")" && lsof_status=0 || lsof_status=$?
+  else
+    lsof_pids="$(lsof -t -- "$DB" 2>/dev/null)" && lsof_status=0 || lsof_status=$?
+  fi
+  holders="$(printf '%s\n' "$lsof_pids" | awk 'NF { n++ } END { print n+0 }')"
+  if [ "$holders" -gt 0 ]; then
+    lsof_state=holders
+  elif [ -n "$lsof_err_file" ] && [ -s "$lsof_err_file" ]; then
+    lsof_state=unknown
+  elif [ -z "$lsof_err_file" ] && [ "$lsof_status" -ne 0 ]; then
+    lsof_state=unknown
+  elif [ "$lsof_status" -gt 1 ]; then
+    lsof_state=unknown
+  else
+    lsof_state=empty
+  fi
+  [ -n "$lsof_err_file" ] && rm -f "$lsof_err_file"
+  if [ "$lsof_state" = unknown ]; then
     if [ "$DRY_RUN" -eq 0 ]; then
       die "could not check database holders (lsof exited $lsof_status) -- refusing to run while holder state is unknown"
     fi
@@ -279,10 +303,8 @@ if [ "$running" -gt 0 ] && command -v lsof >/dev/null 2>&1; then
     note "         holder state for $DB is UNKNOWN. Measurement below is read-only"
     note "         and safe, but a real run would refuse."
     running=unknown
-  else
-    holders="$(printf '%s\n' "$lsof_pids" | awk 'NF { n++ } END { print n+0 }')"
   fi
-  if [ "$running" = unknown ]; then
+  if [ "$lsof_state" = unknown ]; then
     :
   elif [ "$holders" -eq 0 ]; then
     note "note: $running opencode process(es) running, but none has $DB open"

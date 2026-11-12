@@ -524,7 +524,8 @@ mk_lsof() { # $1 = dir, $2 = behavior: fail | empty | holder
   mkdir -p "$1"
   case "$2" in
     fail) printf '#!/bin/sh\necho "lsof: simulated failure" >&2\nexit 1\n' >"$1/lsof" ;;
-    empty) printf '#!/bin/sh\nexit 0\n' >"$1/lsof" ;;
+    empty) printf '#!/bin/sh\nexit 1\n' >"$1/lsof" ;;
+    badstatus) printf '#!/bin/sh\nexit 2\n' >"$1/lsof" ;;
     holder) printf '#!/bin/sh\nprintf "424242\\n"\nexit 0\n' >"$1/lsof" ;;
   esac
   chmod +x "$1/lsof"
@@ -551,7 +552,17 @@ out="$(PATH="$shimdir:$processbin:$PATH" bash "$VACUUM" --db "$db" -y 2>&1)"; rc
 [ "$rc" -eq 0 ] || fail "successful empty lsof: real run exited $rc: $out"
 counts_ok "$db" || fail "successful empty lsof: normal vacuum did not preserve row counts"
 [ -f "${db}.old" ] || fail "successful empty lsof: expected normal vacuum backup"
-ok_if_clean "$before" "successful empty lsof preserves behavior: vacuum completes and keeps backup"
+ok_if_clean "$before" "real lsof no-match (silent exit 1, no holders) preserves behavior: vacuum completes and keeps backup"
+
+before=$failures
+db="$fx/lsofbad.db"; mk_fixture "$db"; cp "$db" "$fx/lsofbad.before"
+shimdir="$HOME/lsof-badstatus"; mk_lsof "$shimdir" badstatus
+out="$(PATH="$shimdir:$processbin:$PATH" bash "$VACUUM" --db "$db" -y 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] || fail "silent exit-2 lsof: real run exited 0, expected refusal: $out"
+case "$out" in *"holder state is unknown"*) ;; *) fail "silent exit-2 lsof: real run did not report unknown holder state: $out" ;; esac
+cmp -s "$db" "$fx/lsofbad.before" || fail "silent exit-2 lsof: real run mutated fixture DB"
+[ ! -e "${db}.old" ] || fail "silent exit-2 lsof: real run created .old"
+ok_if_clean "$before" "silent exit-2 lsof is UNKNOWN: real vacuum refuses; DB unchanged"
 
 before=$failures
 db="$fx/lsofholder.db"; mk_fixture "$db"; cp "$db" "$fx/lsofholder.before"

@@ -360,9 +360,35 @@ check_not_running() {
   # question; if it is unavailable, fall back to the conservative check (the
   # count above, which now excludes this script's own process tree).
   if command -v lsof >/dev/null 2>&1; then
-    local lsof_pids lsof_status
-    lsof_pids="$(lsof -t -- "$DB" 2>/dev/null)" && lsof_status=0 || lsof_status=$?
-    if [ "$lsof_status" -ne 0 ]; then
+    # Real lsof semantics (verified against lsof 4.x): a query that finds
+    # no holder is NOT a silent success -- it exits 1 with empty stdout
+    # AND empty stderr. A failed query is the other shape: it prints a
+    # diagnostic to stderr (e.g. "lsof: status error on ...") or exits
+    # with a status above 1. So: confirmed pids mean holders; a silent
+    # exit 0/1 with no pids is a successful empty result; diagnostics on
+    # stderr or a status above 1 mean the holder state is UNKNOWN and a
+    # failed query never authorizes a write (#1824).
+    local lsof_pids lsof_status lsof_err_file lsof_state
+    lsof_err_file="$(mktemp "${TMPDIR:-/tmp}/opencode-db-prune-lsof.XXXXXX" 2>/dev/null || true)"
+    if [ -n "$lsof_err_file" ]; then
+      lsof_pids="$(lsof -t -- "$DB" 2>"$lsof_err_file")" && lsof_status=0 || lsof_status=$?
+    else
+      lsof_pids="$(lsof -t -- "$DB" 2>/dev/null)" && lsof_status=0 || lsof_status=$?
+    fi
+    holders="$(printf '%s\n' "$lsof_pids" | awk 'NF { n++ } END { print n+0 }')"
+    if [ "$holders" -gt 0 ]; then
+      lsof_state=holders
+    elif [ -n "$lsof_err_file" ] && [ -s "$lsof_err_file" ]; then
+      lsof_state=unknown
+    elif [ -z "$lsof_err_file" ] && [ "$lsof_status" -ne 0 ]; then
+      lsof_state=unknown
+    elif [ "$lsof_status" -gt 1 ]; then
+      lsof_state=unknown
+    else
+      lsof_state=empty
+    fi
+    [ -n "$lsof_err_file" ] && rm -f "$lsof_err_file"
+    if [ "$lsof_state" = unknown ]; then
       if [ "$APPLY" -eq 1 ]; then
         die "could not check database holders (lsof exited $lsof_status) -- refusing to write while holder state is unknown"
       fi
@@ -371,7 +397,6 @@ check_not_running() {
       note "      --apply would refuse until the holder check succeeds."
       return 0
     fi
-    holders="$(printf '%s\n' "$lsof_pids" | awk 'NF { n++ } END { print n+0 }')"
     if [ "$holders" -eq 0 ]; then
       [ "$APPLY" -eq 1 ] && note "note: $running opencode process(es) running, but none has $DB open"
       return 0

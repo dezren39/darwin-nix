@@ -484,6 +484,30 @@ else
   echo "skip: cross-filesystem --into case (no second filesystem available)"
 fi
 
+# --- Failing ps snapshot: real run refuses, DB byte-identical (#1816). -
+# The guard used to count a failed ps as zero processes, so a real run
+# swapped the DB under an unknown writer state. The valid-empty
+# counterpart is the exit-0 stub ps the whole suite above runs under.
+before=$failures
+failbin="$HOME/failbin"; mkdir -p "$failbin"
+printf '#!/bin/sh\necho "ps: simulated snapshot failure" >&2\nexit 1\n' >"$failbin/ps"; chmod +x "$failbin/ps"
+db="$fx/psfail.db"; mk_fixture "$db"
+cp "$db" "$fx/psfail.before"
+out="$(PATH="$failbin:$PATH" bash "$VACUUM" --db "$db" -y 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] || fail "failing ps: real run exited 0, expected refusal: $out"
+case "$out" in *"ps snapshot failed"*) ;; *) fail "failing ps: refusal does not name the failed snapshot: $out" ;; esac
+cmp -s "$db" "$fx/psfail.before" || fail "failing ps: real run mutated the fixture DB"
+[ ! -e "${db}.old" ] || fail "failing ps: real run left a .old backup behind"
+ok_if_clean "$before" "failing ps snapshot: real vacuum refuses, fixture DB byte-identical, no .old"
+
+# --- Failing ps snapshot: dry run reports UNKNOWN, changes nothing. ----
+before=$failures
+out="$(PATH="$failbin:$PATH" bash "$VACUUM" --db "$db" --dry-run 2>&1)"; rc=$?
+[ "$rc" -eq 0 ] || fail "failing ps: dry run exited $rc, expected 0: $out"
+case "$out" in *UNKNOWN*) ;; *) fail "failing ps: dry run does not report the unknown guard state: $out" ;; esac
+cmp -s "$db" "$fx/psfail.before" || fail "failing ps: dry run mutated the fixture DB"
+ok_if_clean "$before" "failing ps snapshot: dry run reports UNKNOWN and changes nothing"
+
 if [ "$failures" -ne 0 ]; then
   echo "$failures failure(s)" >&2
   exit 1

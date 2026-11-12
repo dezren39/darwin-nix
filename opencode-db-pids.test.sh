@@ -75,6 +75,27 @@ for script in "${scripts[@]}"; do
     printf 'FAIL %s\n  want pids:\n%s\n  got pids:\n%s\n' "$script" "$want" "$got" >&2
     failures=$((failures + 1))
   fi
+
+  # #1816: a failed ps snapshot is UNKNOWN, never an empty list --
+  # opencode_pids itself must fail so write-mode callers can refuse.
+  ps() { return 1; }
+  if opencode_pids >/dev/null 2>&1; then
+    printf 'FAIL %s: failing ps snapshot read as a successful empty snapshot\n' "$script" >&2
+    failures=$((failures + 1))
+  else
+    printf 'PASS %s: failing ps snapshot propagates as an opencode_pids failure (unknown, not zero)\n' "$script"
+  fi
+  # A successful empty snapshot stays valid: ps exits 0, prints nothing,
+  # and opencode_pids succeeds with no pids.
+  ps() { return 0; }
+  got_empty="$(opencode_pids 2>/dev/null)"; rc_empty=$?
+  if [ "$rc_empty" -eq 0 ] && [ -z "$got_empty" ]; then
+    printf 'PASS %s: successful empty ps snapshot is a valid empty result\n' "$script"
+  else
+    printf 'FAIL %s: successful empty ps snapshot gave rc=%s output=%s\n' "$script" "$rc_empty" "$got_empty" >&2
+    failures=$((failures + 1))
+  fi
+  unset -f ps
 done
 
 [ "$failures" -eq 0 ]

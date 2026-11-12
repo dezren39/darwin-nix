@@ -53,10 +53,20 @@ host="${1:-$(scutil --get LocalHostName)}"
 url="https://install.determinate.systems/determinate-pkg/stable/Universal"
 
 if [[ ! -x /nix/var/nix/profiles/default/bin/nix ]]; then
-  pkg="$(mktemp -d)/determinate-nix.pkg"
+  tmpdir="$(mktemp -d)"
+  pkg="$tmpdir/determinate-nix.pkg"
+  # Remove the temp directory on every exit path (#1821): without this,
+  # a failed curl or installer left the package behind in ${TMPDIR},
+  # and even success left the empty directory (only the pkg was rm'd).
+  # The EXIT trap covers the failure paths and preserves the failing
+  # command's exit status; the explicit rm + trap clear covers success,
+  # because the script later execs ./s and a trap does not run across
+  # exec. Only the directory this invocation created is ever removed.
+  trap 'rm -rf "$tmpdir"' EXIT
   curl --fail --location --silent --show-error --output "$pkg" "$url"
   sudo installer -pkg "$pkg" -target /
-  rm -f "$pkg"
+  rm -rf "$tmpdir"
+  trap - EXIT
 else
   echo "Nix is already installed; skipping the pkg"
 fi

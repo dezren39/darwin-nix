@@ -57,6 +57,17 @@ mkdir -p "$BIN" "$HOME_DIR/Applications" "$APPS/Foo.app" "$APPS/Bar.app" "$HOME_
 LOG="$TMP_ROOT/brew.log"
 : > "$LOG"
 
+# Equivalent compatibility harness for stock macOS Bash 3.2: mask Bash 4+'s
+# mapfile builtin so any use fails immediately. The script must work without
+# relying on that builtin for both non-empty and empty cask lists.
+MAPFILE_GUARD="$TMP_ROOT/no-mapfile.bash"
+cat > "$MAPFILE_GUARD" <<'EOF'
+mapfile() {
+  echo "mapfile is unavailable in this compatibility harness" >&2
+  return 127
+}
+EOF
+
 cat > "$BIN/brew" <<'EOF'
 #!/bin/sh
 # brew stub: modes via STUB_BREW_MODE (working|all-managed|empty|failing);
@@ -86,10 +97,10 @@ run_search() { # run_search <mode|missing> — sets RC; out/err under $TMP_ROOT
   : > "$LOG"
   if [ "$mode" = "missing" ]; then
     # no brew stub, and neither test environment (laptop, nix sandbox) has a real brew on PATH
-    HOME="$HOME_DIR" SEARCH_APPLICATIONS_DIR="$APPS" STUB_BREW_LOG="$LOG" \
+    HOME="$HOME_DIR" BASH_ENV="$MAPFILE_GUARD" SEARCH_APPLICATIONS_DIR="$APPS" STUB_BREW_LOG="$LOG" \
       bash "$SCRIPT" > "$TMP_ROOT/out" 2> "$TMP_ROOT/err"
   else
-    HOME="$HOME_DIR" SEARCH_APPLICATIONS_DIR="$APPS" STUB_BREW_LOG="$LOG" \
+    HOME="$HOME_DIR" BASH_ENV="$MAPFILE_GUARD" SEARCH_APPLICATIONS_DIR="$APPS" STUB_BREW_LOG="$LOG" \
       STUB_BREW_MODE="$mode" PATH="$BIN:$PATH" \
       bash "$SCRIPT" > "$TMP_ROOT/out" 2> "$TMP_ROOT/err"
   fi

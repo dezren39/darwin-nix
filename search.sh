@@ -44,8 +44,12 @@ fi
 BREW_APPS=()
 BREW_NAMES=()
 if [[ -n "$BREW_LIST" ]]; then
-    mapfile -t BREW_APPS <<< "$(printf '%s' "$BREW_LIST" | tr '[:upper:]' '[:lower:]')"
-    mapfile -t BREW_NAMES <<< "$(printf '%s' "$BREW_LIST" | tr '[:upper:]' '[:lower:]' | tr ' .' '-')"
+    # Read into arrays with Bash 3.2-compatible loops. `mapfile` was added
+    # in Bash 4, while macOS's system `/usr/bin/env bash` is still 3.2.
+    while IFS= read -r app; do
+        BREW_APPS+=("$app")
+        BREW_NAMES+=("$(printf '%s' "$app" | tr ' .' '-')")
+    done < <(printf '%s\n' "$BREW_LIST" | tr '[:upper:]' '[:lower:]')
 fi
 
 check_if_brew_installed() {

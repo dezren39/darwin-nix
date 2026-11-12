@@ -175,6 +175,8 @@ in
       # mcp-remote and chrome-devtools-mcp, which are only on npm (pinned by
       # pkgs/npm-mcp-servers/package-lock.json).
       inputs.self.packages.${system}.npm-mcp-servers
+      # Vertex's APIM proxy for Claude Code, built from the pinned source input.
+      inputs.self.packages.${system}.cai-claude-apim-proxy
       # AWS credentials for the `aws` MCP server (mcp-proxy-for-aws signs with
       # the default profile): `aws configure sso`, then `aws sso login`.
       awscli2

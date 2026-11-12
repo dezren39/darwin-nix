@@ -937,6 +937,11 @@ lib.recursiveUpdate {
     GOPATH = "/Users/drewry.pope/go";
     GOBIN = "/Users/drewry.pope/go/bin";
     OPENCODE_DB = "/Users/drewry.pope/.local/share/opencode/opencode.db";
+    # Claude Code through the APIM proxy, for GUI-launched apps; see the
+    # matching homeUser.nix sessionVariables. `cai-claude-apim-proxy debug`
+    # checks ANTHROPIC_BASE_URL here ("launchd env").
+    ANTHROPIC_BASE_URL = "http://127.0.0.1:8787";
+    ANTHROPIC_API_KEY = "placeholder-replaced-by-proxy";
     # Makes any OpenChamber desktop app a client of the openchamber agent's
     # server (launchd.user.agents.openchamber) instead of starting a server
     # and OpenCode of its own: one server, one OpenCode, one database, and the
@@ -946,6 +951,30 @@ lib.recursiveUpdate {
   };
 
   launchd.user.agents = {
+    # The Vertex APIM proxy Claude Code talks to (127.0.0.1:8787). Replaces the
+    # plist `cai-claude-apim-proxy install-service` writes, which hardcodes the
+    # package's store path (dangling after a proxy update and GC) and a PATH
+    # without /run/current-system/sw/bin, so the proxy could not find `az`
+    # ("token_refresh_failed: spawn az ENOENT"). Declared here, the program
+    # path follows every rebuild. Do not also run install-service: both would
+    # bind :8787. Config and key are the proxy's own, in
+    # ~/.config/cai-claude-apim-proxy (written by `setup`, never by Nix).
+    cai-claude-apim-proxy = {
+      serviceConfig = {
+        ProgramArguments = [
+          "${inputs.self.packages.${system}.cai-claude-apim-proxy}/bin/cai-claude-apim-proxy"
+          "run"
+        ];
+        EnvironmentVariables = {
+          HOME = "/Users/drewry.pope";
+          PATH = "/run/current-system/sw/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+        };
+        KeepAlive = true;
+        RunAtLoad = true;
+        StandardOutPath = "/Users/drewry.pope/Library/Logs/cai-claude-apim-proxy.log";
+        StandardErrorPath = "/Users/drewry.pope/Library/Logs/cai-claude-apim-proxy.err.log";
+      };
+    };
     colima = {
       path = [ pkgs.colima ];
       script = ''

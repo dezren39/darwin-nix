@@ -171,6 +171,14 @@ lib.recursiveUpdate {
       # configuration.nix. The opencode wrapper forces it regardless.
       OPENCODE_DB = "$HOME/.local/share/opencode/opencode.db";
 
+      # Claude Code through the Vertex APIM proxy (launchd.user.agents in
+      # configuration.nix). `cai-claude-apim-proxy setup` would append these to
+      # ~/.zshrc, which home-manager owns read-only, so they live here. The API
+      # key is the proxy's literal placeholder, not a secret: the proxy swaps in
+      # the real key from ~/.config/cai-claude-apim-proxy/key.<env>.
+      ANTHROPIC_BASE_URL = "http://127.0.0.1:8787";
+      ANTHROPIC_API_KEY = "placeholder-replaced-by-proxy";
+
       # Go: user-local install directory
       GOPATH = "$HOME/go";
       GOBIN = "$HOME/go/bin";

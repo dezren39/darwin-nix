@@ -166,6 +166,13 @@ rec {
       url = "github:inteliwear/sidepulse/main";
       flake = false;
     };
+    # Vertex's APIM proxy for Claude Code (internal repo). Source-only and pinned
+    # by flake.lock; `nix flake update` moves it to the newest main commit, and
+    # pkgs/cai-claude-apim-proxy builds it from the lockfile.
+    cai-claude-apim-proxy-src = {
+      url = "github:vertexinc/cai-claude-apim-proxy/main";
+      flake = false;
+    };
     # nixpkgs-helium = {
     #   # https://github.com/NixOS/nixpkgs/pull/498572
     #   url = "github:Nytelife26/nixpkgs/helium/init";
@@ -424,6 +431,9 @@ rec {
         twg-cli = pkgs.callPackage ./pkgs/twg-cli/package.nix { };
         # mcp-remote and chrome-devtools-mcp, which mcpx.config.nix runs.
         npm-mcp-servers = pkgs.callPackage ./pkgs/npm-mcp-servers { };
+        cai-claude-apim-proxy = pkgs.callPackage ./pkgs/cai-claude-apim-proxy {
+          src = inputs.cai-claude-apim-proxy-src;
+        };
         opencode-share = import ./pkgs/opencode-share { inherit pkgs; };
         symlinker = import ./pkgs/symlinker {
           inherit pkgs;

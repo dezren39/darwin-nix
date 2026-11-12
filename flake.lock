@@ -33,6 +33,23 @@
         "type": "github"
       }
     },
+    "cai-claude-apim-proxy-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1792667960,
+        "narHash": "sha256-nclbaXGu1tccRpUUeqk4tFaTvHtPN+98Y63cSxLdszo=",
+        "owner": "vertexinc",
+        "repo": "cai-claude-apim-proxy",
+        "rev": "4b88afe4dc7fc4d4f0f5603e86d8af0617406fdf",
+        "type": "github"
+      },
+      "original": {
+        "owner": "vertexinc",
+        "ref": "main",
+        "repo": "cai-claude-apim-proxy",
+        "type": "github"
+      }
+    },
     "cl-nix-lite": {
       "inputs": {
         "flake-parts": [
@@ -826,6 +843,7 @@
       "inputs": {
         "bdwgc": "bdwgc",
         "brew-src": "brew-src",
+        "cai-claude-apim-proxy-src": "cai-claude-apim-proxy-src",
         "cl-nix-lite": "cl-nix-lite",
         "darwin": "darwin",
         "determinate": "determinate",

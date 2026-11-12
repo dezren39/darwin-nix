@@ -360,8 +360,18 @@ check_not_running() {
   # question; if it is unavailable, fall back to the conservative check (the
   # count above, which now excludes this script's own process tree).
   if command -v lsof >/dev/null 2>&1; then
-    holders="$(lsof -t -- "$DB" 2>/dev/null | wc -l | tr -d ' ' || true)"
-    holders="${holders:-0}"
+    local lsof_pids lsof_status
+    lsof_pids="$(lsof -t -- "$DB" 2>/dev/null)" && lsof_status=0 || lsof_status=$?
+    if [ "$lsof_status" -ne 0 ]; then
+      if [ "$APPLY" -eq 1 ]; then
+        die "could not check database holders (lsof exited $lsof_status) -- refusing to write while holder state is unknown"
+      fi
+      note "NOTE: could not check database holders (lsof exited $lsof_status) --"
+      note "      holder state for $DB is UNKNOWN. Dry run is read-only and safe;"
+      note "      --apply would refuse until the holder check succeeds."
+      return 0
+    fi
+    holders="$(printf '%s\n' "$lsof_pids" | awk 'NF { n++ } END { print n+0 }')"
     if [ "$holders" -eq 0 ]; then
       [ "$APPLY" -eq 1 ] && note "note: $running opencode process(es) running, but none has $DB open"
       return 0

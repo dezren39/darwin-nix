@@ -270,16 +270,28 @@ if [ "$running" -gt 0 ] && command -v lsof >/dev/null 2>&1; then
   # process" would block work on a scratch --db while an unrelated session
   # is open. lsof is the direct question; without it, the (self-excluded)
   # count above stands as the conservative answer.
-  holders="$(lsof -t -- "$DB" 2>/dev/null | wc -l | tr -d ' ' || true)"
-  holders="${holders:-0}"
-  if [ "$holders" -eq 0 ]; then
+  lsof_pids="$(lsof -t -- "$DB" 2>/dev/null)" && lsof_status=0 || lsof_status=$?
+  if [ "$lsof_status" -ne 0 ]; then
+    if [ "$DRY_RUN" -eq 0 ]; then
+      die "could not check database holders (lsof exited $lsof_status) -- refusing to run while holder state is unknown"
+    fi
+    note "WARNING: could not check database holders (lsof exited $lsof_status) --"
+    note "         holder state for $DB is UNKNOWN. Measurement below is read-only"
+    note "         and safe, but a real run would refuse."
+    running=unknown
+  else
+    holders="$(printf '%s\n' "$lsof_pids" | awk 'NF { n++ } END { print n+0 }')"
+  fi
+  if [ "$running" = unknown ]; then
+    :
+  elif [ "$holders" -eq 0 ]; then
     note "note: $running opencode process(es) running, but none has $DB open"
     running=0
   else
     running="$holders"
   fi
 fi
-if [ "$running" -gt 0 ]; then
+if [ "$running" != unknown ] && [ "$running" -gt 0 ]; then
   printf '\n'
   opencode_list | head -20 >&2 || true
   printf '\n' >&2

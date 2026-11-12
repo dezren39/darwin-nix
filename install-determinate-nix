@@ -1,0 +1,87 @@
+#!/usr/bin/env zsh
+# ./install-determinate-nix [HOSTNAME] -- install Determinate Nix from the
+# official universal pkg, then adopt this Mac's hostname for the flake.
+#
+# HOSTNAME defaults to the current `scutil --get LocalHostName`; it is also
+# set as HostName and ComputerName so darwin-rebuild finds the flake host.
+# It also removes the comment-only /etc/nix/nix.custom.conf the installer
+# writes (nix-darwin refuses to activate over it) and runs ./adopt to add the
+# host to the flake, then runs ./s to switch (which installs the macFUSE cask
+# bindfs-mac needs, retrying activation once on a fresh Mac).
+set -eu
+
+# Parse-time argument validation (#1804) — extracted verbatim by
+# install-determinate-nix.test.sh and run under zsh with a stubbed
+# scutil. Everything in this segment runs before any subprocess,
+# network, filesystem, or privileged operation: this script can
+# install Nix, rewrite all three hostname keys, delete
+# /etc/nix/nix.custom.conf, adopt the host, and switch the system,
+# so a typoed extra argument (e.g. a stray --help) must stop it
+# here instead of being silently ignored while $1 is used.
+install_usage() {
+  echo "usage: install-determinate-nix [HOSTNAME]"
+}
+case "${1:-}" in
+  -h|--help)
+    if (( $# > 1 )); then
+      echo "install-determinate-nix: unexpected argument: $2" >&2
+      install_usage >&2
+      exit 2
+    fi
+    install_usage
+    echo "Install Determinate Nix from the official universal pkg, then adopt"
+    echo "HOSTNAME (default: the current scutil LocalHostName) for this flake:"
+    echo "it is also set as HostName and ComputerName."
+    exit 0
+    ;;
+esac
+if (( $# > 1 )); then
+  echo "install-determinate-nix: unexpected argument: $2" >&2
+  install_usage >&2
+  exit 2
+fi
+case "${1:-}" in
+  -*)
+    echo "install-determinate-nix: unknown option: $1" >&2
+    install_usage >&2
+    exit 2
+    ;;
+esac
+host="${1:-$(scutil --get LocalHostName)}"
+# End of parse-time validation (#1804) — everything below has side effects.
+
+url="https://install.determinate.systems/determinate-pkg/stable/Universal"
+
+if [[ ! -x /nix/var/nix/profiles/default/bin/nix ]]; then
+  tmpdir="$(mktemp -d)"
+  pkg="$tmpdir/determinate-nix.pkg"
+  # Remove the temp directory on every exit path (#1821): without this,
+  # a failed curl or installer left the package behind in ${TMPDIR},
+  # and even success left the empty directory (only the pkg was rm'd).
+  # The EXIT trap covers the failure paths and preserves the failing
+  # command's exit status; the explicit rm + trap clear covers success,
+  # because the script later execs ./s and a trap does not run across
+  # exec. Only the directory this invocation created is ever removed.
+  trap 'rm -rf "$tmpdir"' EXIT
+  curl --fail --location --silent --show-error --output "$pkg" "$url"
+  sudo installer -pkg "$pkg" -target /
+  rm -rf "$tmpdir"
+  trap - EXIT
+else
+  echo "Nix is already installed; skipping the pkg"
+fi
+
+for key in HostName LocalHostName ComputerName; do
+  sudo scutil --set "$key" "$host"
+done
+
+conf=/etc/nix/nix.custom.conf
+if [[ -f $conf && ! -L $conf ]] && ! grep -qvE '^[[:space:]]*(#.*)?$' "$conf"; then
+  echo "removing comment-only $conf so activation can manage it"
+  sudo rm -f "$conf"
+fi
+
+"${0:A:h}/adopt" --host "$host"
+echo "installed, hostname $host adopted, stub config cleared; running ./s"
+cd "${0:A:h}"
+exec ./s

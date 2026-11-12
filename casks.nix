@@ -39,6 +39,17 @@ _: {
     # "gitkraken"
     # "gitkraken-cli"
     "github@beta"
+    # "google-chrome" is brew-managed again (#1791): the bundle on this
+    # machine arrived root-owned (delivered outside brew), which killed
+    # every activation's brew bundle — `chgrp: /Applications/Google
+    # Chrome.app/...: Operation not permitted` on every file of the
+    # existing bundle (cask 157.0.8103.51 over installed 157.0.8103.40).
+    # brew-adopt-unmanaged.sh (order-600 activation text, before the bundle)
+    # chowns the bundle to the user and adopts it: for auto_updates
+    # casks `brew install --cask --adopt` writes only the Caskroom
+    # receipt, bundle untouched. The profile was never at risk — it
+    # lives in ~/Library/Application Support/Google/Chrome, not in the
+    # bundle — and Keystone keeps the app itself current either way.
     "google-chrome"
     "hammerspoon"
     "handbrake-app"
@@ -69,10 +80,20 @@ _: {
     # "nextcloud"
     # "ngrok"
     "notion"
-    "onedrive"
+    # Vendored cask (#1791): upstream homebrew-cask tracks Microsoft's
+    # Deferred ring (26.189.0928.0009) while this machine's OneDrive —
+    # installed outside brew — self-updates on the Production ring
+    # (26.198.1011.0006), so with no brew receipt the upstream pkg
+    # refused the downgrade on every activation. homebrew-local/
+    # Casks/onedrive.rb (tap dezren39/homebrew-local, wired in
+    # configuration.nix) pins the installed build: the same-version
+    # install writes brew's receipt and brew manages OneDrive from
+    # then on; brew-adopt-unmanaged.sh guards the pin at activation.
+    # Retire the vendored cask once upstream reaches that version.
+    "dezren39/local/onedrive"
     "onyx" # system maintenance, cache cleaning, Spotlight reindexing
     # "onlyoffice"
-    # openchamber: built from developing-today/openchamber instead (openchamber.nix)
+    # openchamber: built from developing-today-forks/openchamber instead (openchamber.nix)
     "postico"
     "raycast"
     "rectangle"

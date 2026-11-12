@@ -78,9 +78,28 @@
 
 set -euo pipefail
 
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Sourced up front because the argument parser below uses
+# lib/common.sh's guard helpers (arg_die and friends) -- design #1145
+# phase 2 (#1147), the clean.sh SELF_DIR precedent. die() below stays
+# for runtime failures (exit 1); parse errors go through the shared
+# helpers (exit 2, usage on stderr).
+# shellcheck source=lib/common.sh
+. "$SELF_DIR/lib/common.sh"
+ARG_PROGRAM="opencode-db-prune"
+
 DB_DEFAULT="${HOME}/.local/share/opencode/opencode.db"
 DB="$DB_DEFAULT"
+DB_SET=0
 PROTECT_DAYS=30
+PROTECT_DAYS_SET=0
+BACKUP_SET=0
+NO_BACKUP_SET=0
+ARCHIVE_SET=0
+RESTORE_SESSION_SET=0
+FROM_SET=0
+BATCH_SET=0
 PROTECT_ROOTS=0
 APPLY=0
 BACKUP=""
@@ -102,6 +121,10 @@ ARCHIVE_ESCAPE_FACTOR=1.10
 ARCHIVE_ENVELOPE_BYTES=110
 
 die() { printf 'opencode-db-prune: %s\n' "$*" >&2; exit 1; }
+# Single-quote a value so it can be pasted back into a shell command line
+# verbatim (embedded single quotes become '\'' ). Used for the suggested
+# commands printed by the dry-run footers (#900).
+shell_quote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
 note() { printf '  %s\n' "$*"; }
 step() { printf '\n==> %s\n' "$*"; }
 gb() { awk -v b="$1" 'BEGIN{ printf "%.2f GB", b/1073741824 }'; }
@@ -187,27 +210,40 @@ Net, not gross:
 EOF
 }
 
+# Value-taking options reject an empty or flag-shaped value (#941, the
+# #930 pattern): "--db --apply" must die naming --db, not swallow --apply
+# as the database path.
+# They also reject a repeat (#1112, the adopt #1103 pattern): a repeated
+# --db used to silently discard the first path, redirecting this
+# destructive operation to a different database with no error. --backup
+# combined with --no-backup (either order) is likewise rejected: it used
+# to silently produce no backup at all, ignoring the explicit --backup.
 while [ $# -gt 0 ]; do
   case "$1" in
-    --db) DB="${2:?--db needs a path}"; shift 2 ;;
-    --protect-days) PROTECT_DAYS="${2:?--protect-days needs a number}"; shift 2 ;;
+    --db) arg_require_value "$1" "${2:-}"; arg_once "$1" DB_SET; DB="$2"; shift 2 ;;
+    --protect-days) arg_require_value "$1" "${2:-}"; arg_once "$1" PROTECT_DAYS_SET; PROTECT_DAYS="$2"; PROTECT_DAYS_SET=1; shift 2 ;;
     --protect-roots) PROTECT_ROOTS=1; shift ;;
     --apply) APPLY=1; shift ;;
-    --backup) BACKUP="${2:?--backup needs a path}"; shift 2 ;;
-    --no-backup) DO_BACKUP=0; shift ;;
-    --archive) ARCHIVE="${2:?--archive needs a path}"; shift 2 ;;
-    --restore-session) RESTORE_SESSION="${2:?--restore-session needs a session id}"; shift 2 ;;
-    --from) FROM="${2:?--from needs a path}"; shift 2 ;;
-    --batch) BATCH="${2:?--batch needs a number}"; shift 2 ;;
+    --backup) arg_require_value "$1" "${2:-}"; arg_once "$1" BACKUP_SET; arg_conflict --backup --no-backup "$NO_BACKUP_SET"; BACKUP="$2"; BACKUP_SET=1; shift 2 ;;
+    --no-backup) arg_conflict --backup --no-backup "$BACKUP_SET"; DO_BACKUP=0; NO_BACKUP_SET=1; shift ;;
+    --archive) arg_require_value "$1" "${2:-}"; arg_once "$1" ARCHIVE_SET; ARCHIVE="$2"; ARCHIVE_SET=1; shift 2 ;;
+    --restore-session) arg_require_value "$1" "${2:-}"; arg_once "$1" RESTORE_SESSION_SET; RESTORE_SESSION="$2"; RESTORE_SESSION_SET=1; shift 2 ;;
+    --from) arg_require_value "$1" "${2:-}"; arg_once "$1" FROM_SET; FROM="$2"; FROM_SET=1; shift 2 ;;
+    --batch) arg_require_value "$1" "${2:-}"; arg_once "$1" BATCH_SET; BATCH="$2"; BATCH_SET=1; shift 2 ;;
     -y|--yes) ASSUME_YES=1; shift ;;
     -h|--help) usage; exit 0 ;;
-    *) die "unknown option: $1 (try --help)" ;;
+    *) arg_die "unknown option: $1 (try --help)" ;;
   esac
 done
 
-case "$PROTECT_DAYS" in (*[!0-9]*|'') die "--protect-days must be a non-negative integer" ;; esac
-case "$BATCH" in (*[!0-9]*|'') die "--batch must be a positive integer" ;; esac
-[ "$BATCH" -gt 0 ] || die "--batch must be > 0"
+# Numeric values are judged whole, at parse time, with the shared
+# arg_decimal helper (lib/common.sh), like the discovery family
+# (#1147): strict plain decimal, INT_MAX backstop judged by digit
+# count first (#867's hand copies of this block lived here), and the
+# judged (leading-zero-stripped) form is the used form, so a value
+# like 08 can never be read as octal downstream (#881).
+arg_decimal PROTECT_DAYS --protect-days "$PROTECT_DAYS" non-negative
+arg_decimal BATCH --batch "$BATCH" positive
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -239,7 +275,10 @@ opencode_pids() {
       # starts with spaces and the "(^|/)opencode" test below can never
       # anchor ^ at the real argv[0] -- a process started as a bare
       # "opencode" (the normal PATH invocation) was missed entirely
-      # (#467). Trim the padding so cmd holds the true cmdline.
+      # (#467). Trim the padding so cmd holds the true cmdline. The
+      # match itself requires a boundary after the name ($ or space),
+      # so argv[0]s that merely start with "opencode" (opencode-share,
+      # opencode-server, opencodefoo) are not counted (#828).
       cmd[pid] = $0
       sub(/^ +/, "", cmd[pid])
       order[++n] = pid
@@ -254,7 +293,7 @@ opencode_pids() {
       }
       for (i = 1; i <= n; i++) {
         pid = order[i]
-        if (cmd[pid] !~ "(^|/)opencode") continue
+        if (cmd[pid] !~ "(^|/)opencode($| )") continue
         if (pid in chain) continue
         # Descendants of self (subshells, pipelines) are self too.
         c = pid; isself = 0
@@ -267,6 +306,12 @@ opencode_pids() {
         print pid
       }
     }'
+  local -a _snap_status=("${PIPESTATUS[@]}")
+  # A failed ps (or awk) means the snapshot is UNKNOWN, not empty
+  # (#1816): propagate the failure so write-mode callers refuse instead
+  # of reading silence as "no writer". PIPESTATUS is read explicitly so
+  # the verdict does not depend on the caller's pipefail setting.
+  [ "${_snap_status[0]}" -eq 0 ] && [ "${_snap_status[1]}" -eq 0 ]
 }
 opencode_list() {
   local pid
@@ -275,15 +320,38 @@ opencode_list() {
   done
 }
 
+# Prints the count of candidate opencode processes, or "unknown" when
+# the process snapshot failed (#1816). A failed or incomplete snapshot
+# must never read as zero: zero is the one answer that licenses writes.
+opencode_running_count() {
+  local pids
+  if ! pids="$(opencode_pids)"; then
+    printf 'unknown\n'
+    return 0
+  fi
+  if [ -z "$pids" ]; then
+    printf '0\n'
+  else
+    printf '%s\n' "$pids" | wc -l | tr -d ' '
+  fi
+}
+
 # Deleting or inserting under a live writer risks tearing an in-flight stream's
 # snapshot sequence, so any write mode refuses while opencode is running.
 check_not_running() {
   local running
-  # pgrep exits 1 when nothing matches, and under `pipefail` a bare assignment
-  # would inherit that and abort the script -- i.e. exactly when opencode IS
-  # stopped, which is the only case in which --apply is allowed to proceed.
-  running="$(opencode_pids | wc -l | tr -d ' ' || true)"
-  running="${running:-0}"
+  # A failed ps snapshot is UNKNOWN, not zero (#1816): write modes
+  # refuse; a dry run reports the unknown state and stays read-only.
+  running="$(opencode_running_count)"
+  if [ "$running" = "unknown" ]; then
+    if [ "$APPLY" -eq 1 ]; then
+      die "could not read the process table (ps snapshot failed) -- refusing to write while the opencode writer state is unknown"
+    fi
+    note "NOTE: could not read the process table (ps snapshot failed) -- whether"
+    note "      opencode is running is UNKNOWN. Dry run is read-only and safe;"
+    note "      --apply would refuse until the process snapshot succeeds."
+    return 0
+  fi
   [ "$running" -gt 0 ] || return 0
 
   # Only a writer holding THIS database matters. Guarding on "any opencode
@@ -292,8 +360,43 @@ check_not_running() {
   # question; if it is unavailable, fall back to the conservative check (the
   # count above, which now excludes this script's own process tree).
   if command -v lsof >/dev/null 2>&1; then
-    holders="$(lsof -t -- "$DB" 2>/dev/null | wc -l | tr -d ' ' || true)"
-    holders="${holders:-0}"
+    # Real lsof semantics (verified against lsof 4.x): a query that finds
+    # no holder is NOT a silent success -- it exits 1 with empty stdout
+    # AND empty stderr. A failed query is the other shape: it prints a
+    # diagnostic to stderr (e.g. "lsof: status error on ...") or exits
+    # with a status above 1. So: confirmed pids mean holders; a silent
+    # exit 0/1 with no pids is a successful empty result; diagnostics on
+    # stderr or a status above 1 mean the holder state is UNKNOWN and a
+    # failed query never authorizes a write (#1824).
+    local lsof_pids lsof_status lsof_err_file lsof_state
+    lsof_err_file="$(mktemp "${TMPDIR:-/tmp}/opencode-db-prune-lsof.XXXXXX" 2>/dev/null || true)"
+    if [ -n "$lsof_err_file" ]; then
+      lsof_pids="$(lsof -t -- "$DB" 2>"$lsof_err_file")" && lsof_status=0 || lsof_status=$?
+    else
+      lsof_pids="$(lsof -t -- "$DB" 2>/dev/null)" && lsof_status=0 || lsof_status=$?
+    fi
+    holders="$(printf '%s\n' "$lsof_pids" | awk 'NF { n++ } END { print n+0 }')"
+    if [ "$holders" -gt 0 ]; then
+      lsof_state=holders
+    elif [ -n "$lsof_err_file" ] && [ -s "$lsof_err_file" ]; then
+      lsof_state=unknown
+    elif [ -z "$lsof_err_file" ] && [ "$lsof_status" -ne 0 ]; then
+      lsof_state=unknown
+    elif [ "$lsof_status" -gt 1 ]; then
+      lsof_state=unknown
+    else
+      lsof_state=empty
+    fi
+    [ -n "$lsof_err_file" ] && rm -f "$lsof_err_file"
+    if [ "$lsof_state" = unknown ]; then
+      if [ "$APPLY" -eq 1 ]; then
+        die "could not check database holders (lsof exited $lsof_status) -- refusing to write while holder state is unknown"
+      fi
+      note "NOTE: could not check database holders (lsof exited $lsof_status) --"
+      note "      holder state for $DB is UNKNOWN. Dry run is read-only and safe;"
+      note "      --apply would refuse until the holder check succeeds."
+      return 0
+    fi
     if [ "$holders" -eq 0 ]; then
       [ "$APPLY" -eq 1 ] && note "note: $running opencode process(es) running, but none has $DB open"
       return 0
@@ -347,10 +450,26 @@ source_kind() {
   esac
 }
 
-# SQLite's URI parser only treats % ? and # specially inside the path, and the
-# result still has to survive being pasted into a single-quoted SQL literal.
+# SQLite's URI parser only treats % ? and # specially inside the path.
+# Percent-encode them (% first) so a --db path containing them opens the
+# file actually named (#890). For sqlite3 CLI "file:" arguments, which are
+# URIs, not SQL literals -- a single quote needs no escaping there.
+uri_escape_path() {
+  printf '%s' "$1" | sed -e 's/%/%25/g' -e 's/?/%3f/g' -e 's/#/%23/g'
+}
+
+# The URI-escaped result still has to survive being pasted into a
+# single-quoted SQL literal.
 sql_uri_literal() {
-  printf '%s' "$1" | sed -e 's/%/%25/g' -e 's/?/%3f/g' -e 's/#/%23/g' -e "s/'/''/g"
+  uri_escape_path "$1" | sed -e "s/'/''/g"
+}
+
+# .backup is a sqlite3 shell dot-command, not SQL (#891): its argument is
+# parsed shell-style, so single-quoted SQL doubling breaks on a path quote.
+# Double quotes with \ and " backslash-escaped survive spaces, single
+# quotes, and double quotes in the path.
+dotcmd_escape() {
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
 }
 
 # ---------------------------------------------------------------------------
@@ -382,12 +501,12 @@ restore_session_mode() {
 
   check_not_running
 
-  sqlite3 -readonly "file:${DB}?mode=ro" "PRAGMA table_info(event);" \
+  sqlite3 -readonly "file:$(uri_escape_path "$DB")?mode=ro" "PRAGMA table_info(event);" \
     | cut -d'|' -f2 | grep -qx 'aggregate_id' \
     || die "event table shape unexpected -- refusing to run"
 
   local before_rows
-  before_rows="$(sqlite3 -readonly "file:${DB}?mode=ro" \
+  before_rows="$(sqlite3 -readonly "file:$(uri_escape_path "$DB")?mode=ro" \
     "SELECT COUNT(*) FROM event WHERE aggregate_id = '${RESTORE_SESSION}';")"
   note "rows now      : $(commas "$before_rows") event row(s) for this session"
 
@@ -412,7 +531,7 @@ restore_session_mode() {
   # than leaving the user to work out whether warp will now succeed. In dry run
   # this describes the CURRENT state, which is by definition still gappy.
   local stats mn mx cnt hw
-  stats="$(sqlite3 -readonly "file:${DB}?mode=ro" \
+  stats="$(sqlite3 -readonly "file:$(uri_escape_path "$DB")?mode=ro" \
     "SELECT COALESCE(MIN(seq),0), COALESCE(MAX(seq),0), COUNT(*) FROM event WHERE aggregate_id = '${RESTORE_SESSION}';")"
   IFS='|' read -r mn mx cnt <<EOF
 $stats
@@ -422,7 +541,7 @@ EOF
   # that is dense but starts above 0, or stops below the high-water mark, still
   # dies. A single surviving row trivially satisfies count == max-min+1, which
   # is exactly the false positive this avoids.
-  hw="$(sqlite3 -readonly "file:${DB}?mode=ro" \
+  hw="$(sqlite3 -readonly "file:$(uri_escape_path "$DB")?mode=ro" \
     "SELECT COALESCE(MAX(seq),-1) FROM event_sequence WHERE aggregate_id = '${RESTORE_SESSION}';")"
   step "Sequence contiguity for ${RESTORE_SESSION}"
   note "min seq        : $(commas "$mn")"
@@ -446,7 +565,7 @@ EOF
 
 Dry run only -- nothing was changed.
 
-To restore:  ./opencode-db-prune.sh --restore-session ${RESTORE_SESSION} --from ${FROM} --apply
+To restore:  ./opencode-db-prune.sh --db $(shell_quote "$DB") --restore-session $(shell_quote "$RESTORE_SESSION") --from $(shell_quote "$FROM") --apply
 EOF
   fi
 }
@@ -461,12 +580,12 @@ restore_from_sqlite() {
   local uri
   uri="$(sql_uri_literal "$FROM")"
 
-  sqlite3 -readonly "file:${DB}?mode=ro" "ATTACH 'file:${uri}?mode=ro' AS src; SELECT 1 FROM src.event LIMIT 1;" >/dev/null 2>&1 \
-    || sqlite3 -readonly "file:${DB}?mode=ro" "ATTACH 'file:${uri}?mode=ro' AS src; SELECT COUNT(*) FROM src.event;" >/dev/null \
+  sqlite3 -readonly "file:$(uri_escape_path "$DB")?mode=ro" "ATTACH 'file:${uri}?mode=ro' AS src; SELECT 1 FROM src.event LIMIT 1;" >/dev/null 2>&1 \
+    || sqlite3 -readonly "file:$(uri_escape_path "$DB")?mode=ro" "ATTACH 'file:${uri}?mode=ro' AS src; SELECT COUNT(*) FROM src.event;" >/dev/null \
     || die "$FROM is a SQLite file but has no readable 'event' table"
 
   step "Scanning backup"
-  RESTORE_CANDIDATES="$(sqlite3 -readonly "file:${DB}?mode=ro" <<SQL
+  RESTORE_CANDIDATES="$(sqlite3 -readonly "file:$(uri_escape_path "$DB")?mode=ro" <<SQL
 ATTACH 'file:${uri}?mode=ro' AS src;
 SELECT COUNT(*) FROM src.event s
 WHERE s.aggregate_id = '${RESTORE_SESSION}'
@@ -555,7 +674,7 @@ SQL
   # the staging file. json_valid is checked before anything calls json_extract,
   # which would abort the whole statement on a malformed line.
   local checks staged bad
-  checks="$(sqlite3 -readonly "file:${DB}?mode=ro" <<SQL
+  checks="$(sqlite3 -readonly "file:$(uri_escape_path "$DB")?mode=ro" <<SQL
 ${import_sql}
 SELECT COUNT(*) FROM stg;
 SELECT COUNT(*) FROM stg WHERE json_valid(j) = 0;
@@ -567,7 +686,7 @@ SQL
     || die "staged ${staged:-0} line(s) but grep matched ${matched} -- archive is malformed, refusing to insert"
   [ "${bad:-0}" -eq 0 ] || die "${bad} archive line(s) are not valid JSON -- refusing to insert"
 
-  RESTORE_CANDIDATES="$(sqlite3 -readonly "file:${DB}?mode=ro" <<SQL
+  RESTORE_CANDIDATES="$(sqlite3 -readonly "file:$(uri_escape_path "$DB")?mode=ro" <<SQL
 ${import_sql}
 SELECT COUNT(*) FROM stg s
 WHERE json_extract(s.j,'\$.aggregate_id') = '${RESTORE_SESSION}'
@@ -604,6 +723,16 @@ SQL
 
 if [ -n "$RESTORE_SESSION" ]; then
   [ -n "$ARCHIVE" ] && die "--archive is a prune option; --restore-session reads from --from"
+  # #1129: the other prune-only options were parsed and then silently
+  # dropped by restore mode -- worst, --backup produced no backup and no
+  # warning on a restore --apply run (a write to the live DB). Reject
+  # them the same way --archive is rejected, before any restore work.
+  # (PROTECT_ROOTS has no *_SET flag; its value is the flag state.)
+  [ "$BACKUP_SET" -eq 1 ] && die "--backup is a prune option; it does not apply to --restore-session"
+  [ "$NO_BACKUP_SET" -eq 1 ] && die "--no-backup is a prune option; it does not apply to --restore-session"
+  [ "$PROTECT_DAYS_SET" -eq 1 ] && die "--protect-days is a prune option; it does not apply to --restore-session"
+  [ "$PROTECT_ROOTS" -eq 1 ] && die "--protect-roots is a prune option; it does not apply to --restore-session"
+  [ "$BATCH_SET" -eq 1 ] && die "--batch is a prune option; it does not apply to --restore-session"
   restore_session_mode
   exit 0
 fi
@@ -622,17 +751,36 @@ note "protect-roots : $([ "$PROTECT_ROOTS" -eq 1 ] && echo 'yes (root sessions s
 note "mode          : $([ "$APPLY" -eq 1 ] && echo 'APPLY (will delete)' || echo 'dry run (read-only)')"
 [ -n "$ARCHIVE" ] && note "archive       : $ARCHIVE (${COMPRESSOR})"
 
-check_not_running
-
 # Guard against a schema that does not match what this script was written for.
+# Read-only, so it precedes check_not_running: a drifted DB gets the schema
+# refusal even on a machine where opencode is up.
 for col in aggregate_id seq owner_id; do
-  sqlite3 -readonly "file:${DB}?mode=ro" "PRAGMA table_info(event_sequence);" \
+  sqlite3 -readonly "file:$(uri_escape_path "$DB")?mode=ro" "PRAGMA table_info(event_sequence);" \
     | cut -d'|' -f2 | grep -qx "$col" \
     || die "event_sequence has no '$col' column -- schema changed, refusing to run"
 done
-sqlite3 -readonly "file:${DB}?mode=ro" "PRAGMA table_info(event);" \
+sqlite3 -readonly "file:$(uri_escape_path "$DB")?mode=ro" "PRAGMA table_info(event);" \
   | cut -d'|' -f2 | grep -qx 'aggregate_id' \
   || die "event table shape unexpected -- refusing to run"
+
+# The post-delete verification counts session/message/part/event_sequence,
+# and the eligibility SQL joins session on id/parent_id/time_updated -- a
+# missing table or session column used to be discovered only AFTER the
+# batched delete had already committed (#1051). Assert the whole assumed
+# set up front, in the same refusal shape as the guard above.
+for t in session message part event event_sequence; do
+  sqlite3 -readonly "file:$(uri_escape_path "$DB")?mode=ro" \
+    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='$t';" \
+    | grep -qx '1' \
+    || die "$t table missing -- schema changed, refusing to run"
+done
+for col in id parent_id time_updated; do
+  sqlite3 -readonly "file:$(uri_escape_path "$DB")?mode=ro" "PRAGMA table_info(session);" \
+    | cut -d'|' -f2 | grep -qx "$col" \
+    || die "session has no '$col' column -- schema changed, refusing to run"
+done
+
+check_not_running
 
 # ---------------------------------------------------------------------------
 # Shared SQL: the set of rows eligible for deletion.
@@ -686,7 +834,7 @@ step "Analyzing (this scans the event table and takes a while)"
 before_bytes="$(filesize "$DB")"
 note "current file size: $(gb "$before_bytes")"
 
-summary="$(sqlite3 -readonly "file:${DB}?mode=ro" "
+summary="$(sqlite3 -readonly "file:$(uri_escape_path "$DB")?mode=ro" "
 WITH elig AS ($ELIGIBLE)
 SELECT typ, COUNT(*), SUM(len) FROM elig GROUP BY typ ORDER BY SUM(len) DESC;")"
 
@@ -707,15 +855,15 @@ $summary
 EOF
 printf '  %-26s %14s %14s\n' 'TOTAL' "$(commas "$total_rows")" "$(gb "$total_bytes")"
 
-excluded="$(sqlite3 -readonly "file:${DB}?mode=ro" \
+excluded="$(sqlite3 -readonly "file:$(uri_escape_path "$DB")?mode=ro" \
   "SELECT COUNT(*) FROM event_sequence WHERE owner_id IS NOT NULL;")"
-protected="$(sqlite3 -readonly "file:${DB}?mode=ro" \
+protected="$(sqlite3 -readonly "file:$(uri_escape_path "$DB")?mode=ro" \
   "SELECT COUNT(*) FROM session WHERE time_updated >= ${CUTOFF_SQL};")"
 note ""
 note "excluded: $excluded sync-owned aggregate(s) (event_sequence.owner_id set)"
 note "excluded: $protected session(s) active within ${PROTECT_DAYS} day(s)"
 if [ "$PROTECT_ROOTS" -eq 1 ]; then
-  roots="$(sqlite3 -readonly "file:${DB}?mode=ro" "SELECT COUNT(*) FROM session WHERE parent_id IS NULL;")"
+  roots="$(sqlite3 -readonly "file:$(uri_escape_path "$DB")?mode=ro" "SELECT COUNT(*) FROM session WHERE parent_id IS NULL;")"
   note "excluded: $roots root session(s) (--protect-roots)"
 fi
 note "kept    : the newest snapshot of every entity"
@@ -809,16 +957,30 @@ fi
 if [ "$APPLY" -eq 0 ]; then
   # Echo back exactly the flags that produced this report, so the suggested
   # command cannot silently differ from what was just measured.
-  SUGGEST_FLAGS=" --protect-days ${PROTECT_DAYS}"
+  SUGGEST_FLAGS=" --db $(shell_quote "$DB") --protect-days ${PROTECT_DAYS}"
   [ "$PROTECT_ROOTS" -eq 1 ] && SUGGEST_FLAGS="${SUGGEST_FLAGS} --protect-roots"
-  [ -n "$ARCHIVE" ] && SUGGEST_FLAGS="${SUGGEST_FLAGS} --archive ${ARCHIVE}"
+  [ -n "$ARCHIVE" ] && SUGGEST_FLAGS="${SUGGEST_FLAGS} --archive $(shell_quote "$ARCHIVE")"
+  if [ "$DO_BACKUP" -eq 0 ]; then
+    SUGGEST_FLAGS="${SUGGEST_FLAGS} --no-backup"
+  elif [ -n "$BACKUP" ]; then
+    SUGGEST_FLAGS="${SUGGEST_FLAGS} --backup $(shell_quote "$BACKUP")"
+  fi
+  SUGGEST_FLAGS="${SUGGEST_FLAGS} --batch ${BATCH}"
+  [ "$ASSUME_YES" -eq 1 ] && SUGGEST_FLAGS="${SUGGEST_FLAGS} --yes"
   cat <<EOF
 
 Dry run only -- nothing was changed.
 
 To prune:   ./opencode-db-prune.sh${SUGGEST_FLAGS} --apply
 Then:       ./opencode-db-vacuum.sh --auto-vacuum
-Finally:    rm '${BACKUP:-${DB}.prune-backup}'   # once opencode starts cleanly
+EOF
+  # The suggested command only creates a backup when backups are enabled;
+  # under --no-backup there is no backup file to remove (#900).
+  if [ "$DO_BACKUP" -eq 1 ]; then
+    printf 'Finally:    rm %s   # once opencode starts cleanly\n' \
+      "$(shell_quote "${BACKUP:-${DB}.prune-backup}")"
+  fi
+  cat <<'EOF'
 
 Deleting rows alone will NOT shrink the file; auto_vacuum is disabled on this
 database, so VACUUM is required to return pages to the OS.
@@ -830,9 +992,28 @@ fi
 # Apply
 # ---------------------------------------------------------------------------
 step "Integrity check"
-integrity="$(sqlite3 "$DB" 'PRAGMA integrity_check;' | head -1)"
+# NOTE (#1460): no `| head -1` here. Under pipefail, head exits after the
+# first line; when integrity_check reports many problems the output exceeds
+# the pipe buffer, sqlite3 dies with SIGPIPE, and the script aborts with
+# exit 141 and no verdict. Capture the full result and take the first
+# line in-shell instead.
+integrity="$(sqlite3 "$DB" 'PRAGMA integrity_check;')"
+integrity="${integrity%%$'\n'*}"
 note "integrity_check: $integrity"
 [ "$integrity" = "ok" ] || die "integrity check failed -- refusing to modify a damaged database"
+
+# Confirm BEFORE the backup step (#901): the backup is a full-size copy, so
+# prompting after it meant an abort stranded that copy on disk -- and every
+# retry then died on the overwrite refusal below. Asking first means an
+# abort leaves the filesystem exactly as it was found.
+if [ "$ASSUME_YES" -eq 0 ]; then
+  printf '\nDelete %s rows (%s) from `event`? [y/N] ' "$(commas "$total_rows")" "$(gb "$total_bytes")"
+  read -r reply
+  case "$reply" in
+    [yY]|[yY][eE][sS]) ;;
+    *) note "aborted; nothing deleted"; exit 0 ;;
+  esac
+fi
 
 if [ "$DO_BACKUP" -eq 1 ]; then
   BACKUP="${BACKUP:-${DB}.prune-backup}"
@@ -844,19 +1025,10 @@ if [ "$DO_BACKUP" -eq 1 ]; then
   note "$BACKUP"
   note "transient crash insurance -- delete this once opencode starts cleanly"
   # .backup is WAL-safe; plain cp is not.
-  sqlite3 "$DB" ".backup '$BACKUP'"
+  sqlite3 "$DB" ".backup \"$(dotcmd_escape "$BACKUP")\""
   note "done ($(gb "$(filesize "$BACKUP")"))"
 else
   note "skipping backup (--no-backup)"
-fi
-
-if [ "$ASSUME_YES" -eq 0 ]; then
-  printf '\nDelete %s rows (%s) from `event`? [y/N] ' "$(commas "$total_rows")" "$(gb "$total_bytes")"
-  read -r reply
-  case "$reply" in
-    [yY]|[yY][eE][sS]) ;;
-    *) note "aborted; nothing deleted"; exit 0 ;;
-  esac
 fi
 
 # ---------------------------------------------------------------------------
@@ -898,7 +1070,7 @@ archive_targets() {
   # IS-identical to the original value, that row is written as data_hex instead.
   # unhex() reproduces those bytes exactly. Correctness is therefore structural,
   # not a property we hope holds -- no row can be archived lossily.
-  sqlite3 -readonly "file:${DB}?mode=ro" <<SQL | "${COMPRESS_CMD[@]}" >"$ARCHIVE_TMP"
+  sqlite3 -readonly "file:$(uri_escape_path "$DB")?mode=ro" <<SQL | "${COMPRESS_CMD[@]}" >"$ARCHIVE_TMP"
 .mode list
 .headers off
 SELECT CASE
@@ -981,7 +1153,13 @@ sqlite3 "$DB" "DROP TABLE IF EXISTS opencode_db_prune_targets;"
 note "deleted $(commas "$deleted") row(s)"
 
 step "Post-delete verification"
-post_integrity="$(sqlite3 "$DB" 'PRAGMA integrity_check;' | head -1)"
+# NOTE (#1460): no `| head -1` here. Under pipefail, head exits after the
+# first line; when integrity_check reports many problems the output exceeds
+# the pipe buffer, sqlite3 dies with SIGPIPE, and the script aborts with
+# exit 141 and no verdict. Capture the full result and take the first
+# line in-shell instead.
+post_integrity="$(sqlite3 "$DB" 'PRAGMA integrity_check;')"
+post_integrity="${post_integrity%%$'\n'*}"
 note "integrity_check: $post_integrity"
 if [ "$post_integrity" != "ok" ]; then
   die "integrity check FAILED after delete.
@@ -989,15 +1167,15 @@ if [ "$post_integrity" != "ok" ]; then
 fi
 
 for t in session message part event_sequence; do
-  n="$(sqlite3 -readonly "file:${DB}?mode=ro" "SELECT COUNT(*) FROM $t;")"
+  n="$(sqlite3 -readonly "file:$(uri_escape_path "$DB")?mode=ro" "SELECT COUNT(*) FROM $t;")"
   note "$(printf '%-16s %12s rows (untouched)' "$t" "$(commas "$n")")"
 done
 
 sqlite3 "$DB" 'PRAGMA wal_checkpoint(TRUNCATE);' >/dev/null
 
 after_bytes="$(filesize "$DB")"
-freelist="$(sqlite3 -readonly "file:${DB}?mode=ro" 'PRAGMA freelist_count;')"
-page_size="$(sqlite3 -readonly "file:${DB}?mode=ro" 'PRAGMA page_size;')"
+freelist="$(sqlite3 -readonly "file:$(uri_escape_path "$DB")?mode=ro" 'PRAGMA freelist_count;')"
+page_size="$(sqlite3 -readonly "file:$(uri_escape_path "$DB")?mode=ro" 'PRAGMA page_size;')"
 
 cat <<EOF
 

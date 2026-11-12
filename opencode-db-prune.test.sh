@@ -1,0 +1,305 @@
+#!/usr/bin/env bash
+# Fixture-DB test for opencode-db-prune.sh's destructive core (#1050).
+#
+# The args suite pins the argument parser and the pids suite pins the
+# opencode_pids() guard, but nothing exercised the delete itself: the
+# eligibility CTE (keyed/ranked, opencode-db-prune.sh), the batched
+# delete, the --archive dump, or the --restore-session round-trip. A CTE
+# regression (dropping the owner_id exclusion, or the newest-per-entity
+# seq < max_seq rule) would silently delete rows that must be kept from
+# the live database this script prunes unattended -- and nothing would
+# fail. This suite drives the real script against hand-built fixture
+# SQLite DBs and pins the exact row sets at every step.
+#
+# Hermetic: a stub `ps` that reports no processes is prepended to PATH
+# (the pids suite's shadowing trick), so prune's check_not_running sees
+# a stopped opencode on any machine. Fixture DBs only -- never a real
+# user database.
+#
+# Run: ./opencode-db-prune.test.sh
+# It is run by the flake check `opencode-db-prune-tests`.
+set -u
+
+cd "$(dirname "$0")" || exit
+
+HOME="$(mktemp -d)"
+export HOME
+trap 'rm -rf "$HOME"' EXIT
+
+failures=0
+fail() { echo "FAIL: $1" >&2; failures=$((failures + 1)); }
+ok() { echo "ok: $1"; }
+
+command -v sqlite3 >/dev/null || { echo "sqlite3 required" >&2; exit 1; }
+
+# Stub ps: no processes at all, so opencode_pids() finds nothing running.
+stub="$HOME/stubbin"; mkdir -p "$stub"
+printf '#!/bin/sh\nexit 0\n' >"$stub/ps"; chmod +x "$stub/ps"
+PATH="$stub:$PATH"; export PATH
+
+PRUNE=./opencode-db-prune.sh
+NOW_MS=$(( $(date +%s) * 1000 ))
+
+# Fixture layout (seqs are 0-based, as in the real event table):
+#   ses_old   root, old. msg_1 snapshots seq 0,1,2 + non-snapshot seq 3.
+#   ses_child child of ses_old, old. msg_2 snapshots seq 0,1.
+#   ses_owned root, old, event_sequence.owner_id set. msg_3 seq 0,1.
+#   ses_new   root, active an hour ago (inside --protect-days 30, well
+#             clear of the --protect-days 0 cutoff boundary). msg_4 seq 0,1.
+# Eligible under --protect-days 0: old seq 0,1 + child seq 0 + new seq 0 = 4.
+# Under --protect-days 30 the recent session drops out: 3.
+# Under --protect-roots only child sessions are eligible: 1.
+mk_fixture() { # $1 = db path
+  sqlite3 "$1" <<SQL
+CREATE TABLE session(id TEXT PRIMARY KEY, parent_id TEXT, time_updated INTEGER);
+CREATE TABLE message(id TEXT);
+CREATE TABLE part(id TEXT);
+CREATE TABLE event(id TEXT, aggregate_id TEXT, type TEXT, seq INTEGER, data TEXT);
+CREATE TABLE event_sequence(aggregate_id TEXT, seq INTEGER, owner_id TEXT);
+INSERT INTO session VALUES ('ses_old', NULL, 1000);
+INSERT INTO session VALUES ('ses_child', 'ses_old', 1000);
+INSERT INTO session VALUES ('ses_owned', NULL, 1000);
+INSERT INTO session VALUES ('ses_new', NULL, $(( NOW_MS - 3600000 )));
+INSERT INTO event VALUES ('ev_o0','ses_old','message.updated.1',0,'{"info":{"id":"msg_1"}}');
+INSERT INTO event VALUES ('ev_o1','ses_old','message.updated.1',1,'{"info":{"id":"msg_1"}}');
+INSERT INTO event VALUES ('ev_o2','ses_old','message.updated.1',2,'{"info":{"id":"msg_1"}}');
+INSERT INTO event VALUES ('ev_o3','ses_old','session.idle.1',3,'{}');
+INSERT INTO event VALUES ('ev_c0','ses_child','message.updated.1',0,'{"info":{"id":"msg_2"}}');
+INSERT INTO event VALUES ('ev_c1','ses_child','message.updated.1',1,'{"info":{"id":"msg_2"}}');
+INSERT INTO event VALUES ('ev_w0','ses_owned','message.updated.1',0,'{"info":{"id":"msg_3"}}');
+INSERT INTO event VALUES ('ev_w1','ses_owned','message.updated.1',1,'{"info":{"id":"msg_3"}}');
+INSERT INTO event VALUES ('ev_n0','ses_new','message.updated.1',0,'{"info":{"id":"msg_4"}}');
+INSERT INTO event VALUES ('ev_n1','ses_new','message.updated.1',1,'{"info":{"id":"msg_4"}}');
+INSERT INTO event_sequence VALUES ('ses_old',3,NULL);
+INSERT INTO event_sequence VALUES ('ses_child',1,NULL);
+INSERT INTO event_sequence VALUES ('ses_owned',1,'user_1');
+INSERT INTO event_sequence VALUES ('ses_new',1,NULL);
+SQL
+}
+
+seqs_of() { sqlite3 "$1" "SELECT group_concat(seq) FROM (SELECT seq FROM event WHERE aggregate_id='$2' ORDER BY seq);"; }
+count_of() { sqlite3 "$1" "SELECT COUNT(*) FROM event;"; }
+
+# dry_total <db> <extra prune flags...> -- prints the TOTAL row count
+# from a dry run, or empty on failure.
+dry_total() {
+  local db="$1"; shift
+  bash "$PRUNE" --db "$db" "$@" 2>&1 \
+    | sed -n 's/^  TOTAL[[:space:]]*\([0-9][0-9]*\)[[:space:]].*/\1/p'
+}
+
+fx="$HOME/fx"; mkdir -p "$fx"
+
+# --- Dry-run eligibility is exact, and a dry run changes nothing. ------
+db="$fx/dry.db"; mk_fixture "$db"
+t="$(dry_total "$db" --protect-days 0)"
+[ "$t" = "4" ] || fail "dry run --protect-days 0: TOTAL=$t, expected 4"
+[ "$(count_of "$db")" = "10" ] || fail "dry run changed the fixture (event count $(count_of "$db"), expected 10)"
+[ "$t" = "4" ] && [ "$(count_of "$db")" = "10" ] && ok "dry run --protect-days 0 reports exactly 4 eligible, DB unchanged"
+
+t="$(dry_total "$db" --protect-days 30)"
+[ "$t" = "3" ] || fail "dry run --protect-days 30: TOTAL=$t, expected 3 (recent session protected)"
+[ "$t" = "3" ] && ok "dry run --protect-days 30 excludes the recent session (3 eligible)"
+
+t="$(dry_total "$db" --protect-days 0 --protect-roots)"
+[ "$t" = "1" ] || fail "dry run --protect-roots: TOTAL=$t, expected 1 (only the child session)"
+[ "$t" = "1" ] && ok "dry run --protect-roots prunes only child sessions (1 eligible)"
+
+# --- Apply with --archive deletes exactly the eligible set. ------------
+db="$fx/apply.db"; mk_fixture "$db"
+arch="$fx/arch.ndjson.gz"
+out="$(bash "$PRUNE" --db "$db" --protect-days 0 --apply -y --no-backup --archive "$arch" 2>&1)"; rc=$?
+if [ "$rc" -ne 0 ]; then
+  fail "apply on fixture exited $rc: $out"
+else
+  [ "$(count_of "$db")" = "6" ] || fail "apply left $(count_of "$db") event rows, expected 6"
+  [ "$(seqs_of "$db" ses_old)" = "2,3" ] || fail "ses_old seqs after apply: $(seqs_of "$db" ses_old), expected 2,3 (newest + non-snapshot kept)"
+  [ "$(seqs_of "$db" ses_child)" = "1" ] || fail "ses_child seqs after apply: $(seqs_of "$db" ses_child), expected 1"
+  [ "$(seqs_of "$db" ses_owned)" = "0,1" ] || fail "ses_owned seqs after apply: $(seqs_of "$db" ses_owned), expected 0,1 (owner_id aggregates excluded)"
+  [ "$(seqs_of "$db" ses_new)" = "1" ] || fail "ses_new seqs after apply: $(seqs_of "$db" ses_new), expected 1"
+  integ="$(sqlite3 "$db" 'PRAGMA integrity_check;')"
+  [ "$integ" = "ok" ] || fail "integrity_check after apply: $integ"
+  [ -f "$arch" ] || fail "archive $arch was not written"
+  if [ "$(count_of "$db")" = "6" ] && [ "$(seqs_of "$db" ses_old)" = "2,3" ] \
+     && [ "$(seqs_of "$db" ses_child)" = "1" ] && [ "$(seqs_of "$db" ses_owned)" = "0,1" ] \
+     && [ "$(seqs_of "$db" ses_new)" = "1" ] && [ "$integ" = "ok" ] && [ -f "$arch" ]; then
+    ok "apply deletes only the 4 superseded snapshots; newest, non-snapshot, sync-owned rows survive; integrity ok"
+  fi
+
+  # --- Restore round-trips the archived rows with original seqs. -------
+  out="$(bash "$PRUNE" --db "$db" --restore-session ses_old --from "$arch" --apply 2>&1)"; rc=$?
+  if [ "$rc" -ne 0 ]; then
+    fail "restore-session ses_old exited $rc: $out"
+  elif [ "$(seqs_of "$db" ses_old)" != "0,1,2,3" ]; then
+    fail "ses_old seqs after restore: $(seqs_of "$db" ses_old), expected 0,1,2,3"
+  else
+    ok "restore-session re-inserts ses_old's archived rows with original seqs (0,1,2,3)"
+  fi
+fi
+
+
+# --- Many-line integrity_check must not SIGPIPE the capture (#1460). --
+# Both integrity captures used to read through `| head -1` under
+# pipefail: integrity_check emits one line per problem, so on a damaged
+# DB the output exceeds the pipe buffer, head exits, sqlite3 dies with
+# SIGPIPE, and the script aborted with exit 141 and no verdict -- at the
+# post-delete site, after the rows were already gone, losing the
+# restore-from-backup guidance too. Shim sqlite3s that flood
+# integrity_check with 5000 lines pin the fix (full capture + in-shell
+# first line) at both gates.
+real_sqlite3="$(command -v sqlite3)"
+mk_integrity_flood_shim() { # $1 = shim dir
+  mkdir -p "$1"
+  cat >"$1/sqlite3" <<EOF
+#!$(command -v bash)
+for a in "\$@"; do
+  case "\$a" in
+    *integrity_check*)
+      i=1; while [ \$i -le 5000 ]; do echo "row 999\$i missing from index idx_corrupt"; i=\$((i + 1)); done
+      exit 0 ;;
+  esac
+done
+exec $real_sqlite3 "\$@"
+EOF
+  chmod +x "$1/sqlite3"
+}
+mk_integrity_post_flood_shim() { # $1 = shim dir, $2 = counter file
+  mkdir -p "$1"
+  echo 0 >"$2"
+  cat >"$1/sqlite3" <<EOF
+#!$(command -v bash)
+for a in "\$@"; do
+  case "\$a" in
+    *integrity_check*)
+      n=\$(cat "$2"); n=\$((n + 1)); echo \$n >"$2"
+      if [ \$n -eq 1 ]; then echo ok; exit 0; fi
+      i=1; while [ \$i -le 5000 ]; do echo "row 999\$i missing from index idx_corrupt"; i=\$((i + 1)); done
+      exit 0 ;;
+  esac
+done
+exec $real_sqlite3 "\$@"
+EOF
+  chmod +x "$1/sqlite3"
+}
+
+before=$failures
+db="$fx/icflood-pre.db"; mk_fixture "$db"
+shimdir="$HOME/icflood-pre-shim"
+mk_integrity_flood_shim "$shimdir"
+out="$(PATH="$shimdir:$PATH" bash "$PRUNE" --db "$db" --protect-days 0 --apply -y --no-backup 2>&1)"; rc=$?
+[ "$rc" -eq 1 ] || fail "pre-delete integrity flood exited $rc, expected 1 (141 is the SIGPIPE bug): $out"
+case "$out" in
+  *"integrity check failed -- refusing to modify a damaged database"*) ;;
+  *) fail "pre-delete integrity flood did not print the refusal verdict: $out" ;;
+esac
+[ "$(count_of "$db")" = "10" ] || fail "pre-delete integrity flood deleted rows (event count $(count_of "$db"), expected 10)"
+[ "$failures" -eq "$before" ] && ok "many-line integrity_check at the pre-delete gate dies at exit 1 with the refusal verdict, nothing deleted"
+
+before=$failures
+db="$fx/icflood-post.db"; mk_fixture "$db"
+shimdir="$HOME/icflood-post-shim"
+mk_integrity_post_flood_shim "$shimdir" "$HOME/icflood-post-count"
+out="$(PATH="$shimdir:$PATH" bash "$PRUNE" --db "$db" --protect-days 0 --apply -y 2>&1)"; rc=$?
+[ "$rc" -eq 1 ] || fail "post-delete integrity flood exited $rc, expected 1 (141 is the SIGPIPE bug): $out"
+case "$out" in
+  *"integrity check FAILED after delete"*) ;;
+  *) fail "post-delete integrity flood did not print the FAILED-after-delete verdict: $out" ;;
+esac
+case "$out" in
+  *"Restore from the backup"*) ;;
+  *) fail "post-delete integrity flood did not print the restore guidance: $out" ;;
+esac
+[ "$(count_of "$db")" = "6" ] || fail "post-delete case deleted $(count_of "$db") event rows remaining, expected 6 (the 4 eligible rows were deleted before verification)"
+[ "$failures" -eq "$before" ] && ok "many-line integrity_check after the delete dies at exit 1 with the FAILED verdict and the restore guidance"
+
+# --- Failing ps snapshot: --apply refuses, DB byte-identical (#1816). -
+# The guard used to count a failed ps as zero processes, so --apply ran
+# under an unknown writer state. The valid-empty counterpart is the
+# exit-0 stub ps the whole suite above runs under.
+before=$failures
+failbin="$HOME/failbin"; mkdir -p "$failbin"
+printf '#!/bin/sh\necho "ps: simulated snapshot failure" >&2\nexit 1\n' >"$failbin/ps"; chmod +x "$failbin/ps"
+db="$fx/psfail.db"; mk_fixture "$db"
+cp "$db" "$fx/psfail.before"
+out="$(PATH="$failbin:$PATH" bash "$PRUNE" --db "$db" --protect-days 0 --apply -y --no-backup 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] || fail "failing ps: --apply exited 0, expected refusal: $out"
+case "$out" in *"ps snapshot failed"*) ;; *) fail "failing ps: --apply refusal does not name the failed snapshot: $out" ;; esac
+cmp -s "$db" "$fx/psfail.before" || fail "failing ps: --apply mutated the fixture DB"
+[ "$(count_of "$db")" = "10" ] || fail "failing ps: event count $(count_of "$db"), expected 10"
+[ "$failures" -eq "$before" ] && ok "failing ps snapshot: --apply refuses, fixture DB byte-identical"
+
+# --- Failing ps snapshot: dry run reports UNKNOWN, changes nothing. ----
+before=$failures
+out="$(PATH="$failbin:$PATH" bash "$PRUNE" --db "$db" --protect-days 0 2>&1)"; rc=$?
+[ "$rc" -eq 0 ] || fail "failing ps: dry run exited $rc, expected 0: $out"
+case "$out" in *UNKNOWN*) ;; *) fail "failing ps: dry run does not report the unknown guard state: $out" ;; esac
+cmp -s "$db" "$fx/psfail.before" || fail "failing ps: dry run mutated the fixture DB"
+[ "$failures" -eq "$before" ] && ok "failing ps snapshot: dry run reports UNKNOWN and changes nothing"
+
+# --- lsof must distinguish unknown holders from a successful empty result. -
+# A visible OpenCode process makes the database-specific lsof query necessary.
+# A failed query must never be converted into an empty holder list.
+processbin="$HOME/processbin"; mkdir -p "$processbin"
+cat >"$processbin/ps" <<'EOF'
+#!/bin/sh
+case "$*" in
+  *"-eo pid=,ppid=,args="*) printf '424242 1 opencode\n' ;;
+  *"-o pid=,args="*) printf '424242 opencode\n' ;;
+  *) exit 0 ;;
+esac
+EOF
+chmod +x "$processbin/ps"
+mk_lsof() { # $1 = dir, $2 = behavior: fail | empty | holder
+  mkdir -p "$1"
+  case "$2" in
+    fail) printf '#!/bin/sh\necho "lsof: simulated failure" >&2\nexit 1\n' >"$1/lsof" ;;
+    empty) printf '#!/bin/sh\nexit 1\n' >"$1/lsof" ;;
+    badstatus) printf '#!/bin/sh\nexit 2\n' >"$1/lsof" ;;
+    holder) printf '#!/bin/sh\nprintf "424242\\n"\nexit 0\n' >"$1/lsof" ;;
+  esac
+  chmod +x "$1/lsof"
+}
+
+before=$failures
+db="$fx/lsoffail.db"; mk_fixture "$db"; cp "$db" "$fx/lsoffail.before"
+shimdir="$HOME/lsof-fail"; mk_lsof "$shimdir" fail
+out="$(PATH="$shimdir:$processbin:$PATH" bash "$PRUNE" --db "$db" --protect-days 0 --apply -y --no-backup 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] || fail "failed lsof: --apply exited 0, expected refusal: $out"
+case "$out" in *"holder state is unknown"*) ;; *) fail "failed lsof: --apply did not report unknown holder state: $out" ;; esac
+cmp -s "$db" "$fx/lsoffail.before" || fail "failed lsof: --apply mutated fixture DB"
+out="$(PATH="$shimdir:$processbin:$PATH" bash "$PRUNE" --db "$db" --protect-days 0 2>&1)"; rc=$?
+[ "$rc" -eq 0 ] || fail "failed lsof: dry run exited $rc: $out"
+case "$out" in *"holder state"*UNKNOWN*) ;; *) fail "failed lsof: dry run did not clearly report UNKNOWN: $out" ;; esac
+cmp -s "$db" "$fx/lsoffail.before" || fail "failed lsof: dry run mutated fixture DB"
+[ "$failures" -eq "$before" ] && ok "failed lsof with reported OpenCode process: apply refuses and dry run reports UNKNOWN; DB unchanged"
+
+before=$failures
+db="$fx/lsofempty.db"; mk_fixture "$db"
+shimdir="$HOME/lsof-empty"; mk_lsof "$shimdir" empty
+out="$(PATH="$shimdir:$processbin:$PATH" bash "$PRUNE" --db "$db" --protect-days 0 --apply -y --no-backup 2>&1)"; rc=$?
+[ "$rc" -eq 0 ] || fail "successful empty lsof: apply exited $rc: $out"
+[ "$(count_of "$db")" = 6 ] || fail "successful empty lsof: expected normal prune (6 rows), found $(count_of "$db")"
+[ "$failures" -eq "$before" ] && ok "real lsof no-match (silent exit 1, no holders) preserves behavior: apply prunes eligible rows"
+
+before=$failures
+db="$fx/lsofbad.db"; mk_fixture "$db"; cp "$db" "$fx/lsofbad.before"
+shimdir="$HOME/lsof-badstatus"; mk_lsof "$shimdir" badstatus
+out="$(PATH="$shimdir:$processbin:$PATH" bash "$PRUNE" --db "$db" --protect-days 0 --apply -y --no-backup 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] || fail "silent exit-2 lsof: --apply exited 0, expected refusal: $out"
+case "$out" in *"holder state is unknown"*) ;; *) fail "silent exit-2 lsof: --apply did not report unknown holder state: $out" ;; esac
+cmp -s "$db" "$fx/lsofbad.before" || fail "silent exit-2 lsof: --apply mutated fixture DB"
+[ "$failures" -eq "$before" ] && ok "silent exit-2 lsof is UNKNOWN: apply refuses; DB unchanged"
+
+before=$failures
+db="$fx/lsofholder.db"; mk_fixture "$db"; cp "$db" "$fx/lsofholder.before"
+shimdir="$HOME/lsof-holder"; mk_lsof "$shimdir" holder
+out="$(PATH="$shimdir:$processbin:$PATH" bash "$PRUNE" --db "$db" --protect-days 0 --apply -y --no-backup 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] || fail "positive-holder lsof: apply exited 0, expected refusal: $out"
+cmp -s "$db" "$fx/lsofholder.before" || fail "positive-holder lsof: apply mutated fixture DB"
+[ "$failures" -eq "$before" ] && ok "successful positive lsof result preserves behavior: apply refuses and DB is unchanged"
+
+if [ "$failures" -ne 0 ]; then
+  echo "$failures failure(s)" >&2
+  exit 1
+fi
+echo "all opencode-db-prune core checks passed"

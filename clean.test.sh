@@ -1,0 +1,873 @@
+#!/usr/bin/env bash
+# Regression test for clean.sh's flag-shaped-value guards (#951).
+#
+# PR #939 (fix for #930) made clean.sh's value-taking options reject a
+# flag-shaped next token — `--path --dry-run` used to swallow --dry-run
+# as the path and run the cleanup for real — but added no test for
+# clean.sh, so the guards could regress silently.
+#
+# The contract pinned here, for --path, --depth, and --docker-age:
+#   <option> --dry-run  -> exit 2, "<option> requires a value" on
+#                          stderr, and no side effects
+#   valid values        -> accepted: the --only-unknown-scratch control
+#                          run below parses all three options with real
+#                          values and exits 0
+#
+# This drives the REAL clean.sh (no pasted copies) against temp dirs.
+# The control uses --only-unknown-scratch so it exercises the parser and
+# the post-parse judges, then sweeps only the isolated HOME's (empty)
+# scratch root and exits — no docker/brew/git work runs.
+set -uo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT="$SELF_DIR/clean.sh"
+# Shared conformance probe matrix helpers (#1146, design #1145 phase 1).
+# shellcheck source=lib/arg-probe.sh
+. "$SELF_DIR/lib/arg-probe.sh"
+# Shared conformance probe matrix for operation failures (design #1339 phase 1).
+# shellcheck source=lib/outcome-probe.sh
+. "$SELF_DIR/lib/outcome-probe.sh"
+
+
+TMP_ROOT="$(mktemp -d)"
+trap 'rm -rf "$TMP_ROOT"' EXIT
+export HOME="$TMP_ROOT/home"
+mkdir -p "$HOME"
+# The control sweeps $HOME/.local/share/opencode/tmp; keep it absent so
+# the sweep is a no-op regardless of the caller's real home.
+unset DOCKER_AGE_DAYS DEPTH_LIMIT
+
+failures=0
+fail() {
+  echo "FAIL: $1" >&2
+  failures=$((failures + 1))
+}
+
+VALID="$TMP_ROOT/valid"
+mkdir -p "$VALID"
+OTHER="$TMP_ROOT/other"
+mkdir -p "$OTHER"
+
+run() { # run <args...> — sets OUT, ERR, STATUS
+  OUT="$(bash "$SCRIPT" "$@" 2>"$TMP_ROOT/err")"; STATUS=$?
+  ERR="$(cat "$TMP_ROOT/err")"
+}
+
+snapshot() { find "$VALID" "$HOME" | sort; }
+BEFORE="$(snapshot)"
+
+# ─── Flag-shaped values are rejected at parse time ─────────────────────
+for opt in --path --depth --docker-age; do
+  run "$opt" --dry-run
+  [ "$STATUS" -eq 2 ] || fail "$opt --dry-run exited $STATUS (want 2)"
+  case "$ERR" in
+    *"clean.sh: $opt requires a value"*) echo "ok: $opt --dry-run rejected, option named" ;;
+    *) fail "$opt --dry-run did not name the option on stderr (got: $ERR)" ;;
+  esac
+done
+
+# ─── Missing values are rejected at parse time (#970) ──────────
+# PR #921 made the value-taking options reject a missing value (option
+# last, or an empty string) with exit 2, but no suite pinned that branch:
+# a refactor dropping the -n check would pass the flag-shaped runs above
+# while a trailing option silently took an empty value. Each option must
+# exit 2 naming itself for both shapes.
+for opt in --path --depth --docker-age; do
+  run "$opt"
+  [ "$STATUS" -eq 2 ] || fail "$opt (trailing, no value) exited $STATUS (want 2)"
+  case "$ERR" in
+    *"clean.sh: $opt requires a value"*) echo "ok: $opt trailing rejected, option named" ;;
+    *) fail "$opt (trailing, no value) did not name the option on stderr (got: $ERR)" ;;
+  esac
+  run "$opt" ""
+  [ "$STATUS" -eq 2 ] || fail "$opt (empty value) exited $STATUS (want 2)"
+  case "$ERR" in
+    *"clean.sh: $opt requires a value"*) echo "ok: $opt empty value rejected, option named" ;;
+    *) fail "$opt (empty value) did not name the option on stderr (got: $ERR)" ;;
+  esac
+done
+
+# ─── Second / conflicting target is rejected at parse time (#1111) ────
+# clean.sh used to assign every positional (and --path) to the single
+# TARGET_PATH variable, so a second target silently discarded the first
+# while the run exited 0 reporting success for a tree it never scanned.
+# Every conflicting-target shape must exit 2 naming the unexpected
+# argument, before any work runs (the snapshot check below covers the
+# no-side-effects part for these runs too).
+run --dry-run "$VALID" "$OTHER"
+[ "$STATUS" -eq 2 ] || fail "second positional exited $STATUS (want 2)"
+case "$ERR" in
+  *"unexpected argument: $OTHER"*) echo "ok: second positional rejected, argument named" ;;
+  *) fail "second positional did not name the argument on stderr (got: $ERR)" ;;
+esac
+run --dry-run --path "$VALID" "$OTHER"
+[ "$STATUS" -eq 2 ] || fail "--path then positional exited $STATUS (want 2)"
+case "$ERR" in
+  *"unexpected argument: $OTHER"*) echo "ok: positional after --path rejected, argument named" ;;
+  *) fail "positional after --path did not name the argument on stderr (got: $ERR)" ;;
+esac
+run --dry-run "$VALID" --path "$OTHER"
+[ "$STATUS" -eq 2 ] || fail "positional then --path exited $STATUS (want 2)"
+case "$ERR" in
+  *"unexpected argument: --path"*) echo "ok: --path after positional rejected, option named" ;;
+  *) fail "--path after positional did not name the option on stderr (got: $ERR)" ;;
+esac
+run --dry-run --path "$VALID" --path "$OTHER"
+[ "$STATUS" -eq 2 ] || fail "repeated --path exited $STATUS (want 2)"
+case "$ERR" in
+  *"unexpected argument: --path"*) echo "ok: repeated --path rejected, option named" ;;
+  *) fail "repeated --path did not name the option on stderr (got: $ERR)" ;;
+esac
+
+# --- Sibling conflict/repeat pairs are rejected at parse time (#1135) ---
+# The 2026-10-29 batch guarded these pairs in the sibling scripts, but
+# clean.sh still silently last-won them: --system/--no-system both wrote
+# SCOPE_SET, --follow/--no-follow both wrote FOLLOW, and --depth /
+# --docker-age assigned unconditionally. Every shape must exit 2 naming
+# the conflict / only-once rule, mirroring git-maintain-repos /
+# git-discover-repos.
+for pair in "--system --no-system" "--no-system --system"; do
+  # shellcheck disable=SC2086
+  run --dry-run --path "$VALID" $pair
+  [ "$STATUS" -eq 2 ] || fail "scope pair '$pair' exited $STATUS (want 2)"
+  case "$ERR" in
+    *"clean.sh: --system and --no-system may not be combined"*) echo "ok: scope pair '$pair' rejected as a conflict" ;;
+    *) fail "scope pair '$pair' was not named as a conflict on stderr (got: $ERR)" ;;
+  esac
+done
+for pair in "--follow --no-follow" "--no-follow --follow"; do
+  # shellcheck disable=SC2086
+  run --dry-run --path "$VALID" $pair
+  [ "$STATUS" -eq 2 ] || fail "follow pair '$pair' exited $STATUS (want 2)"
+  case "$ERR" in
+    *"clean.sh: --follow and --no-follow may not be combined"*) echo "ok: follow pair '$pair' rejected as a conflict" ;;
+    *) fail "follow pair '$pair' was not named as a conflict on stderr (got: $ERR)" ;;
+  esac
+done
+for opt in --depth --docker-age; do
+  run --dry-run --path "$VALID" "$opt" 1 "$opt" 2
+  [ "$STATUS" -eq 2 ] || fail "repeated $opt exited $STATUS (want 2)"
+  case "$ERR" in
+    *"clean.sh: $opt may be given only once"*) echo "ok: repeated $opt rejected, option named" ;;
+    *) fail "repeated $opt did not name the option on stderr (got: $ERR)" ;;
+  esac
+done
+for flag in --system --no-system --follow --no-follow; do
+  case "$flag" in
+    --system) run "$flag" --only-unknown-scratch ;;
+    *)        run --path "$VALID" "$flag" --only-unknown-scratch ;;
+  esac
+  [ "$STATUS" -eq 0 ] || fail "single $flag exited $STATUS (want 0, stderr: $ERR)"
+  echo "ok: single $flag still accepted"
+done
+
+# ─── --system also judges the repo-scoped maintenance flags (#1711) ────
+# The --system conflict judge only covered the discovery half of the
+# repository vocabulary (--path/--recursive/--depth/--follow/--no-follow),
+# so --quick, --expire-reflog and every --no-git-maintenance alias were
+# silently dropped in system scope: their only consumers are the per-repo
+# maintenance blocks, which DO_REPOS=0 never reaches. Erroring beats
+# silently ignoring them, so each must be named in the same conflict, in
+# either flag order, before any sweep runs (the snapshot check below
+# covers the no-side-effects part).
+for pair in "--system --quick" "--quick --system" \
+            "--system --expire-reflog" "--expire-reflog --system" \
+            "--system --no-git-maintenance" "--no-git-maintenance --system" \
+            "--system --no-maintenance" "--no-maintenance --system" \
+            "--system --no-git" "--no-git --system"; do
+  # The flag under test is whichever token is not --system, so naming it
+  # on stderr is actually proven (the judge always names --system itself).
+  _pair_flag=""
+  for _tok in $pair; do
+    [ "$_tok" = "--system" ] || _pair_flag="$_tok"
+  done
+  # shellcheck disable=SC2086
+  run --dry-run $pair
+  [ "$STATUS" -eq 2 ] || fail "system/maintenance pair '$pair' exited $STATUS (want 2)"
+  case "$ERR" in
+    *"clean.sh: --system conflicts with repository-scoped flags:"*"$_pair_flag"*)
+      echo "ok: system/maintenance pair '$pair' rejected, $_pair_flag named" ;;
+    *) fail "system/maintenance pair '$pair' was not named as a conflict on stderr (got: $ERR)" ;;
+  esac
+done
+unset _pair_flag _tok
+# All of them at once are reported together, in the order given.
+run --dry-run --system --quick --expire-reflog --no-git
+[ "$STATUS" -eq 2 ] || fail "--system with every maintenance flag exited $STATUS (want 2)"
+case "$ERR" in
+  *"conflicts with repository-scoped flags: --quick --expire-reflog --no-git"*)
+    echo "ok: every maintenance flag named together on stderr" ;;
+  *) fail "combined maintenance flags not named on stderr (got: $ERR)" ;;
+esac
+# The same flags stay live outside system scope: --no-system with a target
+# and --only-unknown-scratch parses them and exits 0 (the sudo re-exec
+# section below covers their behaviour; this pins only the parse).
+for flag in --quick --expire-reflog --no-git-maintenance --no-maintenance --no-git; do
+  run --no-system --path "$VALID" --only-unknown-scratch "$flag"
+  [ "$STATUS" -eq 0 ] || fail "$flag under --no-system exited $STATUS (want 0, stderr: $ERR)"
+  echo "ok: $flag still accepted under --no-system"
+done
+
+# ─── No side effects from the rejected runs ────────────────────────────
+if [ "$(snapshot)" = "$BEFORE" ]; then
+  echo "ok: rejected runs left the fixture tree unchanged"
+else
+  fail "rejected runs changed the fixture tree"
+fi
+
+# ─── Valid-value control ───────────────────────────────────────────────
+run --path "$VALID" --depth 2 --docker-age 7 --only-unknown-scratch
+[ "$STATUS" -eq 0 ] || fail "valid-value control exited $STATUS (stderr: $ERR)"
+case "$OUT" in
+  *"nothing >=500MB"*) echo "ok: valid values parse and the control run exits 0" ;;
+  *) fail "valid-value control output changed (got: $OUT)" ;;
+esac
+
+# ─── Portable stat: BSD-stat shim regression (#1068) ──────────────────
+# clean.sh is a macOS tool, but three sites used GNU-only `stat -c`;
+# BSD stat rejects -c, 2>/dev/null swallowed it, and the values came
+# back empty: the pytest newest-run guard never fired and the
+# unknown-scratch report always printed "unknown" dates. The shim
+# below rejects -c exactly as macOS stat does and implements the BSD
+# -f forms clean.sh's portable helpers use, translating them to the
+# real (GNU) stat captured before the shim enters PATH. (The shim is
+# test-only: using GNU date/stat internally to model BSD output is
+# the point -- production clean.sh never sees it.)
+REAL_STAT="$(command -v stat)"
+SHIM_DIR="$TMP_ROOT/bsd-shim"
+mkdir -p "$SHIM_DIR"
+# Executed by name via PATH, so the shebang must name a real interpreter: /usr/bin/env does not exist in the nix build sandbox (#1099). Resolved bash works in both sandbox and direct runs.
+echo "#!$(command -v bash)" > "$SHIM_DIR/stat"
+cat >> "$SHIM_DIR/stat" <<'SHIM_EOF'
+[ -n "${REAL_STAT:-}" ] || exit 1
+for _a in "$@"; do
+  if [ "$_a" = "-c" ]; then echo "stat: illegal option -- c" >&2; exit 1; fi
+done
+_fmt=""; _tfmt=""; _file=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -f) _fmt="$2"; shift 2 ;;
+    -t) _tfmt="$2"; shift 2 ;;
+    *) _file="$1"; shift ;;
+  esac
+done
+[ -n "$_fmt" ] && [ -n "$_file" ] || exit 1
+case "$_fmt" in
+  '%m') "$REAL_STAT" -c '%Y' "$_file" ;;
+  '%u') "$REAL_STAT" -c '%u' "$_file" ;;
+  '%SB'|'%Sm')
+    if [ "$_fmt" = '%SB' ]; then
+      _epoch="$("$REAL_STAT" -c '%W' "$_file" 2>/dev/null)"
+      # Filesystems without btime report %W as 0; a BSD file always
+      # has a birth time, so model it with the mtime there.
+      case "$_epoch" in ''|*[!0-9]*|0) _epoch="$("$REAL_STAT" -c '%Y' "$_file")" ;; esac
+    else
+      _epoch="$("$REAL_STAT" -c '%Y' "$_file")"
+    fi
+    date -d "@$_epoch" +"${_tfmt:-%Y-%m-%d %H:%M:%S}" ;;
+  *) echo "stat shim: unsupported -f format: $_fmt" >&2; exit 1 ;;
+esac
+SHIM_EOF
+chmod +x "$SHIM_DIR/stat"
+
+SCRATCH_BASE="$HOME/.local/share/opencode/tmp"
+mkdir -p "$SCRATCH_BASE"
+
+# Unknown-scratch report dates populate under BSD and GNU stat alike.
+# Flagged-only mode (--only-unknown-scratch, no --prune): the fixture
+# survives both runs, so the same entry serves the BSD and GNU passes.
+UENTRY="$SCRATCH_BASE/zzscratch1068"
+mkdir -p "$UENTRY"
+dd if=/dev/zero of="$UENTRY/blob" bs=1024 count=1536 2>/dev/null
+touch -d '2020-01-02 03:04:05' "$UENTRY"
+for mode in bsd gnu; do
+  if [ "$mode" = "bsd" ]; then
+    OUT="$(REAL_STAT="$REAL_STAT" PATH="$SHIM_DIR:$PATH" UNKNOWN_SCRATCH_MIN_MB=1 UNKNOWN_SCRATCH_STALE_DAYS=1 bash "$SCRIPT" --only-unknown-scratch 2>"$TMP_ROOT/err")"; STATUS=$?
+  else
+    OUT="$(UNKNOWN_SCRATCH_MIN_MB=1 UNKNOWN_SCRATCH_STALE_DAYS=1 bash "$SCRIPT" --only-unknown-scratch 2>"$TMP_ROOT/err")"; STATUS=$?
+  fi
+  ERR="$(cat "$TMP_ROOT/err")"
+  [ "$STATUS" -eq 0 ] || fail "unknown-scratch ($mode stat) exited $STATUS (stderr: $ERR)"
+  ULINE="$(printf '%s\n' "$OUT" | grep 'zzscratch1068' || true)"
+  [ -n "$ULINE" ] || { fail "unknown-scratch ($mode stat): fixture not reported"; continue; }
+  case "$ULINE" in
+    *"2020-01-02 03:04:05"*) echo "ok: unknown-scratch ($mode stat) report shows the real modified date" ;;
+    *) fail "unknown-scratch ($mode stat): modified date not populated (line: $ULINE)" ;;
+  esac
+  case "$ULINE" in
+    *unknown*) fail "unknown-scratch ($mode stat): report still shows unknown dates (line: $ULINE)" ;;
+    *) echo "ok: unknown-scratch ($mode stat) report shows a created date" ;;
+  esac
+done
+
+# Pytest newest-run guard fires under BSD and GNU stat alike. Both
+# runs are older than PYTEST_KEEP_HOURS, so only the guard keeps the
+# newest (pytest-2). --dry-run makes del() report instead of remove:
+# under the #1068 bug pytest-2 appears in the would-delete list.
+PTDIR="$SCRATCH_BASE/pytest-of-fixture"
+mkdir -p "$PTDIR/pytest-1" "$PTDIR/pytest-2"
+touch -d '10 hours ago' "$PTDIR/pytest-1"
+touch -d '6 hours ago' "$PTDIR/pytest-2"
+ln -s pytest-2 "$PTDIR/pytest-current"
+for mode in bsd gnu; do
+  if [ "$mode" = "bsd" ]; then
+    OUT="$(REAL_STAT="$REAL_STAT" PATH="$SHIM_DIR:$PATH" PYTEST_KEEP_HOURS=4 TMPDIR="$SCRATCH_BASE" bash "$SCRIPT" --system --dry-run 2>"$TMP_ROOT/err")"; STATUS=$?
+  else
+    OUT="$(PYTEST_KEEP_HOURS=4 TMPDIR="$SCRATCH_BASE" bash "$SCRIPT" --system --dry-run 2>"$TMP_ROOT/err")"; STATUS=$?
+  fi
+  ERR="$(cat "$TMP_ROOT/err")"
+  [ "$STATUS" -eq 0 ] || fail "pytest guard ($mode stat): --system --dry-run exited $STATUS (stderr: $ERR)"
+  # Line-exact, fixture-path-pinned matching (#1314): the old whole-output
+  # globs (*"would delete:"*pytest-2*) matched the host's real
+  # /tmp/pytest-of-user/pytest-21 and pytest-22 would-delete lines --
+  # "pytest-2" is a substring of both, and a glob spans lines -- so the
+  # suite failed on any machine with real pytest runs in /tmp even though
+  # the guard fired. Match a single would-delete line naming this
+  # fixture's run directory, end-anchored so pytest-1x/pytest-2x host
+  # runs cannot trip it either. Here-strings, not pipes: grep -q in a
+  # pipeline under pipefail can SIGPIPE the writer on large output.
+  if grep -q 'would delete: .*pytest-of-fixture/pytest-1$' <<<"$OUT"; then
+    echo "ok: pytest guard ($mode stat) schedules the older run for deletion"
+  else
+    fail "pytest guard ($mode stat): older pytest-1 not scheduled for deletion"
+  fi
+  if grep -q 'would delete: .*pytest-of-fixture/pytest-2$' <<<"$OUT"; then
+    fail "pytest guard ($mode stat): newest pytest-2 scheduled for deletion -- guard did not fire"
+  else
+    echo "ok: pytest guard ($mode stat) preserves the newest run"
+  fi
+  [ -e "$PTDIR/pytest-current" ] || fail "pytest guard ($mode stat): pytest-current dangling after the run"
+done
+
+# ─── --tmpdir sweep failure surfaces in clean.sh's result (#1270) ──
+# var-folders-clean.sh exits 1 naming failed deletions (#1262), but
+# clean.sh used to call it bare (no set -e anywhere), so a partially
+# failed --tmpdir sweep still ended at exit 0. Drive the REAL sweep
+# through the VAR_FOLDERS_ROOT seam with the #1262 rm shim (one
+# entry, aa, fails regardless of the suite's privileges): clean.sh
+# must exit non-zero, name the sweep as failed, leave aa in place, and
+# still sweep the rest. The success control must exit 0.
+# The runs use --only-tmpdir, NOT --system --tmpdir: HALF 1 does real
+# host cleanup (absolute-path brew, /Library/Caches/Homebrew, Trash)
+# before it reaches the sweep, so a --system run would delete host
+# data merely by running this suite on a developer machine.
+# --only-tmpdir runs just the shared sweep and exits with its result.
+vf="$TMP_ROOT/varfolders"
+mkdir -p "$vf/aa" "$vf/bb" "$vf/zz"
+touch "$vf/aa/file" "$vf/zz/file2"
+shim_dir="$TMP_ROOT/rm-shim"
+mkdir -p "$shim_dir"
+real_rm="$(command -v rm)"
+cat > "$shim_dir/rm" <<SHIM_EOF
+#!$(command -v bash)
+for arg in "\$@"; do
+  case "\$arg" in
+    */aa) echo "rm: cannot remove (shimmed failure)" >&2; exit 1 ;;
+  esac
+done
+exec $real_rm "\$@"
+SHIM_EOF
+chmod +x "$shim_dir/rm"
+OLD_PATH="$PATH"
+export VAR_FOLDERS_ROOT="$vf"
+PATH="$shim_dir:$PATH"
+run --only-tmpdir --no-sudo
+PATH="$OLD_PATH"
+[ "$STATUS" -ne 0 ] || fail "--tmpdir with a failing deletion exited $STATUS (want non-zero)"
+case "$ERR" in
+  *"/private/var/folders sweep failed"*) echo "ok: --tmpdir failure named the sweep as failed" ;;
+  *) fail "--tmpdir failure did not name the sweep on stderr (got: $ERR)" ;;
+esac
+case "$ERR" in
+  *"clean.sh: 1 operation(s) failed"*"$vf"*)
+    echo "ok: --tmpdir failure includes the counted outcome summary" ;;
+  *) fail "--tmpdir failure did not include the counted summary (got: $ERR)" ;;
+esac
+[ -e "$vf/aa/file" ] && echo "ok: shimmed entry left in place" || fail "shimmed entry was removed anyway"
+[ ! -e "$vf/bb" ] && [ ! -e "$vf/zz/file2" ] && echo "ok: rest of the sweep still ran" || fail "sweep stopped at the failure"
+# Success control: same path, no shim -- everything swept, exit 0.
+vf2="$TMP_ROOT/varfolders-ok"
+mkdir -p "$vf2/aa" "$vf2/zz"
+touch "$vf2/aa/file" "$vf2/zz/file2"
+OLD_PATH="$PATH"
+export VAR_FOLDERS_ROOT="$vf2"
+run --only-tmpdir --no-sudo
+PATH="$OLD_PATH"
+unset VAR_FOLDERS_ROOT
+[ "$STATUS" -eq 0 ] || fail "--tmpdir success control exited $STATUS (want 0, stderr: $ERR)"
+[ ! -e "$vf2/aa" ] && [ ! -e "$vf2/zz/file2" ] && echo "ok: success control swept the fixture" || fail "success control did not sweep the fixture"
+
+# ─── Tidy archive-move failures surface in clean.sh's result (#1337) ──
+# tidy_file_to_bucket / tidy_dir_to_bucket used to run
+# `mkdir -p "$dest" && mv "$entry" "$dest/" 2>/dev/null` unchecked, so a
+# failed archive move left the entry in place, printed nothing, and the
+# run exited 0. Drive the real tidy pass (repo half only, fixture HOME)
+# with a PATH-stub mv that always fails: clean.sh must warn naming the
+# entry, print the failure count, exit non-zero, and leave the entry in
+# place. The success control (real mv) must archive it and exit 0.
+# The fixture HOME's basename must be a real user: clean.sh derives
+# CALLER_USER from it, so this section runs under its own HOME named
+# after the current user. Discovery must still scan ONLY this fixture
+# HOME: clean.sh omits --user when HOME already equals
+# CALLER_USER_HOME, because git-discover-repos --user resolves the
+# passwd home and would clean the real user's actual repositories
+# (Codex P1 on PR #1342). The "0 repos" assertion below pins that:
+# on any developer machine the real home holds repos, so a discovery
+# leak makes the count non-zero.
+tidy_home="$TMP_ROOT/$(id -un)"
+tidy_base="$tidy_home/.local/share/opencode/tmp/opencode"
+mkdir -p "$tidy_base"
+touch "$tidy_base/loose1.txt"
+# Isolate the macOS scratch roots too (#1346): point VAR_FOLDERS_ROOT at an
+# empty fixture so neither clean.sh's opencode tidy loop nor
+# git-discover-repos' seed scan can reach real host /private/var/folders
+# roots on macOS. Unset again after this section.
+vf_empty="$TMP_ROOT/varfolders-empty"
+mkdir -p "$vf_empty"
+export VAR_FOLDERS_ROOT="$vf_empty"
+orig_home="$HOME"
+export HOME="$tidy_home"
+mv_shim_dir="$TMP_ROOT/mv-shim"
+mkdir -p "$mv_shim_dir"
+printf '#!%s\nexit 1\n' "$(command -v bash)" > "$mv_shim_dir/mv"
+chmod +x "$mv_shim_dir/mv"
+OLD_PATH="$PATH"
+PATH="$mv_shim_dir:$PATH"
+run --no-system --no-sudo --no-git-maintenance
+PATH="$OLD_PATH"
+[ "$STATUS" -ne 0 ] || fail "tidy with a failing mv exited $STATUS (want non-zero)"
+case "$ERR" in
+  *"could not file away"*"loose1.txt"*) echo "ok: tidy failure warned naming the entry" ;;
+  *) fail "tidy failure did not name the entry on stderr (got: $ERR)" ;;
+esac
+case "$ERR" in
+  *"1 archive move(s) failed"*) echo "ok: tidy failure summary named the count" ;;
+  *) fail "tidy failure summary did not name the count on stderr (got: $ERR)" ;;
+esac
+[ -e "$tidy_base/loose1.txt" ] && echo "ok: failed entry left in place" || fail "failed entry was archived anyway"
+case "$OUT" in
+  *"0 repos, 0 worktrees"*) echo "ok: tidy run discovery stayed inside the fixture HOME" ;;
+  *) fail "tidy run discovery was not isolated to the fixture HOME (got: $OUT)" ;;
+esac
+# Success control: same fixture, real mv -- archived, exit 0.
+run --no-system --no-sudo --no-git-maintenance
+[ "$STATUS" -eq 0 ] || fail "tidy success control exited $STATUS (want 0, stderr: $ERR)"
+[ ! -e "$tidy_base/loose1.txt" ] && find "$tidy_base/_loose" -name loose1.txt | grep -q . && echo "ok: success control archived the entry" || fail "success control did not archive the entry"
+export HOME="$orig_home"
+unset VAR_FOLDERS_ROOT
+
+# ─── opencode scratch roots follow VAR_FOLDERS_ROOT (#1346) ──
+# Positive pin: a fixture var-folders root holding a loose file must be
+# tidied, and a git repo under it must be discovered -- proving both
+# enumeration sites follow the override instead of the hardcoded
+# /private/var/folders. Negative pin: with the override pointing at an
+# empty dir, the same fixture content is invisible -- proving a test run
+# pointed at a fixture can never reach real host roots. Production
+# behaviour is unchanged when the override is unset (same default root).
+vf_iso="$TMP_ROOT/varfolders-isolated"
+vf_oc="$vf_iso/aa/bb/T/opencode"
+mkdir -p "$vf_oc"
+touch "$vf_oc/loose-iso.txt"
+mkdir -p "$vf_oc/iso-repo"
+git -C "$vf_oc/iso-repo" init -q 2>/dev/null || fail "could not init fixture scratch repo"
+export VAR_FOLDERS_ROOT="$vf_iso"
+iso_home="$TMP_ROOT/iso-home"
+mkdir -p "$iso_home"
+disc_out="$(HOME="$iso_home" bash "$SELF_DIR/git-discover-repos" --auto --repos-only 2>"$TMP_ROOT/iso-disc-err")"; disc_rc=$?
+[ "$disc_rc" -eq 0 ] || fail "discovery against fixture var root exited $disc_rc: $(cat "$TMP_ROOT/iso-disc-err")"
+case "$disc_out" in
+  *"$vf_oc/iso-repo"*) echo "ok: discovery follows VAR_FOLDERS_ROOT to the fixture scratch root" ;;
+  *) fail "discovery did not find the fixture scratch repo (got: $disc_out)" ;;
+esac
+vf_miss="$TMP_ROOT/varfolders-miss"
+mkdir -p "$vf_miss"
+export VAR_FOLDERS_ROOT="$vf_miss"
+disc_out="$(HOME="$iso_home" bash "$SELF_DIR/git-discover-repos" --auto --repos-only 2>"$TMP_ROOT/iso-disc-err")"; disc_rc=$?
+[ "$disc_rc" -eq 0 ] || fail "discovery against empty var root exited $disc_rc: $(cat "$TMP_ROOT/iso-disc-err")"
+case "$disc_out" in
+  *"$vf_oc/iso-repo"*) fail "discovery leaked the fixture scratch repo with the override pointed elsewhere" ;;
+  *) echo "ok: discovery pointed elsewhere never enumerates the fixture scratch root" ;;
+esac
+# Tidy the fixture var root for real: the loose file must be filed away.
+export VAR_FOLDERS_ROOT="$vf_iso"
+tidy_iso_home="$TMP_ROOT/$(id -un)-iso"
+tidy_iso_base="$tidy_iso_home/.local/share/opencode/tmp/opencode"
+mkdir -p "$tidy_iso_base"
+orig_home2="$HOME"
+export HOME="$tidy_iso_home"
+run --no-system --no-sudo --no-git-maintenance
+[ "$STATUS" -eq 0 ] || fail "tidy against fixture var root exited $STATUS (want 0, stderr: $ERR)"
+[ ! -e "$vf_oc/loose-iso.txt" ] && find "$vf_oc/_loose" -name loose-iso.txt | grep -q . && echo "ok: tidy filed away the fixture scratch loose file" || fail "tidy did not file away the fixture scratch loose file"
+export HOME="$orig_home2"
+unset VAR_FOLDERS_ROOT
+
+# ─── --only-tmpdir survives the privilege re-exec (Codex P1 on #1273) ──
+# The parser consumes "$@" before the privilege block, and ONLY_TMPDIR
+# was neither skipped past brew_cleanup nor carried into the sudo
+# re-exec -- so a non-root \`clean.sh --only-tmpdir\` (no --no-sudo) ran
+# brew maintenance, then re-executed WITHOUT the flag and performed the
+# default full cleanup instead of just the sweep. Stub sudo: it records
+# its argv + the ONLY_TMPDIR it was handed and exits 0 without running
+# anything, so this is safe anywhere; as root the privilege block is
+# skipped entirely and so is this section.
+if [ "$(id -u)" -ne 0 ]; then
+  sudo_stub_dir="$TMP_ROOT/sudo-stub"
+  mkdir -p "$sudo_stub_dir"
+  export SUDO_STUB_LOG="$TMP_ROOT/sudo-stub.log"
+  : > "$SUDO_STUB_LOG"
+  {
+    printf '#!%s\n' "$(command -v bash)"
+    cat <<'STUB_EOF'
+{
+  printf 'args: %s\n' "$*"
+  printf 'ONLY_TMPDIR=%s\n' "${ONLY_TMPDIR:-unset}"
+  printf 'NIX_KEEP_DAYS=%s\n' "${NIX_KEEP_DAYS:-unset}"
+  printf 'PYTEST_KEEP_HOURS=%s\n' "${PYTEST_KEEP_HOURS:-unset}"
+  printf 'VSCODE_PRUNE_HEAVY=%s\n' "${VSCODE_PRUNE_HEAVY:-unset}"
+  printf 'PRUNE_UNKNOWN_SCRATCH=%s\n' "${PRUNE_UNKNOWN_SCRATCH:-unset}"
+} >> "$SUDO_STUB_LOG"
+exit 0
+STUB_EOF
+  } > "$sudo_stub_dir/sudo"
+  chmod +x "$sudo_stub_dir/sudo"
+  OLD_PATH="$PATH"
+  PATH="$sudo_stub_dir:$PATH"
+  run --only-tmpdir
+  PATH="$OLD_PATH"
+  [ "$STATUS" -eq 0 ] || fail "--only-tmpdir sudo re-exec exited $STATUS (want 0, stderr: $ERR)"
+  case "$(cat "$SUDO_STUB_LOG")" in
+    *"ONLY_TMPDIR=1"*) echo "ok: --only-tmpdir carried into the sudo re-exec" ;;
+    *) fail "--only-tmpdir did not reach the sudo re-exec (stub log: $(cat "$SUDO_STUB_LOG"))" ;;
+  esac
+  case "$(cat "$SUDO_STUB_LOG")" in
+    *"--preserve-env="*ONLY_TMPDIR*) echo "ok: ONLY_TMPDIR named in --preserve-env" ;;
+    *) fail "ONLY_TMPDIR missing from --preserve-env (stub log: $(cat "$SUDO_STUB_LOG"))" ;;
+  esac
+  case "$OUT" in
+    *"brew cleanup"*) fail "--only-tmpdir ran pre-sudo brew cleanup" ;;
+    *) echo "ok: --only-tmpdir skipped pre-sudo brew cleanup" ;;
+  esac
+  # Validated tunables survive the same re-exec (#1309): the re-exec
+  # assigned and --preserve-env-listed only 10 of the 18 validated
+  # tunables, so the rest were dropped by sudo env_reset and the root
+  # run silently used defaults (NIX_KEEP_DAYS=0 never took effect).
+  : > "$SUDO_STUB_LOG"
+  OLD_PATH="$PATH"
+  PATH="$sudo_stub_dir:$PATH"
+  export NIX_KEEP_DAYS=0 PYTEST_KEEP_HOURS=1 VSCODE_PRUNE_HEAVY=1
+  run --only-tmpdir
+  PATH="$OLD_PATH"
+  unset NIX_KEEP_DAYS PYTEST_KEEP_HOURS VSCODE_PRUNE_HEAVY
+  [ "$STATUS" -eq 0 ] || fail "tunable sudo re-exec exited $STATUS (want 0, stderr: $ERR)"
+  case "$(cat "$SUDO_STUB_LOG")" in
+    *"NIX_KEEP_DAYS=0"*) echo "ok: NIX_KEEP_DAYS=0 carried into the sudo re-exec" ;;
+    *) fail "NIX_KEEP_DAYS=0 did not reach the sudo re-exec (stub log: $(cat "$SUDO_STUB_LOG"))" ;;
+  esac
+  case "$(cat "$SUDO_STUB_LOG")" in
+    *"PYTEST_KEEP_HOURS=1"*) echo "ok: PYTEST_KEEP_HOURS=1 carried into the sudo re-exec" ;;
+    *) fail "PYTEST_KEEP_HOURS=1 did not reach the sudo re-exec (stub log: $(cat "$SUDO_STUB_LOG"))" ;;
+  esac
+  case "$(cat "$SUDO_STUB_LOG")" in
+    *"VSCODE_PRUNE_HEAVY=1"*) echo "ok: VSCODE_PRUNE_HEAVY=1 carried into the sudo re-exec" ;;
+    *) fail "VSCODE_PRUNE_HEAVY=1 did not reach the sudo re-exec (stub log: $(cat "$SUDO_STUB_LOG"))" ;;
+  esac
+  # The --preserve-env list itself (the stub's args line, not the env
+  # lines below it) is the discriminating check: real sudo env_reset
+  # drops any carried value whose name is not listed there.
+  _args_line="$(grep '^args:' "$SUDO_STUB_LOG")"
+  for _tunable in NIX_KEEP_DAYS NIX_KEEP_GENS SHORT_SCRATCH_STALE_HOURS PG_SCRATCH_STALE_HOURS ACTIVE_ARTIFACT_STALE_HOURS PYTEST_KEEP_HOURS UNKNOWN_SCRATCH_MIN_MB UNKNOWN_SCRATCH_STALE_DAYS VSCODE_PRUNE_HEAVY; do
+    case "$_args_line" in
+      *",$_tunable,"*|*",$_tunable "*) echo "ok: $_tunable named in --preserve-env" ;;
+      *) fail "$_tunable missing from --preserve-env (args: $_args_line)" ;;
+    esac
+  done
+  # CLI flags survive the same re-exec (#1313): the parser consumed
+  # "$@" before the privilege block, so the root run re-parsed an empty
+  # argument list and silently widened a scoped run (one target,
+  # --no-system, no git maintenance) to the default full-machine run.
+  # clean.sh now captures the original arguments before parsing and
+  # re-passes them; the stub's args line must show every flag below.
+  : > "$SUDO_STUB_LOG"
+  OLD_PATH="$PATH"
+  PATH="$sudo_stub_dir:$PATH"
+  run --no-system --path "$VALID" --depth 2 --follow --no-git-maintenance --quick --prune-unknown-scratch
+  PATH="$OLD_PATH"
+  [ "$STATUS" -eq 0 ] || fail "flag-survival sudo re-exec exited $STATUS (want 0, stderr: $ERR)"
+  _args_line="$(grep '^args:' "$SUDO_STUB_LOG")"
+  for _flag in "--no-system" "--path $VALID" "--depth 2" "--follow" "--no-git-maintenance" "--quick" "--prune-unknown-scratch"; do
+    case "$_args_line" in
+      *"$_flag"*) echo "ok: $_flag reaches the sudo re-exec" ;;
+      *) fail "$_flag missing from the sudo re-exec (args: $_args_line)" ;;
+    esac
+  done
+  unset _flag _args_line
+  case "$(cat "$SUDO_STUB_LOG")" in
+    *"PRUNE_UNKNOWN_SCRATCH=1"*) echo "ok: PRUNE_UNKNOWN_SCRATCH=1 carried into the sudo re-exec" ;;
+    *) fail "PRUNE_UNKNOWN_SCRATCH did not reach the sudo re-exec (stub log: $(cat "$SUDO_STUB_LOG"))" ;;
+  esac
+  _args_line="$(grep '^args:' "$SUDO_STUB_LOG")"
+  case "$_args_line" in
+    *",PRUNE_UNKNOWN_SCRATCH,"*) echo "ok: PRUNE_UNKNOWN_SCRATCH named in --preserve-env" ;;
+    *) fail "PRUNE_UNKNOWN_SCRATCH missing from --preserve-env (args: $_args_line)" ;;
+  esac
+  unset _args_line
+  # A positional target survives too (same empty-"$@" mechanism).
+  : > "$SUDO_STUB_LOG"
+  OLD_PATH="$PATH"
+  PATH="$sudo_stub_dir:$PATH"
+  run "$VALID"
+  PATH="$OLD_PATH"
+  [ "$STATUS" -eq 0 ] || fail "positional-target sudo re-exec exited $STATUS (want 0, stderr: $ERR)"
+  case "$(grep '^args:' "$SUDO_STUB_LOG")" in
+    *" $VALID") echo "ok: positional target reaches the sudo re-exec" ;;
+    *) fail "positional target missing from the sudo re-exec (stub log: $(cat "$SUDO_STUB_LOG"))" ;;
+  esac
+  # --sudo --dry-run is a true no-op (#1313): it must never invoke sudo
+  # at all -- the old code re-executed with DRY_RUN reset to 0, a real
+  # writing run as root despite the no-op message.
+  : > "$SUDO_STUB_LOG"
+  OLD_PATH="$PATH"
+  PATH="$sudo_stub_dir:$PATH"
+  run --sudo --dry-run
+  PATH="$OLD_PATH"
+  [ "$STATUS" -eq 0 ] || fail "--sudo --dry-run exited $STATUS (want 0, stderr: $ERR)"
+  [ ! -s "$SUDO_STUB_LOG" ] && echo "ok: --sudo --dry-run never invokes sudo" || fail "--sudo --dry-run invoked sudo (stub log: $(cat "$SUDO_STUB_LOG"))"
+  unset _tunable _args_line
+  unset SUDO_STUB_LOG
+else
+  echo "skip: --only-tmpdir re-exec test needs a non-root runner"
+fi
+# ─── Depth-1 + --follow rejected; discovery failure is loud (#1276) ──
+# clean.sh was the one discovery wrapper #1268 left behind: it accepted
+# --no-recursive --follow (and --depth 1 --follow), forwarded the pair to
+# git-discover-repos, which rejects it at exit 2 -- and then discarded
+# discover's stderr, warned generically, and completed the sweep on an
+# empty discovery set at exit 0. Both spellings, in either order, must
+# now exit 2 at parse time naming the pair. A discovery failure for any
+# other reason (here: a nonexistent --path, which discover exits 1 on)
+# must surface discover's stderr and exit non-zero instead. The
+# controls -- --no-recursive alone discovering normally, and
+# --depth 2 --follow parsing -- are unchanged.
+for pair in "--no-recursive --follow" "--follow --no-recursive" "--depth 1 --follow" "--follow --depth 1"; do
+  # shellcheck disable=SC2086
+  run --dry-run --path "$VALID" $pair
+  [ "$STATUS" -eq 2 ] || fail "depth-1/follow pair '$pair' exited $STATUS (want 2)"
+  case "$ERR" in
+    *"clean.sh: --no-recursive conflicts with --follow"*) echo "ok: pair '$pair' rejected as a conflict" ;;
+    *) fail "pair '$pair' was not named as a conflict on stderr (got: $ERR)" ;;
+  esac
+done
+run --dry-run --path "$TMP_ROOT/no-such-dir"
+[ "$STATUS" -ne 0 ] || fail "discovery failure (nonexistent --path) exited 0 (want non-zero)"
+case "$ERR" in
+  *"git-discover-repos failed with exit 1"*"not a directory"*) echo "ok: discovery failure surfaced discover stderr and exited $STATUS" ;;
+  *) fail "discovery failure did not surface discover stderr (got: $ERR)" ;;
+esac
+FIXTURE_REPO="$TMP_ROOT/disc/repo1"
+mkdir -p "$FIXTURE_REPO/.git"
+run --dry-run --path "$FIXTURE_REPO" --no-recursive
+[ "$STATUS" -eq 0 ] || fail "--no-recursive control exited $STATUS (stderr: $ERR)"
+case "$OUT" in
+  *"1 repos, 0 worktrees"*) echo "ok: --no-recursive control reports 1 repo" ;;
+  *) fail "--no-recursive control output changed (got: $OUT)" ;;
+esac
+run --path "$VALID" --depth 2 --follow --only-unknown-scratch
+[ "$STATUS" -eq 0 ] || fail "--depth 2 --follow control exited $STATUS (stderr: $ERR)"
+echo "ok: --depth 2 --follow still accepted"
+
+# ─── Shared conformance probe matrix (#1146, design #1145) ─────────
+# The matrix rows for clean.sh, driven through lib/arg-probe.sh (the
+# same helper every discovery suite uses): unknown, missing/flag-shaped
+# (also pinned per-option above), repeat, both conflict orders, extra
+# positional, and bad numbers -- abc, 0, oversized -- for both numeric
+# options. 08 is probed as accepted decimal 8 (rule 6, #881).
+probe_rejected "unknown option: --bogus" --bogus
+probe_rejected "clean.sh: --depth requires a value" --depth
+probe_rejected "clean.sh: --docker-age requires a value" --docker-age --dry-run
+probe_rejected "clean.sh: --depth may be given only once" --dry-run --path "$VALID" --depth 1 --depth 2
+probe_rejected "clean.sh: --system and --no-system may not be combined" --dry-run --system --no-system
+probe_rejected "clean.sh: --system and --no-system may not be combined" --dry-run --no-system --system
+probe_rejected "clean.sh: --follow and --no-follow may not be combined" --dry-run --path "$VALID" --follow --no-follow
+probe_rejected "clean.sh: --follow and --no-follow may not be combined" --dry-run --path "$VALID" --no-follow --follow
+# Recursive pair + --depth judged at parse time (#1609), mirrored from
+# git-discover-repos: any two of the three depth spellings exit 2 in
+# both orders; same-side repeats stay accepted.
+probe_rejected "clean.sh: --recursive and --no-recursive may not be combined" --dry-run --path "$VALID" --recursive --no-recursive
+probe_rejected "clean.sh: --recursive and --no-recursive may not be combined" --dry-run --path "$VALID" --no-walk --walk
+probe_rejected "clean.sh: --depth and --recursive may not be combined" --dry-run --path "$VALID" --depth 3 --walk
+probe_rejected "clean.sh: --depth and --recursive may not be combined" --dry-run --path "$VALID" --recursive --depth 3
+probe_rejected "clean.sh: --depth and --no-recursive may not be combined" --dry-run --path "$VALID" --depth 3 --no-recursive
+probe_rejected "clean.sh: --depth and --no-recursive may not be combined" --dry-run --path "$VALID" --no-walk --depth 3
+probe_accepted --dry-run --path "$VALID" --recursive --walk --only-unknown-scratch
+probe_accepted --dry-run --path "$VALID" --no-recursive --no-walk --only-unknown-scratch
+probe_rejected "unexpected argument: $OTHER" --dry-run "$VALID" "$OTHER"
+probe_rejected "clean.sh: empty positional argument (target must not be empty)" --dry-run ""
+for bad in abc 0 2147483648 99999999999999999999999999; do
+  probe_rejected "clean.sh: --depth must be a positive integer" --dry-run --path "$VALID" --depth "$bad"
+  probe_rejected "clean.sh: --docker-age must be a positive integer" --dry-run --path "$VALID" --docker-age "$bad"
+done
+probe_accepted --path "$VALID" --depth 08 --docker-age 08 --only-unknown-scratch
+
+# Mode-effectiveness rows (#1723, design #1722), driven through the
+# shared probes: the arg_used accumulator records class flags in
+# either order, the arg_refuse_in_mode judge names every offending
+# flag, and it fires only under --system (the --no-system control
+# with the same class flags is accepted).
+probe_mode_refused "clean.sh: --system conflicts with repository-scoped flags: --depth" --dry-run --system --depth 3
+probe_mode_refused "clean.sh: --system conflicts with repository-scoped flags: --depth" --dry-run --depth 3 --system
+probe_mode_refused "clean.sh: --system conflicts with repository-scoped flags: --quick --expire-reflog" --dry-run --system --quick --expire-reflog
+# --no-recursive/--no-walk: the one repo-scoped pair the judge never saw
+# (#1763) - the arm set DEPTH_LIMIT but never recorded arg_used, so
+# --system silently dropped them. Both spellings, both orders, refuse
+# naming the canonical --no-recursive (spotlight precedent).
+probe_mode_refused "clean.sh: --system conflicts with repository-scoped flags: --no-recursive" --dry-run --system --no-recursive
+probe_mode_refused "clean.sh: --system conflicts with repository-scoped flags: --no-recursive" --dry-run --no-recursive --system
+probe_mode_refused "clean.sh: --system conflicts with repository-scoped flags: --no-recursive" --dry-run --system --no-walk
+probe_mode_refused "clean.sh: --system conflicts with repository-scoped flags: --no-recursive" --dry-run --no-walk --system
+probe_mode_accepted --dry-run --no-system --path "$VALID" --depth 3 --only-unknown-scratch
+
+# ─── Shared operation-outcome conformance matrix (#1339) ───────────────
+outcome_probe_matrix
+
+
+
+# ─── brew_cleanup runs cleanup exactly once, and warns on failure (#1422) ───
+# brew_cleanup used to run `brew cleanup --prune=all` twice: once warned,
+# then again with --quiet, stderr discarded and failure swallowed
+# (2>/dev/null || true), so a broken second run was invisible and every
+# clean paid for the sweep twice. Pin the contract with a stub brew:
+# extract the real brew_cleanup from clean.sh at test time, point
+# real_brew at the stub, and count `cleanup` invocations.
+BC_DIR="$TMP_ROOT/brew-cleanup"
+mkdir -p "$BC_DIR"
+export BREW_STUB_LOG="$BC_DIR/invocations.log"
+export BREW_STUB_FAIL=0
+# The stub's shebang names this bash by path, like the other stubs in this
+# file: the nix build sandbox has no /usr/bin/env (#978), so an env shebang
+# makes the stub unexecutable there and brew_cleanup runs it 0 times.
+{ printf '#!%s\n' "$(command -v bash)"; cat <<'STUB'
+echo "$*" >> "$BREW_STUB_LOG"
+[ "${BREW_STUB_FAIL:-0}" = "1" ] && exit 1
+exit 0
+STUB
+} > "$BC_DIR/brew"
+chmod +x "$BC_DIR/brew"
+sed -n '/^brew_cleanup() {/,/^}/p' "$SCRIPT" > "$BC_DIR/brew_cleanup.sh"
+[ -s "$BC_DIR/brew_cleanup.sh" ] || fail "could not extract brew_cleanup from clean.sh"
+# shellcheck disable=SC1091
+. "$BC_DIR/brew_cleanup.sh"
+real_brew() { printf '%s' "$BC_DIR/brew"; }
+warn() { printf 'WARN: %s\n' "$*" >&2; }
+info() { :; }
+: > "$BREW_STUB_LOG"
+BC_ERR="$(brew_cleanup 2>&1 >/dev/null)"
+BC_CALLS="$(grep -c '^cleanup ' "$BREW_STUB_LOG")"
+if [ "$BC_CALLS" -eq 1 ] && [ -z "$BC_ERR" ]; then
+  echo "ok: brew_cleanup runs brew cleanup exactly once"
+else
+  [ "$BC_CALLS" -eq 1 ] || fail "brew_cleanup ran brew cleanup $BC_CALLS times (want exactly 1)"
+  [ -z "$BC_ERR" ] || fail "successful brew_cleanup warned unexpectedly: $BC_ERR"
+fi
+BREW_STUB_FAIL=1
+: > "$BREW_STUB_LOG"
+BC_ERR="$(brew_cleanup 2>&1 >/dev/null)"
+BC_CALLS="$(grep -c '^cleanup ' "$BREW_STUB_LOG")"
+[ "$BC_CALLS" -eq 1 ] || fail "failing brew_cleanup ran brew cleanup $BC_CALLS times (want exactly 1)"
+case "$BC_ERR" in
+  *"brew cleanup failed"*) echo "ok: brew_cleanup failure surfaces a warning" ;;
+  *) fail "brew_cleanup failure was swallowed (stderr: $BC_ERR)" ;;
+esac
+BREW_STUB_FAIL=0
+
+# ─── #1465: the warn/info color gate follows its output stream ─────────────
+# warn writes to stderr while info writes to stdout. Keep their gates
+# independent so a terminal on one stream cannot leak escapes to a log on
+# the other; NO_COLOR disables both.
+GATE_DIR="$(mktemp -d)"
+sed -n '/^# Gate each color by the stream/,/^set_output_colors$/p' "$SCRIPT" > "$GATE_DIR/gate.sh"
+[ -s "$GATE_DIR/gate.sh" ] || fail "could not extract the output color gates from clean.sh"
+grep -q 'NO_COLOR' "$GATE_DIR/gate.sh" || fail "clean.sh color gate does not consult NO_COLOR"
+grep -Fq '&& -t 2' "$GATE_DIR/gate.sh" || fail "warn color gate does not test stderr"
+grep -Fq '&& -t 1' "$GATE_DIR/gate.sh" || fail "info color gate does not test stdout"
+gate_colors() (
+  # shellcheck disable=SC1091
+  . "$GATE_DIR/gate.sh" > /dev/null
+  printf '%s%s%s%s' "$C_WARN" "$C_WARN_OFF" "$C_INFO" "$C_INFO_OFF"
+)
+[ -z "$(gate_colors 2>/dev/null)" ] || fail "color gate: piped streams still set warn/info colors"
+[ -z "$(NO_COLOR=1 gate_colors 2>/dev/null)" ] || fail "color gate: NO_COLOR=1 still sets warn/info colors"
+rm -rf "$GATE_DIR"
+
+# ─── #1610: mark_dir's symlinked-marker guard (#1586) ──────────────────
+# PR #1602 added the -L guard to mark_dir but no test: neither this suite
+# nor full-clean.test.sh ever exercised mark_dir, so the guard could be
+# dropped or reordered below the [ -e ] check and every suite would stay
+# green. Extract the real mark_dir (the brew_cleanup pattern above) plus
+# the real spotlight_mark it delegates to, and drive it with poisoned
+# markers. Oracle: per-directory filesystem state after the call --
+# clean.sh's own warning line, no write at the symlink target, the
+# marker still a symlink, MARKED not incremented -- plus a clean sibling
+# in the same run still marked. Mutation check (verified when written):
+# deleting the -L guard makes the live case silent (the [ -e ] shortcut
+# counts it as already present) and degrades the dangling case to
+# spotlight_mark's differently-worded warning, so both fail below.
+MD_DIR="$TMP_ROOT/mark-dir"
+mkdir -p "$MD_DIR/outside"
+sed -n '/^mark_dir() {/,/^}/p' "$SCRIPT" > "$MD_DIR/mark_dir.sh"
+[ -s "$MD_DIR/mark_dir.sh" ] || fail "could not extract mark_dir from clean.sh"
+grep -q 'cannot write.*(symlink; not followed)' "$MD_DIR/mark_dir.sh" \
+  || fail "extracted mark_dir has no symlinked-marker guard to test"
+sed -n '/^spotlight_mark() {/,/^}/p' "$SELF_DIR/lib/common.sh" > "$MD_DIR/spotlight_mark.sh"
+[ -s "$MD_DIR/spotlight_mark.sh" ] || fail "could not extract spotlight_mark from lib/common.sh"
+SPOTLIGHT_MARKER=".metadata_never_index"
+DRY_RUN=0
+CALLER_USER=""
+MARKED=0
+# shellcheck disable=SC1091
+. "$MD_DIR/spotlight_mark.sh"
+# shellcheck disable=SC1091
+. "$MD_DIR/mark_dir.sh"
+
+# Live symlink: marker points at an existing file outside the directory.
+MD_LIVE="$MD_DIR/live"
+mkdir -p "$MD_LIVE"
+printf 'outside\n' > "$MD_DIR/outside/live-target"
+ln -s "$MD_DIR/outside/live-target" "$MD_LIVE/$SPOTLIGHT_MARKER"
+mark_dir "$MD_LIVE" 2> "$MD_DIR/live.err"
+case "$(cat "$MD_DIR/live.err")" in
+  *"  warning: cannot write $MD_LIVE/$SPOTLIGHT_MARKER (symlink; not followed)"*)
+    echo "ok: mark_dir warns with its own line on a live symlinked marker" ;;
+  *) fail "mark_dir live symlinked marker: wrong stderr (got: $(cat "$MD_DIR/live.err"))" ;;
+esac
+[ -L "$MD_LIVE/$SPOTLIGHT_MARKER" ] || fail "mark_dir live case: marker is no longer a symlink"
+[ "$(cat "$MD_DIR/outside/live-target")" = "outside" ] \
+  || fail "mark_dir live case: symlink target was modified"
+
+# Dangling symlink: marker points at a path that does not exist, in a
+# writable directory -- a followed write would create it.
+MD_DANGLING="$MD_DIR/dangling"
+mkdir -p "$MD_DANGLING"
+ln -s "$MD_DIR/outside/dangling-target" "$MD_DANGLING/$SPOTLIGHT_MARKER"
+mark_dir "$MD_DANGLING" 2> "$MD_DIR/dangling.err"
+case "$(cat "$MD_DIR/dangling.err")" in
+  *"  warning: cannot write $MD_DANGLING/$SPOTLIGHT_MARKER (symlink; not followed)"*)
+    echo "ok: mark_dir warns with its own line on a dangling symlinked marker" ;;
+  *) fail "mark_dir dangling symlinked marker: wrong stderr (got: $(cat "$MD_DIR/dangling.err"))" ;;
+esac
+[ -L "$MD_DANGLING/$SPOTLIGHT_MARKER" ] || fail "mark_dir dangling case: marker is no longer a symlink"
+[ ! -e "$MD_DIR/outside/dangling-target" ] \
+  || fail "mark_dir dangling case: a file was created at the symlink target"
+
+# Clean sibling in the same run: still marked, and it is the ONLY one of
+# the three that increments MARKED.
+MD_CLEAN="$MD_DIR/clean"
+mkdir -p "$MD_CLEAN"
+mark_dir "$MD_CLEAN" 2> "$MD_DIR/clean.err"
+[ -f "$MD_CLEAN/$SPOTLIGHT_MARKER" ] && [ ! -L "$MD_CLEAN/$SPOTLIGHT_MARKER" ] \
+  || fail "mark_dir clean sibling: marker was not created as a regular file"
+[ "$MARKED" -eq 1 ] || fail "mark_dir marked $MARKED directories (want exactly 1: the clean sibling)"
+[ -s "$MD_DIR/clean.err" ] && fail "mark_dir clean sibling warned unexpectedly: $(cat "$MD_DIR/clean.err")"
+echo "ok: mark_dir skips both symlinked markers and marks the clean sibling"
+
+[ "$failures" -eq 0 ] || { echo "$failures failure(s)" >&2; exit 1; }
+echo "all clean.sh flag-shaped-value checks passed"

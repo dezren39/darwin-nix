@@ -9,6 +9,7 @@ set -uo pipefail
 _self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/common.sh
 . "$_self_dir/lib/common.sh"
+ARG_PROGRAM="spotlight-exclude-artifacts"
 
 MARKER="$SPOTLIGHT_MARKER"   # from lib/common.sh
 
@@ -48,14 +49,19 @@ WHY
   seconds over ~28 GB / ~536k files.
 
 RELATIONSHIP TO THE NIX CONFIG
-  configuration.nix already creates the static markers during activation --
-  with plain `touch`, so they are REAL root-owned files, not read-only
-  /nix/store symlinks. --system therefore re-asserts the same list rather than
-  owning it: it is a safety net for paths created since the last switch, and
-  for anything a cache-clearing run (./clean) deleted. It should normally
+  STATIC_PATHS below is the single source of truth for the static markers:
+  there is no second list to keep in sync. configuration.nix re-asserts it
+  during activation by running this script --system (as root and as user)
+  from a /nix/store copy, so the markers are REAL files created by mark()'s
+  plain `touch`, not read-only /nix/store symlinks. --system is therefore
+  also a safety net for paths created since the last switch, and for
+  anything a cache-clearing run (./clean) deleted. It should normally
   report everything as already present.
 
-  Keep the STATIC_PATHS list below in sync with configuration.nix.
+  Sole exception: configuration.nix separately touches
+  /nix/.metadata_never_index alongside its mdutil handling of the /nix
+  volume; /nix is in STATIC_PATHS too, so both passes write the same
+  marker file.
 
 ROOT
   Run under sudo to cover /var/root/*. Those paths are mode 700, so an
@@ -63,7 +69,8 @@ ROOT
 EOF
 }
 
-# Mirrors the marker loop in configuration.nix. Root-only entries are skipped
+# The static list configuration.nix activation re-asserts by running this
+# script --system (see RELATIONSHIP above). Root-only entries are skipped
 # automatically when unprivileged, because [ -d ] fails on mode-700 dirs.
 STATIC_PATHS=(
   "$HOME/.nix-defexpr"
@@ -108,32 +115,77 @@ DO_WALK=1
 DO_SYSTEM=1
 SCOPE_SET=0
 AUTO_SET=0
+SYSTEM_SET=0
+NO_SYSTEM_SET=0
 DRY_RUN=0
 ROOT=""
+ROOT_SET=0
 DEPTH_LIMIT=""
+DEPTH_SET=0
 RECURSIVE_SET=0
+RECURSIVE_YES_SET=0
+RECURSIVE_NO_SET=0
 FOLLOW=""
+FOLLOW_GIVEN=""
+DISCOVERY_FLAGS_USED=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --auto) AUTO_SET=1 ;;                        # names the default scope
-    --no-system) DO_WALK=1; DO_SYSTEM=0; SCOPE_SET=1 ;;
-    --system) DO_WALK=0; DO_SYSTEM=1; SCOPE_SET=1 ;;
-    --path) ROOT="${2:-}"; shift ;;
-    --recursive|--walk) DEPTH_LIMIT=""; RECURSIVE_SET=1 ;;
-    --no-recursive|--no-walk) DEPTH_LIMIT=1; RECURSIVE_SET=1 ;;
-    --depth) DEPTH_LIMIT="${2:-1}"; RECURSIVE_SET=1; shift ;;
-    --follow) FOLLOW=1 ;;
-    --no-follow) FOLLOW=0 ;;
+    --no-system) { arg_conflict --system --no-system "$SYSTEM_SET"; DO_WALK=1; DO_SYSTEM=0; SCOPE_SET=1; NO_SYSTEM_SET=1; } ;;
+    --system) { arg_conflict --system --no-system "$NO_SYSTEM_SET"; DO_WALK=0; DO_SYSTEM=1; SCOPE_SET=1; SYSTEM_SET=1; } ;;
+    --path) { arg_require_value "$1" "${2:-}"; [ "$ROOT_SET" -eq 0 ] || arg_die "unexpected argument: $2 (target already set to $ROOT)"; ROOT="$2"; ROOT_SET=1; arg_used DISCOVERY_FLAGS_USED --path; shift; } ;;
+    --recursive|--walk) { arg_conflict --recursive --no-recursive "$RECURSIVE_NO_SET"; arg_conflict --depth --recursive "$DEPTH_SET"; DEPTH_LIMIT=""; RECURSIVE_SET=1; RECURSIVE_YES_SET=1; arg_used DISCOVERY_FLAGS_USED --recursive; } ;;
+    --no-recursive|--no-walk) { arg_conflict --recursive --no-recursive "$RECURSIVE_YES_SET"; arg_conflict --depth --no-recursive "$DEPTH_SET"; DEPTH_LIMIT=1; RECURSIVE_SET=1; RECURSIVE_NO_SET=1; arg_used DISCOVERY_FLAGS_USED --no-recursive; } ;;
+    --depth) { arg_require_value "$1" "${2:-}"; arg_conflict --depth --recursive "$RECURSIVE_YES_SET"; arg_conflict --depth --no-recursive "$RECURSIVE_NO_SET"; arg_once "$1" DEPTH_SET; DEPTH_LIMIT="$2"; RECURSIVE_SET=1; arg_used DISCOVERY_FLAGS_USED --depth; shift; } ;;
+    --follow) { [ -z "$FOLLOW_GIVEN" ] || [ "$FOLLOW_GIVEN" = "--follow" ] || arg_die "--follow conflicts with --no-follow"; FOLLOW=1; FOLLOW_GIVEN="--follow"; arg_used DISCOVERY_FLAGS_USED --follow; } ;;
+    --no-follow) { [ -z "$FOLLOW_GIVEN" ] || [ "$FOLLOW_GIVEN" = "--no-follow" ] || arg_die "--no-follow conflicts with --follow"; FOLLOW=0; FOLLOW_GIVEN="--no-follow"; arg_used DISCOVERY_FLAGS_USED --no-follow; } ;;
     --dry-run) DRY_RUN=1 ;;
     -h|--help) usage; exit 0 ;;
     -*) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
     *)
-      if [ -z "$ROOT" ]; then ROOT="$1"; else echo "unexpected argument: $1" >&2; exit 2; fi
+      [ -n "$1" ] || arg_die "empty positional argument (target must not be empty)"
+      if [ "$ROOT_SET" -eq 0 ]; then ROOT="$1"; ROOT_SET=1; arg_used DISCOVERY_FLAGS_USED --path; else echo "unexpected argument: $1" >&2; exit 2; fi
       ;;
   esac
   shift
 done
+# --system verifies the static path list only and runs no discovery, so
+# discovery flags are meaningless alongside it: they were recorded above
+# and then silently dropped at exit 0 (#1719), including a --path naming
+# a nonexistent target. Judge the pair here, at parse time, in the
+# clean.sh shape (#1711): exit 2 naming the offending flag(s), in either
+# flag order. --dry-run is NOT a discovery flag: mark() honours it in
+# the static half, so plain --system and --system --dry-run are unchanged.
+# The accumulator and the judge are the shared mode-effectiveness
+# mechanism in lib/common.sh (design #1722, #1723).
+if [ "$SYSTEM_SET" = "1" ]; then
+  arg_refuse_in_mode --system discovery "$DISCOVERY_FLAGS_USED" "--system verifies the static path list only; no discovery"
+fi
+
+# --depth is forwarded verbatim to find -maxdepth (via git-discover-repos),
+# where a non-numeric value fails mid-walk and 0 silently means "the path
+# itself only". Judge it whole, at parse time, with the shared arg_decimal
+# helper (lib/common.sh), like opencode-db-prune.sh judges
+# --protect-days/--batch (#830); the INT_MAX range backstop is #858's.
+# Empty means unbounded (--recursive). This judge is the same in all four
+# discovery-vocabulary scripts.
+if [ -n "$DEPTH_LIMIT" ]; then
+  arg_decimal DEPTH_LIMIT --depth "$DEPTH_LIMIT" positive
+fi
+
+# --no-recursive (a depth-1 walk) + --follow is the combination
+# git-discover-repos rejects at exit 2; an explicit --depth 1 with
+# --follow is the same combination in discover's vocabulary. Judge it
+# here, at parse time (#1268): forwarding it used to be invisible
+# because discovery ran in a process substitution with stderr
+# discarded, so the wrapper reported "0 marked" and exited 0.
+if [ "$DEPTH_LIMIT" = "1" ] && [ "$FOLLOW" = "1" ]; then
+  echo "spotlight-exclude-artifacts: --no-recursive conflicts with --follow" >&2
+  echo "                            (git-discover-repos rejects a depth-1 walk that follows symlinks; use --depth N with N>1 for a bounded walk plus following)" >&2
+  exit 2
+fi
+
 if [ "$AUTO_SET" = "1" ] && [ "$SCOPE_SET" = "1" ]; then
   echo "spotlight-exclude-artifacts: --auto conflicts with --system/--no-system" >&2
   echo "                            (--auto just names the default: system + repos)" >&2
@@ -145,6 +197,13 @@ created=0; existing=0; failed=0; skipped=0; needroot=0
 mark() {
   local dir="$1"
   if [ ! -d "$dir" ]; then skipped=$((skipped + 1)); return 0; fi
+  # A symlinked marker is never followed (#1586): warn and count it as
+  # failed -- never as marked or already present -- so touch/chown can
+  # never land outside the directory being marked.
+  if [ -L "$dir/$MARKER" ]; then
+    echo "  warning: cannot write $dir/$MARKER (symlink; not followed)" >&2
+    failed=$((failed + 1)); return 0
+  fi
   if [ -e "$dir/$MARKER" ]; then existing=$((existing + 1)); return 0; fi
   if [ "$DRY_RUN" = "1" ]; then echo "  would mark: $dir"; created=$((created + 1)); return 0; fi
   if touch "$dir/$MARKER" 2>/dev/null; then
@@ -171,24 +230,45 @@ if [ "$DO_WALK" = "1" ]; then
   [ -n "$FOLLOW" ] && { [ "$FOLLOW" = "1" ] && DARGS+=(--follow) || DARGS+=(--no-follow); }
   echo "spotlight-exclude-artifacts: discovering repos${ROOT:+ under $ROOT}"
 
-  # One discovery pass emits both record kinds:
-  #   repo|worktree <TAB> PATH
-  #   FOUND <TAB> reason <TAB> status <TAB> PATH
-  # so repos and their artifact dirs are found with a single walk.
-  while IFS=$'\t' read -r f1 f2 f3 f4; do
-    case "$f1" in
-      repo|worktree)
-        mark "$f2/.git"
-        ;;
-      FOUND)
-        # Skip git-tracked risky dirs: an untracked marker inside a committed
-        # vendor/ would surface in every `git status`.
-        if [ "$f3" = "tracked" ]; then skipped=$((skipped + 1)); else mark "$f4"; fi
-        ;;
-    esac
-  done < <("$_self_dir/git-discover-repos" "${DARGS[@]}" --find all --status 2>/dev/null)
+  # Discovery failure must be loud (#1268): the old process substitution
+  # discarded stderr and the exit status, so a git-discover-repos failure
+  # looked exactly like an empty tree -- "0 marked" at exit 0. Capture the
+  # output and stderr, check the status, and fail the run if discovery did.
+  DISCOVER_ERR="$(mktemp "${TMPDIR:-/tmp}/spotlight-discover.XXXXXX")"
+  discover_out="$("$_self_dir/git-discover-repos" "${DARGS[@]}" --find all --status 2>"$DISCOVER_ERR")"
+  discover_rc=$?
+  if [ "$discover_rc" -ne 0 ]; then
+    echo "spotlight-exclude-artifacts: git-discover-repos failed with exit $discover_rc" >&2
+    [ -s "$DISCOVER_ERR" ] && cat "$DISCOVER_ERR" >&2
+    failed=$((failed + 1))
+    DISCOVERY_FAILED=1
+  else
+    # One discovery pass emits both record kinds:
+    #   repo|worktree <TAB> PATH
+    #   FOUND <TAB> reason <TAB> status <TAB> PATH
+    # so repos and their artifact dirs are found with a single walk.
+    while IFS=$'\t' read -r f1 f2 f3 f4; do
+      case "$f1" in
+        repo|worktree)
+          mark "$f2/.git"
+          ;;
+        FOUND)
+          # Skip git-tracked risky dirs: an untracked marker inside a committed
+          # vendor/ would surface in every `git status`.
+          if [ "$f3" = "tracked" ]; then skipped=$((skipped + 1)); else mark "$f4"; fi
+          ;;
+      esac
+    done <<< "$discover_out"
+  fi
+  rm -f "$DISCOVER_ERR"
 fi
 
 printf 'spotlight-exclude-artifacts: %d marked, %d already, %d absent, %d need root, %d failed\n' \
   "$created" "$existing" "$skipped" "$needroot" "$failed"
+[ "${DISCOVERY_FAILED:-0}" = "1" ] && exit 1
+# A failed marker write must be loud too (#1333): mark() counted it in
+# the summary, but the run used to exit 0, so callers saw a green run
+# while a tree stayed indexed. needroot/skipped stay non-fatal -- they
+# never increment failed.
+[ "$failed" -gt 0 ] && exit 1
 exit 0

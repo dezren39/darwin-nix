@@ -42,6 +42,123 @@ cd "${script_dir}" || exit 1
 echo "entered: $script_dir"
 echo "git add ."
 
+# Phases.
+#
+# `just build`, `just activate` and `just switch` are three entry points into
+# one implementation, so there is nothing to drift. The split is by privilege:
+# phase_build needs no sudo and can run unattended, phase_activate needs root
+# and therefore a human (or a fingerprint) at the machine.
+#
+#   --build-only     prepare + build            no sudo
+#   --activate-only  activate + post + commit   sudo
+#   (no flag)        all of it
+#   --no-commit      combinable with any of the above: still stages (flakes
+#                    only see tracked files) but skips the marker commits, for
+#                    iterating on a build that is not ready to be recorded
+# Parse and validate EVERYTHING before the first side effect (#1316):
+# reclaim_root_owned (may sudo chown), the first `git add .` and
+# refresh_nix_access_token all run below this block, so a rejected
+# invocation -- and -h/--help -- must be decided here, not after them.
+mode="all"
+generation=""
+no_commit=0
+usage="usage: ${0:t} [--no-commit] [--build-only|--activate-only [GENERATION]]"
+# --build-only and --activate-only are alternatives, not last-win (#1149).
+# The split is a privilege boundary (build needs no sudo, activate does),
+# so a pair that silently resolves to whichever came last can cross it in
+# either direction; a repeated --activate-only likewise silently discarded
+# the first GENERATION, and a GENERATION followed by --build-only was
+# stranded in a build run that ignores it, exit 0. Reject all three at
+# parse time, naming the flags, before any phase runs.
+seen_build=0
+seen_activate=0
+while (( $# )); do
+  case "$1" in
+    --build-only)
+      if (( seen_activate )); then
+        echo "simple-rebuild.sh: --build-only conflicts with --activate-only (choose one)" >&2
+        exit 2
+      fi
+      seen_build=1; mode="build" ;;
+    --activate-only)
+      if (( seen_activate )); then
+        echo "simple-rebuild.sh: --activate-only given more than once (choose one GENERATION)" >&2
+        exit 2
+      fi
+      if (( seen_build )); then
+        echo "simple-rebuild.sh: --activate-only conflicts with --build-only (choose one)" >&2
+        exit 2
+      fi
+      seen_activate=1; mode="activate"
+      if [[ -n "${2:-}" && "$2" != --* ]]; then generation="$2"; shift; fi
+      ;;
+    --no-commit)     no_commit=1 ;;
+    -h|--help)       echo "$usage"; exit 0 ;;
+    *) echo "$usage" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+# Validate GENERATION whole, here at parse time (#1022), in the shape of
+# the HEALTH_TIMEOUT block below (#880) and branch-cleanup's inactive_days
+# (#1015). The parse above takes any token not starting with `--` as the
+# generation, and the value's only use is the rollback path's
+# `sudo darwin-rebuild --switch-generation "$generation"` -- so -1, abc,
+# 3.5, 0, a 26-digit string, and even the single-dash typo -no-commit (with
+# no_commit left unset) were all accepted here and failed only later,
+# after a sudo prompt, inside darwin-rebuild's own parser. Judge it now,
+# before any phase: digits only, positive, with an INT_MAX range backstop
+# judged on the stripped value by digit count first, then by value (at
+# most 10 digits always fits zsh's 64-bit arithmetic). Leading zeros are
+# normalized away, as they would otherwise be read as octal downstream.
+if [[ -n "$generation" ]]; then
+  case "$generation" in
+    *[!0-9]*|'')
+      echo "simple-rebuild.sh: --activate-only GENERATION must be a positive integer (got: $generation)" >&2
+      exit 2 ;;
+  esac
+  _gen="$generation"
+  while [[ "$_gen" == 0?* ]]; do _gen="${_gen#0}"; done
+  if (( ${#_gen} > 10 || _gen > 2147483647 || _gen <= 0 )); then
+    echo "simple-rebuild.sh: --activate-only GENERATION must be a positive integer (got: $generation)" >&2
+    exit 2
+  fi
+  generation="$_gen"
+  unset _gen
+fi
+
+# HEALTH_TIMEOUT is used only in zsh arithmetic ($(( SECONDS + ... ))) in
+# check_services below, where a bare word silently evaluates to 0 -- so
+# HEALTH_TIMEOUT=abc used to collapse the deadline to *now* and report
+# still-starting agents as not up after a successful switch, 10junk aborted
+# the run with a raw "bad math expression" (under set -e, after the switch
+# was already recorded), and a >64-bit value truncated and wrapped negative
+# (#880). Judge it whole, once, here at parse time -- before reclaim,
+# staging and the token refresh (#1316), and long before the health
+# check, like clean.sh judges its tunables (#829/#862): digits only,
+# positive, with an INT_MAX
+# range backstop judged on the stripped value by digit count first, then by
+# value (at most 10 digits always fits zsh's 64-bit arithmetic). Unset or
+# empty is fine: the ${HEALTH_TIMEOUT:-60} default at the use site supplies
+# a known-good literal.
+if [[ -n "${HEALTH_TIMEOUT:-}" ]]; then
+  case "$HEALTH_TIMEOUT" in
+    *[!0-9]*|'')
+      echo "simple-rebuild.sh: HEALTH_TIMEOUT must be a positive integer (got: $HEALTH_TIMEOUT)" >&2
+      exit 2 ;;
+  esac
+  _ht="$HEALTH_TIMEOUT"
+  while [[ "$_ht" == 0?* ]]; do _ht="${_ht#0}"; done
+  if (( ${#_ht} > 10 || _ht > 2147483647 || _ht <= 0 )); then
+    echo "simple-rebuild.sh: HEALTH_TIMEOUT must be a positive integer (got: $HEALTH_TIMEOUT)" >&2
+    exit 2
+  fi
+  unset _ht
+fi
+
+# End of parse-time validation (#1316) -- everything below this line
+# may have side effects.
+
 # Reclaim any root-owned files, but only if there are any.
 #
 # This was an unconditional `sudo chown -R`, which prompted for a password
@@ -68,7 +185,52 @@ reclaim_root_owned() {
 }
 
 reclaim_root_owned
-git add .
+
+# Is the git on PATH actually usable? On a clean macOS install the only git
+# is /usr/bin/git, an Xcode Command Line Tools shim: invoking it pops the CLT
+# install dialog and exits non-zero, which under `set -e` killed ./s at the
+# `git add .` below -- before anything was built, let alone switched (#1069).
+# Git in this script is bookkeeping only (staging so the flake sees new
+# files, and the marker commits), so when it is missing or is the
+# uninstalled CLT shim, skip the git steps for this run instead of gating
+# the switch on Xcode. The probe must not invoke git itself (that is what
+# triggers the shim's dialog): /usr/bin/git counts as usable only when
+# xcode-select reports a developer directory (CLT or Xcode.app) behind it;
+# a git from the nix profile or the current system is usable as-is. Marker
+# commits simply resume on the next run from an installed system.
+git_ok=1
+if ! command -v git >/dev/null 2>&1; then
+  git_ok=0
+elif [[ "$(command -v git)" == /usr/bin/git ]] && ! /usr/bin/xcode-select -p >/dev/null 2>&1; then
+  git_ok=0
+fi
+if (( git_ok )); then
+  git add .
+else
+  echo "no usable git (missing, or the Xcode CLT shim on a clean install); skipping git add + marker commits for this run"
+fi
+
+# Accept a pending Xcode license BEFORE anything builds (#1791). Every
+# other acceptance in this flow runs at switch time or later --
+# configuration.nix's postActivation, and xcode_mas at the end of
+# phase_activate -- so a run whose build never finishes never reaches
+# any of them. That ordering deadlocks the script against itself: an
+# Xcode update re-pends the license (configuration.nix's comment), a
+# build that calls xcodebuild then waits on the unaccepted license,
+# and the acceptance that would clear it sits behind the build. The
+# probe mirrors configuration.nix's: a developer directory is selected
+# and `xcodebuild -license check` fails. When no license is pending
+# this is two silent probes and phase_build keeps its no-sudo,
+# unattended property; sudo is asked for only when there is a license
+# to accept, the same conditional-sudo shape as reclaim_root_owned.
+# Selection of Xcode.app and -runFirstLaunch stay in xcode_mas: the
+# build needs the license accepted for whichever developer directory
+# is selected, not a different selection.
+if /usr/bin/xcode-select -p >/dev/null 2>&1 && ! /usr/bin/xcodebuild -license check >/dev/null 2>&1; then
+  echo "accepting the Xcode license before building (sudo xcodebuild -license accept)"
+  sudo /usr/bin/xcodebuild -license accept ||
+    echo "warning: Xcode license acceptance failed; builds that call xcodebuild will fail or wait until it is accepted" >&2
+fi
 
 # Keep Nix's GitHub token current. nix.conf (this directory, so tracked)
 # `include`s ~/.local/share/nix/access-tokens.conf, which holds the token and
@@ -95,43 +257,28 @@ refresh_nix_access_token() {
 refresh_nix_access_token
 set -x
 
-# Phases.
-#
-# `just build`, `just activate` and `just switch` are three entry points into
-# one implementation, so there is nothing to drift. The split is by privilege:
-# phase_build needs no sudo and can run unattended, phase_activate needs root
-# and therefore a human (or a fingerprint) at the machine.
-#
-#   --build-only     prepare + build            no sudo
-#   --activate-only  activate + post + commit   sudo
-#   (no flag)        all of it
-#   --no-commit      combinable with any of the above: still stages (flakes
-#                    only see tracked files) but skips the marker commits, for
-#                    iterating on a build that is not ready to be recorded
-mode="all"
-generation=""
-no_commit=0
-usage="usage: ${0:t} [--no-commit] [--build-only|--activate-only [GENERATION]]"
-while (( $# )); do
-  case "$1" in
-    --build-only)    mode="build" ;;
-    --activate-only)
-      mode="activate"
-      if [[ -n "${2:-}" && "$2" != --* ]]; then generation="$2"; shift; fi
-      ;;
-    --no-commit)     no_commit=1 ;;
-    *) echo "$usage" >&2; exit 2 ;;
-  esac
-  shift
-done
-
 # Every marker commit goes through here so --no-commit has one place to act.
 commit_marker() {
   if (( no_commit )); then
     echo "--no-commit: skipping commit \"$1\""
     return 0
   fi
+  if (( ! git_ok )); then
+    echo "no usable git: skipping commit \"$1\""
+    return 0
+  fi
   git commit --no-verify --allow-empty -m "$1"
+}
+
+# Print error headlines in red and bold only when stderr is a terminal and
+# NO_COLOR is not set. These messages are often captured in build logs.
+print_error() {
+  local message="$1"
+  if [[ -t 2 && -z "${NO_COLOR:-}" ]]; then
+    print -P "%F{red}%B${message}%b%f" >&2
+  else
+    print -r -- "$message" >&2
+  fi
 }
 
 # Every commit here is --allow-empty: the point is to mark *when* a build or an
@@ -175,7 +322,7 @@ phase_build() {
     # step, Homebrew included, twice. Both of those failures were real mcpx
     # test races; see the mcpx commits that day.
     {
-      print -P "%F{red}%B==> build failed; nothing activated, nothing committed%b%f"
+      print_error "==> build failed; nothing activated, nothing committed"
       if (( build_status != 0 )); then
         echo "    The failing derivation and its last log lines are above."
         echo "    Full log: nix log <the .drv named in 'Cannot build'>"
@@ -189,6 +336,17 @@ phase_build() {
     return 1
   fi
   commit_marker "$(hostname) build ${built}"
+}
+
+# Install the macFUSE cask (needed by bindfs-mac) as you; succeeds when it is
+# present afterwards, fails when brew is missing or the install fails.
+ensure_macfuse() {
+  local brew=/opt/homebrew/bin/brew
+  [[ -x $brew ]] || return 1
+  "$brew" list --cask macfuse >/dev/null 2>&1 && return 0
+  echo "brew install --cask macfuse (bindfs-mac requires it)"
+  HOMEBREW_NO_AUTO_UPDATE=1 "$brew" install --cask macfuse ||
+    { echo "macfuse install failed" >&2; return 1; }
 }
 
 # Upgrade Homebrew formulae and casks, as you, on this terminal.
@@ -213,9 +371,78 @@ brew_upgrade() {
   fi
   echo "brew bundle --upgrade $brewfile (as $USER)"
   sudo -v
-  HOMEBREW_NO_AUTO_UPDATE=1 /opt/homebrew/bin/brew bundle install \
-    --file="$brewfile" --upgrade --verbose --force ||
-    echo "brew upgrade failed; the switch itself succeeded" >&2
+  # Cask downloads fail transiently (CDN 403s, connection resets). Without
+  # --force, brew bundle skips what is already current, so one retry only
+  # redoes the failures. --force is deliberately absent, for the reason
+  # configuration.nix documents for activation (#1784): it makes brew bundle
+  # reinstall already-installed casks, which fails for self-updating apps
+  # newer than the cask and for casks whose download URL has gone stale.
+  local attempt
+  for attempt in 1 2; do
+    HOMEBREW_NO_AUTO_UPDATE=1 /opt/homebrew/bin/brew bundle install \
+      --file="$brewfile" --upgrade --verbose && return 0
+    [[ $attempt -eq 1 ]] && echo "brew upgrade had failures; retrying once" >&2
+  done
+  echo "brew upgrade failed; the switch itself succeeded" >&2
+}
+
+# Install or update Xcode from the Mac App Store, as you, after the switch.
+#
+# Xcode is managed, but deliberately NOT through masApps.nix (#1069): brew
+# bundle runs *during* activation, so its App Store requirement and
+# multi-GB download sat on the switch's critical path and could fail or
+# stall it, above all on a clean install. Here -- post-switch, like
+# brew_upgrade above -- ./s calls `mas` itself (mas is a system package,
+# systemPackages.nix, so it is on PATH from the system profile once a
+# switch has installed it):
+#
+#   Xcode.app absent   mas install 497799835
+#   Xcode.app present  mas upgrade 497799835  (no-op when already current)
+#
+# so every ./s keeps Xcode installed and up to date. It assumes the App
+# Store is signed in (Drew, 2026-10-28) -- mas cannot sign in itself on
+# modern macOS -- and a failure (signed out, no prior "purchase", network)
+# is reported without failing or undoing the switch. Rollbacks return
+# before this point and skip it.
+#
+# Afterwards, point the developer directory at Xcode and accept its
+# license / run its first launch here, mirroring configuration.nix's
+# postActivation: that copy only runs at the *next* switch, which would
+# leave a just-installed Xcode unselected until then.
+#
+# No separate Command Line Tools install is needed alongside this: full
+# Xcode carries the same tools (xcodebuild, the SDKs, and git/clang via
+# the xcode-select shims), and once selected it satisfies the
+# Xcode-or-CLT requirement of Homebrew and of builds that call xcrun.
+xcode_mas() {
+  local xcode_app_id=497799835
+  if ! command -v mas >/dev/null 2>&1; then
+    echo "skipping Xcode: mas not on PATH (a system package; present after the first switch that installs it)" >&2
+    return 0
+  fi
+  if [[ -d /Applications/Xcode.app ]]; then
+    echo "mas upgrade $xcode_app_id (Xcode, as $USER)"
+    mas upgrade "$xcode_app_id" ||
+      echo "Xcode upgrade failed; the switch itself succeeded" >&2
+  else
+    echo "mas install $xcode_app_id (Xcode, as $USER; this is a multi-GB download)"
+    mas install "$xcode_app_id" ||
+      echo "Xcode install failed (App Store signed in? Xcode previously \"purchased\"?); the switch itself succeeded" >&2
+  fi
+  if [[ -d /Applications/Xcode.app/Contents/Developer ]]; then
+    echo "xcode-select -s Xcode.app, xcodebuild -license accept + -runFirstLaunch (as root)"
+    # Failures here used to be invisible (2>/dev/null || true on all
+    # three): a failed license accept left the machine in exactly the
+    # unaccepted state the pre-build acceptance above exists to clear,
+    # with nothing in the log saying so (#1791). Report each failure;
+    # none of them undoes the switch that already happened.
+    sudo /usr/bin/xcode-select -s /Applications/Xcode.app/Contents/Developer ||
+      echo "warning: xcode-select -s Xcode.app failed" >&2
+    sudo /usr/bin/xcodebuild -license accept ||
+      echo "warning: xcodebuild -license accept failed; the Xcode license is still pending" >&2
+    sudo /usr/bin/xcodebuild -runFirstLaunch ||
+      echo "warning: xcodebuild -runFirstLaunch failed" >&2
+  fi
 }
 
 # After a switch, the servers this flake runs as launchd agents must actually
@@ -244,6 +471,10 @@ health_services=(
   "org.nixos.mcpx cmd:cd ~ && mcpx ls"
 )
 
+# HEALTH_TIMEOUT was already validated at parse time, before any side
+# effect (#1316) -- see the validation block near the top of this script.
+# The ${HEALTH_TIMEOUT:-60} default at the use sites below is unchanged.
+
 agent_pid() {
   launchctl list | awk -v l="$1" '$3 == l && $1 != "-" { print $1 }'
 }
@@ -261,7 +492,7 @@ agent_answers() {
 # above; the app log alone was empty for the first.
 report_agent() {
   local label="$1" url="$2" info errlog
-  print -P "%F{red}%B==> $label is not up%b%f"
+  print_error "==> $label is not up"
   if ! info=$(launchctl print "gui/$(id -u)/$label" 2>&1); then
     echo "    not loaded in gui/$(id -u)"
     return 0
@@ -304,7 +535,7 @@ check_services() {
     done
   done
   if (( failed )); then
-    print -P "%F{red}%B==> switch done and recorded, but $failed agent(s) are not up (above)%b%f" >&2
+    print_error "==> switch done and recorded, but $failed agent(s) are not up (above)" >&2
     return 1
   fi
 }
@@ -334,8 +565,24 @@ phase_activate() {
     return
   fi
 
-  echo "softwareupdate --install-rosetta --agree-to-license"
-  softwareupdate --install-rosetta --agree-to-license
+  # Rosetta is best-effort, never a gate on the switch (#1069). This used to
+  # run bare under `set -e`, before activation: on a clean install any
+  # failure -- no network yet, softwareupdate not offering it, the reduced
+  # Rosetta in macOS 27 -- aborted the run before the system was ever
+  # activated. Nothing in the activation itself needs Rosetta; only the
+  # x86_64 Homebrew prefix (nix-homebrew's enableRosetta) uses it later, and
+  # that can be installed once the machine is up. Skip when it is already
+  # installed (the runtime's presence is the installed marker) or not
+  # Apple Silicon, and let a failed install warn and continue.
+  if [[ "$(uname -m)" != arm64 ]]; then
+    echo "not Apple Silicon; skipping Rosetta install"
+  elif [[ -e /Library/Apple/usr/libexec/oah/libRosettaRuntime ]]; then
+    echo "Rosetta already installed; skipping softwareupdate --install-rosetta"
+  else
+    echo "softwareupdate --install-rosetta --agree-to-license (best-effort)"
+    softwareupdate --install-rosetta --agree-to-license ||
+      echo "warning: Rosetta install did not complete; continuing with the switch -- rerun 'softwareupdate --install-rosetta --agree-to-license' once the machine is online for x86_64 Homebrew" >&2
+  fi
 
   # Activate exactly the system phase_build made: register it as the next
   # system generation, then run its activation. This is what
@@ -362,7 +609,59 @@ phase_activate() {
     system_config=$(readlink -f ./result)
     echo "nix-env --set the system profile to $system_config, then darwin-rebuild activate (as root)"
     sudo /nix/var/nix/profiles/default/bin/nix-env -p /nix/var/nix/profiles/system --set "$system_config"
-    sudo "$system_config/sw/bin/darwin-rebuild" activate
+    # The activation's output is kept, and its start and end recorded in the
+    # service event log: three switches on 2026-10-22 registered generations
+    # 305-307 and never made them current, and nothing said where they
+    # stopped (dezren39/darwin-nix#656, #670).
+    # nix-darwin aborts activation when /etc/nix/nix.custom.conf exists with
+    # content it does not recognise. The Determinate installer writes one that
+    # is only comments (dezren39/darwin-nix#1782); a file with no real content
+    # carries nothing to lose, so remove it and let activation write its own.
+    if [[ -f /etc/nix/nix.custom.conf && ! -L /etc/nix/nix.custom.conf ]] \
+      && ! grep -qvE '^[[:space:]]*(#.*)?$' /etc/nix/nix.custom.conf; then
+      echo "removing comment-only /etc/nix/nix.custom.conf so activation can manage it"
+      sudo rm -f /etc/nix/nix.custom.conf
+    fi
+    # brew bundle installs formulae before casks, and bindfs-mac refuses to
+    # install without macFUSE, so the cask has to be there before activation.
+    # On a fresh Mac brew does not exist until activation's nix-homebrew step
+    # has run, so a failed first activation is retried once after installing it.
+    local macfuse_ready=0
+    ensure_macfuse && macfuse_ready=1
+    local log_dir="$HOME/Library/Logs/nix-services" log
+    mkdir -p "$log_dir"
+    log="$log_dir/switch-$(date +%Y%m%dT%H%M%S).log"
+    service_event switch.begin system="$system_config" \
+      previous="$(readlink -f /run/current-system)" log="$log"
+    # This script runs with `set -e` (ERR_EXIT), under which a failing bare
+    # pipeline would kill the script before $pipestatus could be read -- no
+    # retry, no switch.fail event. Guard each activation run with `||` and
+    # capture the pipeline's statuses from the exempt branch instead
+    # (verified against zsh 5.9: success, fail, and retry paths).
+    local -a st=(0)
+    sudo "$system_config/sw/bin/darwin-rebuild" activate 2>&1 | tee "$log" ||
+      st=("${pipestatus[@]}")
+    if [[ ${st[1]} -ne 0 && $macfuse_ready -eq 0 ]] && ensure_macfuse; then
+      echo "activation failed before macFUSE was installed; retrying once"
+      st=(0)
+      sudo "$system_config/sw/bin/darwin-rebuild" activate 2>&1 | tee -a "$log" ||
+        st=("${pipestatus[@]}")
+    fi
+    if [[ ${st[1]} -eq 0 ]]; then
+      service_event switch.activated system="$system_config"
+    else
+      service_event switch.fail system="$system_config" exit="${st[1]}" log="$log"
+      echo "darwin-rebuild activate failed (exit ${st[1]}); its output is in $log" >&2
+      return 1
+    fi
+    # The profile can name a generation the activation never finished, so
+    # check what is actually running, which activation links last.
+    if [[ "$(readlink -f /run/current-system)" != "$system_config" ]]; then
+      service_event switch.incomplete system="$system_config" \
+        current="$(readlink -f /run/current-system)" log="$log"
+      echo "activation exited 0 but /run/current-system is still $(readlink -f /run/current-system); see $log" >&2
+      return 1
+    fi
   else
     echo "no ./result to activate; run 'just build' first" >&2
     return 1
@@ -387,6 +686,10 @@ phase_activate() {
 
   record_activation "switch"
 
+  # After recording, so a slow or failed App Store download can never delay
+  # or cloud the record of a switch that has already happened.
+  xcode_mas
+
   # Last, so the steps above still run and the generation that is now active
   # is recorded either way; an agent that is not up makes `just switch` exit
   # non-zero. Rollbacks (above) skip it: an older generation may not define
@@ -402,14 +705,31 @@ phase_activate() {
 # which takes the profile lock and needs root:
 #   readlink    /nix/var/nix/profiles/system  -> system-283-link  (the number)
 #   readlink -f /nix/var/nix/profiles/system  -> /nix/store/...   (the closure)
+# Append to the service event log (~/Library/Logs/nix-services/events.jsonl,
+# dezren39/darwin-nix#670). Prefers the new build's service-event, since the running
+# system may predate it; never fails the switch.
+service_event() {
+  local bin=./result/sw/bin/service-event
+  [[ -x "$bin" ]] || bin=/run/current-system/sw/bin/service-event
+  if [[ -x "$bin" ]]; then
+    "$bin" rebuild "$@" || true
+  fi
+}
+
 record_activation() {
   local how="$1" gen store
   gen=$(readlink /nix/var/nix/profiles/system 2>/dev/null || echo "system-?-link")
   gen="${${gen#system-}%-link}"
   store=$(basename "$(readlink -f /nix/var/nix/profiles/system 2>/dev/null || echo unknown)")
   echo "now: generation $gen -> $store"
+  service_event "$how.recorded" generation="$gen" store="$store" \
+    current="$(basename "$(readlink -f /run/current-system)")"
   reclaim_root_owned
-  git add .
+  if (( git_ok )); then
+    git add .
+  else
+    echo "no usable git: skipping git add after $how"
+  fi
   commit_marker "$(hostname) $how gen $gen $store"
 }
 

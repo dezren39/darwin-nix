@@ -1,0 +1,65 @@
+# Top-level mode-effectiveness inventory (2026-11-08)
+
+Review baseline: `main` at `6069f19084b9` (fast-forwarded into the task worktree). Scope is tracked, top-level executable scripts. `pkgs/**` and Python tools are listed as phase-4 follow-up territory, not dispositioned here. The phase exclusions in task #1724 remain exclusions: `clean.sh` and `spotlight-exclude-artifacts` belong to phase 1/#1723; `git-maintain-repos` belongs to phase 2/#1718.
+
+The scan enumerated root-level tracked executables and searched for `SCOPE`, `MODE`, `DRY_RUN`, `--dry-run`, and output-shape controls (`--count`, `--paths-only`, `--print0`, `--status`, JSON/format/quiet/verbose/simple/output flags). It then searched non-test in-repo callers, excluding packaged tools and generated/vendor content. The rows below cover every remaining mode/scope or output-shape surface found by that scan.
+
+## Dispositions
+
+| Surface / combination | Disposition | Evidence and decision | In-repo callers |
+|---|---|---|---|
+| `git-discover-repos`: `--status` without `--find` | **Already judged** | `git-discover-repos.test.sh` runs `--path … --status`; it exits 2, names `--status`, and prints no stdout. Keep the post-parse judge at `git-discover-repos:199-205`: this is a semantic dependency (`--status` annotates only `--find` hits), and replacing its explanatory error with the generic mode helper would not be behavior-identical. | `clean.sh:1416` and `spotlight-exclude-artifacts:238` both pass `--find all --status`, so both callers are valid. No invalid caller found. |
+| `git-discover-repos`: `--user` with `--path` or a positional path | **Already judged** | `git-discover-repos.test.sh` probes both flag orders and both target spellings; each exits 2 and names `--user`/`--path`. Keep the post-parse judge at `:210-218`: it depends on the selected scan mode and includes the user-facing reason that `--user` selects the home scanned by `--auto`; a generic helper migration would change the diagnostic. | `clean.sh:1389` uses `--auto --user "$CALLER_USER"`; `clean.sh:2097` uses `--auto --user root`. No invalid caller found. |
+| `git-discover-repos`: `--count` with `--find`, `--paths-only`, or `--print0` | **Already judged** | The inline `arg_conflict` calls at `:167-173` are retained. They are symmetric output-shape/sweep conflicts, not a mode-class accumulator. The test suite exercises all three pairs in both orders, including `--dry-run`; each rejection exits 2 and names both flags. Count/filter controls (`--repos-only`, `--worktrees-only`, `--bare-only`, `--no-bare`, `--follow`) are effective and have exact count assertions. | No non-test caller of `--count` or these conflict pairs found. |
+| `git-discover-repos`: `--find` with `--paths-only` or `--print0` | **Per-site issue filed: [#1734](https://github.com/dezren39/nix/issues/1734)** | Isolated temporary-repository probes both exited 0. `--paths-only` emitted a bare repository path and then a tabular `FOUND` row; `--print0` emitted a NUL-terminated repository record and then a newline-terminated `FOUND` row. This is a real output-shape mismatch, not a refusal/migration candidate. | No non-test caller combining `--find` with either shape flag found. `clean.sh` and `spotlight-exclude-artifacts` use `--find all --status` without them. |
+| `symlinker.sh`: `--undo` with forward-only options | **Per-site issue filed: [#1730](https://github.com/dezren39/nix/issues/1730)** | The safe fixture probe recorded on #1730 ran `--undo <run-id> --dry-run --input-dir /definitely/nonexistent --exclude example.txt`; it exited 0 and previewed unlinking the fixture symlink. The input path and filter were ignored. Issue #1730 has the full accepted-flag inventory and probe evidence; its fix is in separate open PR #1732/task 13816 and is not part of this task. | `justfile:271-276` exposes `link-git-dirs` and aliases; the recipe always injects `--input-dir`/`--output-dir` and forwards user args, so it is a forward-linking recipe, not an undo entry point. No in-repo invocation passing `--undo` was found. Use `symlinker.sh --undo …` directly. |
+| `symlinker.sh`: `--simple` with `--undo` | **Per-site issue filed: [#1730](https://github.com/dezren39/nix/issues/1730)** | Additional safe fixture probe: `--undo <run-id> --dry-run` and the same command with `--simple` both exited 0 and produced byte-identical stdout. In the current script, `SIMPLE` is read only by `describe()`; all `describe()` call sites are in the forward path, so `--simple` has no undo-mode consumer. The open #1732 PR's stated refusal list omits `--simple`; this row is recorded for the issue/PR owner to disposition, without changing that PR. | Same forward-only `justfile:271-276` wrapper; no direct in-repo undo caller found. |
+| `simple-rebuild.sh`: `--build-only` / `--activate-only` mode selection | **Already judged** | `simple-rebuild.test.sh` extracts the live parser and proves conflicts, reverse ordering, a stranded generation, and repeats exit 2 before side effects. Valid mode controls still parse. No output-shape or `--dry-run` consumer exists in this mode branch. | `justfile:145,153,174,186` selects one mode per recipe; `rebuild.sh:58-59` uses the default combined mode. No invalid caller found. |
+| `opencode-db-backup-prune.sh`: `--apply` versus `--dry-run` | **Already judged** | `opencode-db-args.test.sh` runs both orders; each exits 2 and names the conflicting flags. The default report and explicit apply modes are not silently interchangeable. | `opencode-prune-report.nix:82-83` uses the report-only default; `justfile:535` forwards args to the helper. No in-repo caller passes the conflicting pair. |
+
+## Other mode branches checked
+
+- **`opencode-db-prune.sh` restore mode:** the branch at `:660-675` explicitly rejects prune-only `--archive`, `--backup`, `--no-backup`, `--protect-days`, `--protect-roots`, and `--batch`; `--from` is also rejected outside restore mode. `opencode-db-args.test.sh` exercises each named rejection before restore preflight. These options are not silently accepted. The existing `die` helper returns exit 1 rather than the exit 2 used by the newly classified refusal rows; this was left unchanged (no behavior-changing migration is in scope).
+- **`opencode-db-vacuum.sh`:** `--dry-run` is consumed at `:321-324` after read-only measurement and before integrity/WAL/write/swap steps (`:326+`). `opencode-db-args.test.sh` includes a scratch-database dry-run control. No mode branch bypassing the dry-run consumer was found.
+- **`full-clean.sh`:** this is one fixed sequence, not a mode switch. Its parser rejects `--dry-run` and unknown arguments with exit 2 before the first step; `full-clean.test.sh` verifies no steps execute for either rejection.
+- **Prior phases (excluded by #1724):** `clean.sh`, `spotlight-exclude-artifacts`, and `git-maintain-repos` contain the remaining `SCOPE` branches. They are not reopened here; the packet assigns them to #1723 and #1718. `git-maintain-repos`'s `--system`/repository-flag and late `--dry-run` judge is the shipped phase-2 fix in current `main`.
+- **Phase 4 (list only):** packaged scripts under `pkgs/**` and the top-level Python tool `mcp-clients.py` are outside this phase's disposition scope, per #1722/#1724.
+
+## Verification run
+
+On the task worktree at baseline `6069f19084b9`:
+
+- `bash git-discover-repos.test.sh` — passed, including the existing exit-2 judges and count/shape controls.
+- `bash symlinker.test.sh` — passed (scenarios A–N); the ignored-option probe is tracked separately by #1730.
+- `bash opencode-db-args.test.sh` — passed, including restore-mode named guards and `--apply`/`--dry-run` conflicts.
+- `bash simple-rebuild.test.sh` — passed, including exact mode-conflict exit-2 probes.
+- `bash full-clean.test.sh` — passed, including `--dry-run` and unknown-argument exit-2 checks.
+- Fresh isolated `git-discover-repos` probes for the two #1734 combinations — both reproduced with exit 0 and mixed output shapes.
+- Fresh isolated `symlinker --undo --dry-run` control with and without `--simple` — both exited 0 with byte-identical stdout; source inspection shows `SIMPLE` has no undo-path consumer.
+
+The inventory records decisions only; no mode behavior was changed in this triage task.
+
+## Phase 4 — pkgs/** shell scripts (2026-11-10, task 14462 for #1722)
+
+Review baseline: `main` at `ce6a2bebc042`. The 2026-11-08 inventory above
+left `pkgs/**` as phase-4 territory. The shell surface there is exactly
+three scripts — `pkgs/adopt/adopt.sh`, `pkgs/brew-repair/brew-repair.sh`,
+`pkgs/opencode-share/opencode-share.sh` — none of which sources
+`lib/common.sh` (they are packaged as standalone tools). The remaining
+`pkgs/**` programs are not shell (buffer-backup TypeScript, flake-tidy
+and service-events Python, fleet-brokers/laptop-agent packaged sources,
+pin/lock checker scripts with no modes) and are out of this contract's
+mechanism; they are listed here so the exclusion is a decision, not an
+oversight.
+
+| Surface / combination | Disposition | Evidence and decision | In-repo callers |
+|---|---|---|---|
+| `adopt.sh`: `--host` / `--flake` / `--dry-run` | **No gap** | Single mode; every flag is consumed before both exits. `--dry-run` is judged after the already-adopted check (:182), which is correct: for an adopted host nothing would be added, and the "nothing to do" message is the dry-run truth. Parse already refuses missing/empty/repeated values at exit 2. | `justfile` adopt recipes; no invalid caller found. |
+| `brew-repair.sh`: `-n/--dry-run` / `-q/--quiet` / `-s/--skip` | **No gap** | Single mode; the scan loop is shared between real and dry runs — `QUIET` gates the same lines (:203-255) and `SKIP_LIST` the same decisions in both, `DRY_RUN` gates only the reinstall (:279). No mode exists in which a flag loses its consumer. | None in-repo (user-invoked tool). |
+| `opencode-share.sh`: `--source` with `--unmount` / `--status`; `--dry-run` with `--status` | **Per-site issue filed: [#1772](https://github.com/dezren39/darwin-nix/issues/1772) — disposition revised by its fix: `--dry-run` with `--status` refused; `--source` accepted as a global option** | `--source` is consumed only in `do_mount` (:175, :207-221); probe `--status --source /nonexistent-xyz-123 <target>` exited 0 with normal status output, where mount mode errors on a missing source. `do_status` has no `DRY_RUN` consumer; probe `--status --dry-run <target>` exited 0, output identical to `--status` apart from the dependency-check warning. `--dry-run` is effective in mount and unmount modes (probed), and conflicting action flags are already refused (#1106). Fix filed separately per the contract. Revision recorded on #1772 during the fix: the `--source` refusal was dropped — scenarios K, L and N of the test corpus pass `--source` with `--unmount`/`--status` success controls, pinning it as a global option accepted in all modes; only the `--dry-run`/`--status` refusal (no consumer, nothing pinned) was implemented. | `justfile` share recipes pass action flags without `--source`; no invalid caller found. |
+
+The contract itself now lives in one place in the repo:
+`lib/common.sh` (:164-190, landed by #1723) states the five rules and
+provides the shared `arg_used` / `arg_refuse_in_mode` judge. With this
+phase, every shell script in the repo has a recorded disposition
+against it; remaining adoption work is the per-site fix on #1772.

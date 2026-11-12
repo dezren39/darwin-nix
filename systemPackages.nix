@@ -6,6 +6,151 @@
 }:
 let
   ocPkgs = inputs.self.packages.${system};
+
+  # Google Chrome with structural CDP (developing-today/code#5924
+  # follow-up; fleet rule: every browser exposes the DevTools
+  # endpoint on loopback at every launch). Chrome itself is a
+  # Homebrew cask (casks.nix) whose bundle cannot be wrapped in
+  # place declaratively, so this package provides the wrapped
+  # launch paths: a "Google Chrome CDP" app (linked into
+  # /Applications/Nix Apps by nix-darwin's applications
+  # activation) and a `google-chrome-cdp` CLI wrapper. Both exec
+  # the cask's real binary with the fleet flags --
+  # --remote-debugging-address=127.0.0.1 (loopback ONLY; the
+  # remote path is loopback + tailscale serve / CONNECT proxy)
+  # and port 19223, the fleet's Chrome port (19222 Helium,
+  # 19223 Chrome, 19224 Chromium). Caller args follow and win.
+  # Residual gap, by construction: launching the stock
+  # /Applications/Google Chrome.app directly (Dock pin, Finder,
+  # `open -a`) bypasses these wrappers; use the CDP app instead.
+  # Firefox-family installs here (firefox, zen, zen@twilight
+  # casks) have no CDP to enable -- their remote protocol is
+  # WebDriver BiDi, enabled structurally by firefoxFamilyBidi
+  # below; see code#5924.
+  googleChromeCdp = pkgs.stdenvNoCC.mkDerivation {
+    pname = "google-chrome-cdp";
+    version = "1.0";
+    src = null;
+    dontUnpack = true;
+    installPhase = ''
+      app="$out/Applications/Google Chrome CDP.app"
+      mkdir -p "$app/Contents/MacOS" "$out/bin"
+
+      cat > "$app/Contents/MacOS/Google Chrome CDP" <<'LAUNCHER'
+      #!/bin/sh
+      exec "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --remote-debugging-address=127.0.0.1 --remote-debugging-port=19223 "$@"
+      LAUNCHER
+      chmod +x "$app/Contents/MacOS/Google Chrome CDP"
+
+      cat > "$app/Contents/Info.plist" <<'PLIST'
+      <?xml version="1.0" encoding="UTF-8"?>
+      <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+      <plist version="1.0">
+      <dict>
+        <key>CFBundleExecutable</key>
+        <string>Google Chrome CDP</string>
+        <key>CFBundleIdentifier</key>
+        <string>local.drewrypope.google-chrome-cdp</string>
+        <key>CFBundleName</key>
+        <string>Google Chrome CDP</string>
+        <key>CFBundlePackageType</key>
+        <string>APPL</string>
+        <key>CFBundleShortVersionString</key>
+        <string>1.0</string>
+      </dict>
+      </plist>
+      PLIST
+
+      cat > "$out/bin/google-chrome-cdp" <<'LAUNCHER'
+      #!/bin/sh
+      exec "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --remote-debugging-address=127.0.0.1 --remote-debugging-port=19223 "$@"
+      LAUNCHER
+      chmod +x "$out/bin/google-chrome-cdp"
+    '';
+    meta = {
+      description = "Google Chrome launcher with CDP remote debugging on 127.0.0.1:19223";
+      platforms = pkgs.lib.platforms.darwin;
+    };
+  };
+  # Firefox-family with structural WebDriver BiDi (code#5924
+  # follow-up): Firefox, Zen and Zen Twilight have no CDP --
+  # --remote-debugging-port starts their WebDriver BiDi remote
+  # agent instead. Same launcher-app + CLI shape as
+  # googleChromeCdp above: the cask bundles cannot be wrapped
+  # in place, so each browser gets a "<Name> BiDi" app (linked
+  # into /Applications/Nix Apps) and a `<name>-bidi` CLI, both
+  # exec'ing the cask's real binary with the flag. The remote
+  # agent binds 127.0.0.1 itself; NO --remote-debugging-address
+  # flag (that is a Chromium flag; the Firefox agent has no
+  # such option) and no --remote-allow-origins: Firefox's
+  # default Host/Origin policy stays intact, so web content
+  # cannot hijack the socket and local tooling (no Origin)
+  # works as-is (verified against Firefox 159 on NixOS: BiDi
+  # listening on ws://127.0.0.1 + session.status round trip).
+  # Fleet port table, one place for every browser remote
+  # endpoint, loopback-only:
+  #   19222 Helium CDP        19225 Firefox BiDi
+  #   19223 Brave/Chrome CDP  19226 Zen BiDi
+  #   19224 Chromium CDP      19227 Zen Twilight BiDi
+  # Zen and Zen Twilight share one profile directory and
+  # bundle id (see casks.nix): only one can run at a time, so
+  # their distinct ports never collide in practice; distinct
+  # ports keep this table unambiguous about which binary a
+  # port belongs to. Residual gap, same as Chrome: launching
+  # the stock apps directly (Dock pin, Finder, `open -a`)
+  # bypasses these launchers; use the BiDi apps instead.
+  firefoxFamilyBidi = pkgs.stdenvNoCC.mkDerivation {
+    pname = "firefox-family-bidi";
+    version = "1.0";
+    src = null;
+    dontUnpack = true;
+    installPhase = ''
+      mkdir -p "$out/bin"
+
+      make_app() {
+        display="$1"; bin_name="$2"; target="$3"; port="$4"; ident="$5"
+        app="$out/Applications/$display.app"
+        mkdir -p "$app/Contents/MacOS"
+        cat > "$app/Contents/MacOS/$display" <<LAUNCHER
+      #!/bin/sh
+      exec "$target" --remote-debugging-port=$port "\$@"
+      LAUNCHER
+        chmod +x "$app/Contents/MacOS/$display"
+        cat > "$app/Contents/Info.plist" <<PLIST
+      <?xml version="1.0" encoding="UTF-8"?>
+      <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+      <plist version="1.0">
+      <dict>
+        <key>CFBundleExecutable</key>
+        <string>$display</string>
+        <key>CFBundleIdentifier</key>
+        <string>local.drewrypope.$ident</string>
+        <key>CFBundleName</key>
+        <string>$display</string>
+        <key>CFBundlePackageType</key>
+        <string>APPL</string>
+        <key>CFBundleShortVersionString</key>
+        <string>1.0</string>
+      </dict>
+      </plist>
+      PLIST
+        cat > "$out/bin/$bin_name" <<LAUNCHER
+      #!/bin/sh
+      exec "$target" --remote-debugging-port=$port "\$@"
+      LAUNCHER
+        chmod +x "$out/bin/$bin_name"
+      }
+
+      make_app "Firefox BiDi" firefox-bidi "/Applications/Firefox.app/Contents/MacOS/firefox" 19225 firefox-bidi
+      make_app "Zen BiDi" zen-bidi "/Applications/Zen.app/Contents/MacOS/zen" 19226 zen-bidi
+      make_app "Zen Twilight BiDi" zen-twilight-bidi "/Applications/Twilight.app/Contents/MacOS/zen" 19227 zen-twilight-bidi
+    '';
+    meta = {
+      description = "Firefox, Zen and Zen Twilight launchers with WebDriver BiDi remote debugging on loopback (19225/19226/19227)";
+      platforms = pkgs.lib.platforms.darwin;
+    };
+  };
+
 in
 {
   environment.systemPackages =
@@ -13,6 +158,8 @@ in
     [
       colima
       cargo-cache # `cargo cache -r all` in ./clean; ~/.cargo has no built-in pruner
+      googleChromeCdp # Chrome launcher with structural CDP on 127.0.0.1:19223 (code#5924)
+      firefoxFamilyBidi # Firefox/Zen/Zen Twilight launchers with structural WebDriver BiDi on 127.0.0.1:19225/19226/19227 (code#5924)
       duti # sets LaunchServices URL/UTI handlers; used to pin the default browser
       doggo
       docker-client
@@ -155,14 +302,15 @@ in
       # noto-fonts
       # noto-fonts-emoji
       #openfortivpn
-      # OpenCode from developing-today/opencode, wrapped to pin the database
+      # OpenCode from developing-today-forks/opencode, wrapped to pin the database
       # and scratch dir (flake.nix mkPackages). The only opencode on PATH.
       ocPkgs.opencode
       # OpenChamber's server CLI. The server itself runs as the openchamber
       # launchd agent and the desktop app is installed by openchamber.nix.
       ocPkgs.openchamber
-      # The MCP gateway (source: developing-today/code's pkgs/mcpx, built
-      # from the pinned mcpx-src input). Its daemon runs at login from the
+      # The MCP gateway (the opencode fork's mcpx build, re-exposed as
+      # this flake's packages.mcpx in flake.nix; origin:
+      # developing-today/code's pkgs/mcpx). Its daemon runs at login from the
       # mcpx launchd agent in configuration.nix; the CLI reaches it from any shell.
       inputs.self.packages.${system}.mcpx
       # The servers in mcpx.config.nix run from these, by absolute
@@ -177,6 +325,9 @@ in
       inputs.self.packages.${system}.npm-mcp-servers
       # Vertex's APIM proxy for Claude Code, built from the pinned source input.
       inputs.self.packages.${system}.cai-claude-apim-proxy
+      # service-event, for scripts that record into the service event log
+      # (configuration.nix launchd.user.agents.service-events).
+      inputs.self.packages.${system}.service-events
       # AWS credentials for the `aws` MCP server (mcp-proxy-for-aws signs with
       # the default profile): `aws configure sso`, then `aws sso login`.
       awscli2
@@ -205,6 +356,24 @@ in
           exec github-mcp-server stdio "$@"
         '';
       })
+      # Plannotator's only distribution channel is its upstream install
+      # script; #1433 took the activation-time curl-pipe-to-bash out of
+      # homeUser.nix. This explicit setup/update command is the
+      # deliberate, user-invoked replacement: nothing runs at switch
+      # time, and installer failures surface (writeShellApplication
+      # runs with errexit/nounset/pipefail and no output suppression).
+      (pkgs.writeShellApplication {
+        name = "plannotator-setup";
+        runtimeInputs = [
+          pkgs.curl
+          pkgs.bash
+        ];
+        text = ''
+          echo "plannotator-setup: installing/updating Plannotator via https://plannotator.ai/install.sh ..." >&2
+          curl -fsSL https://plannotator.ai/install.sh | bash
+          echo "plannotator-setup: installer finished" >&2
+        '';
+      })
       inputs.self.packages.${system}.opencode-share
       inputs.self.packages.${system}.sidepulse
       inputs.self.packages.${system}.sidepulse-setup
@@ -218,7 +387,11 @@ in
       # php81
       # platformio # removed 2026-09-15: reclaiming disk
       playwright-driver.browsers
-      # playwright-test  # depends on playwright-driver
+      # The pinned Playwright CLI (#1433: replaces the activation-time
+      # global npm install in homeUser.nix). The version
+      # is fixed by nixpkgs, and its browsers are
+      # playwright-driver.browsers above.
+      playwright-test
       pngquant
       protobuf
       protoc-gen-go

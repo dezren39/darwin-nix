@@ -60,13 +60,13 @@ rec {
     };
     mac-app-util = {
       url = "github:hraban/mac-app-util";
-      # nixpkgs not followed — mac-app-util uses its own tested nixpkgs for SBCL/CL compat
+      # SBCL >= 2.6.6 fixes fixed-address allocation failures on newer macOS.
       inputs.treefmt-nix.follows = "treefmt-nix";
       inputs.cl-nix-lite.follows = "cl-nix-lite";
       inputs.flake-utils.follows = "flake-utils";
       inputs.flake-compat.follows = "flake-compat-hoisted";
       inputs.systems.follows = "systems-hoisted";
-      inputs.nixpkgs.follows = "nixpkgs-hoisted";
+      inputs.nixpkgs.follows = "nixpkgs";
     };
     brew-src = {
       # Track upstream so ./r's flake update advances Homebrew automatically.
@@ -140,30 +140,47 @@ rec {
     nixpkgs-terraform.inputs.nixpkgs.follows = "nixpkgs-hoisted-hoisted";
     flake-utils.url = "github:numtide/flake-utils";
     flake-utils.inputs.systems.follows = "systems";
-    # developing-today's OpenCode fork (v2, tracks upstream dev plus model
-    # routing, mcpx and serve handover). We own it: if it breaks, fix it there
-    # and re-pin here -- see .agents/skills/update-opencode. Its own nixpkgs is
-    # kept, not followed: the fork's node_modules hashes are computed against
-    # the bun in that nixpkgs, and a different bun can lay node_modules out
+    # developing-today's OpenChamber fork — this flake's ONLY
+    # developing-today input (#1384). OpenChamber's own opencode input
+    # (developing-today's OpenCode fork: v2, tracks upstream dev plus
+    # model routing, mcpx and serve handover) is the opencode this
+    # flake consumes, reached as inputs.openchamber.inputs.opencode;
+    # the fork's mcpx (origin: developing-today/code, pkgs/mcpx) and
+    # the mcpx daemon modules arrive through the same chain. We own
+    # them all: if one breaks, fix it in its home repo and re-pin
+    # here. The fork's own nixpkgs stays unfollowed (see flakeTidy
+    # below): its node_modules hashes are computed against the bun
+    # in that nixpkgs, and a different bun can lay node_modules out
     # differently and miss the fixed-output hash.
-    opencode.url = "github:developing-today/opencode";
-    # developing-today's OpenChamber fork, built against the opencode above.
     openchamber = {
-      url = "github:developing-today/openchamber";
-      inputs.opencode.follows = "opencode";
-    };
-    # mcpx's single source: developing-today/code, pkgs/mcpx. Source-only
-    # (flake = false) so none of that repo's flake input graph lands in this
-    # lock; the derivation is the package.nix that lives beside the source
-    # there, called from mkPackages below. We own it: if it breaks, fix it
-    # there and re-pin here. The vendored copy this replaces was deleted in
-    # #468; the port audit is in that issue.
-    mcpx-src = {
-      url = "github:developing-today/code";
-      flake = false;
+      url = "github:developing-today-forks/openchamber";
+      # Pin the chain's mcpx source forward again: the 2026-11-10 full
+      # flake update rolled it back a week (developing-today/code
+      # 031cde2, 2026-11-03), whose pool handoff reads /proc and fails
+      # its tests on aarch64-darwin (no /proc on macOS). The source this
+      # flake carried before the update (code f8957ac, 2026-11-10) is
+      # green on aarch64-darwin. Drop this override once the fork's own
+      # mcpx-src pin catches up.
+      # Pinned forward 2026-11-11 to the merge of developing-today/code
+      # PR 8775 (darwin-nix issue 1815): at f8957ac the mcpx
+      # touch-reopen test expired its own task before the reopen
+      # under builder load and failed the mcpx-home-manager-module
+      # flake check (run 43098524363).
+      inputs.opencode.inputs.mcpx-src.url =
+        "github:developing-today/code/67d9d908b080cba7231ef668e0a8692928e7cbd3";
+      # Pin the chain's opencode to the #1791 hash-fix rev: the rev the
+      # chain otherwise resolves (6c43550) records an aarch64-darwin
+      # node_modules fixed-output hash that does not match its own
+      # content — two independent native darwin builds (the Mac in
+      # #1791 and darwin-nix run 42965438016) agree the output is
+      # sha256-g9J6PY3Bv1i8K6e8chtUwj/lvdVifAGf/VbtAnxnp2A=. The fork's
+      # pin branch for that tree (fork PR #2269, merged) carries the
+      # corrected nix/hashes.json and nothing else. Drop this override
+      # once the chain's own opencode resolution moves past 6c43550.
+      inputs.opencode.url = "github:developing-today-forks/opencode/b80e509fed9dce48d739887b3821cbba36ccc5d8";
     };
     sidepulse-src = {
-      url = "github:inteliwear/sidepulse/main";
+      url = "github:inteliwear/sidepulse/ffb1d3c2f3eed3b7e80e32d7876a7e1d67bd5dfb";
       flake = false;
     };
     # Vertex's APIM proxy for Claude Code (internal repo). Source-only and pinned
@@ -236,9 +253,22 @@ rec {
     # this evaluated value as a file; see #476). The
     # forks' own nixpkgs stay unfollowed: their node_modules fixed-output
     # hashes are computed with the bun in that nixpkgs.
+    # #1384: openchamber is this flake's only developing-today input, and
+    # its own transitive inputs (fleet, opencode, mcpx-src) are pinned to
+    # versions that match its node_modules hashes and its mcpx/Go pairing.
+    # Hoisting them to root would drag them onto this flake's nixpkgs (the
+    # flatten pass keeps the newest duplicate), which breaks mcpx's
+    # buildGo127Module lookup. Keep the whole subtree unpinned/unflattened,
+    # like the forks' nixpkgs above.
     flakeTidy.exclude.follows = [
-      "opencode.nixpkgs"
+      "openchamber/opencode.nixpkgs"
       "openchamber.nixpkgs"
+    ];
+    flakeTidy.exclude.flatten = [
+      "fleet"
+      "mcpx-src"
+      "nixpkgs"
+      "opencode"
     ];
     eachSystem =
       f:
@@ -262,6 +292,7 @@ rec {
         inputs.nix-homebrew.darwinModules.nix-homebrew
         inputs.mac-app-util.darwinModules.default
         inputs.home-manager.darwinModules.home-manager
+        inputs.self.darwinModules.mcpx
         ./configuration.nix
       ];
       specialArgs = { inherit inputs; };
@@ -290,87 +321,35 @@ rec {
       _hostName: hostConfiguration: inputs.darwin.lib.darwinSystem hostConfiguration
     ) darwinSystemConfigurations;
 
+    # The mcpx daemon modules (#343's option set, completed by the
+    # consolidation #1384): they originate in developing-today/code
+    # (pkgs/mcpx/modules), the opencode fork re-exports them with the
+    # package defaulted to its own mcpx build, and openchamber passes
+    # them through; this flake exposes the same outputs so consumers
+    # of this flake keep one import shape. darwinModules.mcpx — the
+    # slice #343 left remaining — now exists via the chain. This
+    # repo's darwin hosts now enable services.mcpx (configuration.nix
+    # sets it from mcpx.config.nix): the hand-rolled agent that used
+    # to run there is the fixed-path pattern the darwin module
+    # encodes, and it is gone from configuration.nix.
+    nixosModules.mcpx = inputs.openchamber.nixosModules.mcpx;
+    homeManagerModules.mcpx = inputs.openchamber.homeManagerModules.mcpx;
+    darwinModules.mcpx = inputs.openchamber.darwinModules.mcpx;
+    homeManagerModules.fleet-brokers = import ./pkgs/fleet-brokers/home-module.nix;
+
     # Shared package definitions — used by packages, apps, devShells, and checks
     mkPackages =
       pkgs:
       let
         system = pkgs.stdenv.hostPlatform.system;
         bun-bin = pkgs.callPackage ./pkgs/bun-bin/package.nix { };
-        # mcpx is built from the pinned mcpx-src input (developing-today/code,
-        # pkgs/mcpx — the only copy; the vendored one was deleted in #468),
-        # using the package.nix that lives beside that source; adapt here,
-        # never by patching the source. Its takeover/upgrade/handoff code is
-        # Linux-only, not just its tests: the successor takes over systemd's
-        # MAINPID, and mcpclient/handoff.go reads /proc/<pid>/stat. Run on
-        # darwin with the SOCK_CLOEXEC test helper patched, all 12 skipped
-        # tests fail (7 on the missing /proc, 5 "takeover: EOF"; checked
-        # 2026-10-19 at mcpx-src 7274889). launchd cannot hand over its pid
-        # either, so this config never upgrades in place: a new mcpx
-        # restarts the agent (configuration.nix). Everything else runs.
-        mcpx =
-          (pkgs.callPackage (inputs.mcpx-src + "/pkgs/mcpx/package.nix") { inherit bun-bin; }).overrideAttrs
-            (
-              old:
-              pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
-                # SOCK_CLOEXEC is a Linux socket flag; the helper only needs a pair.
-                postPatch = (old.postPatch or "") + ''
-                  substituteInPlace internal/daemon/takeover_test.go \
-                    --replace-fail 'syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC' 'syscall.SOCK_STREAM'
-                '';
-                # The package's own checkPhase runs a bare
-                # `go test -timeout 30m $pkgs`, so checkFlags would be
-                # ignored; put -skip on that line instead.
-                # developing-today/code#418: builtins.replaceStrings is a
-                # silent no-op when its pattern is absent, so a canonical
-                # checkPhase change in code's pkgs/mcpx/package.nix arriving
-                # via an mcpx-src pin bump would silently drop this skip and
-                # break the darwin build on a Mac. Fail evaluation loudly
-                # instead; the mcpx-darwin-skip flake check forces this
-                # attribute on every system, so Linux CI catches drift too.
-                checkPhase =
-                  let
-                    rewritten =
-                      builtins.replaceStrings
-                        [ "go test -timeout 30m $pkgs" ]
-                        [ "go test -timeout 30m -skip='${mcpxDarwinSkip}' $pkgs" ]
-                        old.checkPhase;
-                  in
-                  if rewritten == old.checkPhase then
-                    throw "mcpx darwin skip: the canonical checkPhase line `go test -timeout 30m $pkgs` was not found in the mcpx-src package.nix checkPhase, so the darwin -skip rewrite would silently do nothing (developing-today/code#418). Update the replaceStrings pattern in flake.nix to match the new canonical line."
-                  else
-                    rewritten;
-              }
-            );
-        mcpxDarwinSkip = "^(${
-          pkgs.lib.concatStringsSep "|" [
-            "TestACallInFlightAtATakeoverIsAnsweredAndItsConnectionMovesOn"
-            "TestAnIdleKeepAliveConnectionSurvivesATakeover"
-            "TestClientHandoffCommitsOnlyWhenActivated"
-            "TestClientLeaseSurvivesDaemonTakeover"
-            "TestDetachedChildKeepsItsPipesAndAdoptionResumesThem"
-            "TestDetachRefusesWhileACallIsInFlight"
-            "TestHandoffDoesNotSplitAFrameAcrossTheTwoProcesses"
-            "TestKeepAliveCallersLoseNoCallsAcrossARealTakeover"
-            "TestTakeoverKeepsTheChildAndTheListener"
-            "TestTakeoverLosesNoCallsWhileAClientKeepsCalling"
-            "TestTakeoverRestartsAChangedServerAndKeepsTheRest"
-            "TestUpgradeKeepsTheChildAndHandsMainPIDToTheSuccessor"
-            "TestACallInFlightAtTheHandoverIsAnsweredByTheOldDaemon"
-            "TestAClientLeaseSurvivesADaemonTakeover"
-            "TestAnIdleConnectionSurvivesATakeoverInProcess"
-            "TestCallsIssuedDuringATakeoverNeverFail"
-            "TestHandoffRecordsTheIdentityAPoolWasMadeWith"
-            "TestKeepAliveCallersLoseNoCallsAcrossATakeover"
-            "TestRegistryHandoffKeepsTheChildAcrossTheSuccessor"
-            "TestRegistryHandoffThatIsNotCommittedRestoresTheChild"
-            # Not a takeover test: the restart it checks happens, but it
-            # verifies the new executable through /proc/<pid>/exe.
-            "TestExecChangeRestartsThatPoolAndNoOther"
-          ]
-        })$";
-        # The fork's own build, with this repo's mcpx on its PATH so the CLI it
-        # talks to is the same build as the launchd daemon.
-        opencode-unwrapped = inputs.opencode.packages.${system}.opencode.override { inherit mcpx; };
+        # The fork's build, as pinned through the openchamber input,
+        # unmodified: it already bundles the fork's mcpx — the same
+        # build the daemon modules default to — so the CLI talks to
+        # the same mcpx the daemon runs. The coherence this repo used
+        # to maintain with a local override over a private mcpx build
+        # is now true by construction (#1384).
+        opencode-unwrapped = inputs.openchamber.inputs.opencode.packages.${system}.opencode;
         # Two things the fork cannot know, set by an outer shell wrapper (only a
         # shell wrapper can expand $HOME at exec time; the fork wraps with
         # makeBinaryWrapper, whose C wrapper rejects --run):
@@ -388,7 +367,7 @@ rec {
         # have put git worktrees there and lost thousands of tracked files to a
         # sweep. OPENCODE_TMPDIR still overrides. Scoped to this wrapper rather
         # than the whole machine, which would retarget nix builds too.
-        # developing-today/opencode#13 asks for this in core.
+        # developing-today-forks/opencode#13 asks for this in core.
         opencode =
           pkgs.runCommandLocal "opencode-${opencode-unwrapped.version}"
             {
@@ -411,30 +390,45 @@ rec {
       ({
         inherit
           bun-bin
-          mcpx
           opencode
           opencode-unwrapped
           ;
 
-        # OpenChamber's server, running the wrapped opencode above. Its own
-        # opencode input already follows ours (flake.nix inputs); the override
-        # swaps in the wrapper so the database and scratch pins hold for the
-        # OpenCode it starts too.
+        # Not built here: the fork's mcpx, re-exposed so this flake's
+        # package surface (systemPackages installs it) keeps its
+        # shape while the build itself lives with the fork (#1384).
+        mcpx = inputs.openchamber.inputs.opencode.packages.${system}.mcpx;
+
+        # OpenChamber's server, running the wrapped opencode above:
+        # the override swaps in the wrapper so the database and
+        # scratch pins hold for the OpenCode it starts too.
         openchamber = inputs.openchamber.packages.${system}.openchamber.override { inherit opencode; };
 
         brew-repair = import ./pkgs/brew-repair {
           inherit pkgs;
           lib = pkgs.lib;
         };
+        # `nix run .#adopt`: add this Mac to the hosts map (see pkgs/adopt).
+        adopt = import ./pkgs/adopt {
+          inherit pkgs;
+          lib = pkgs.lib;
+        };
         codedb = pkgs.callPackage ./pkgs/codedb/package.nix { };
         flake-tidy = import ./pkgs/flake-tidy { inherit pkgs; };
         twg-cli = pkgs.callPackage ./pkgs/twg-cli/package.nix { };
+        # code#5362: the laptop fleet brokers (secrets + queue) and
+        # the repo-queue client, as one workspace package.
+        fleet-brokers = pkgs.callPackage ./pkgs/fleet-brokers/package.nix { };
+        # code#5343: the resident laptop execution agent daemon.
+        laptop-agent = pkgs.callPackage ./pkgs/laptop-agent/package.nix { };
         # mcp-remote and chrome-devtools-mcp, which mcpx.config.nix runs.
         npm-mcp-servers = pkgs.callPackage ./pkgs/npm-mcp-servers { };
         cai-claude-apim-proxy = pkgs.callPackage ./pkgs/cai-claude-apim-proxy {
           src = inputs.cai-claude-apim-proxy-src;
         };
         opencode-share = import ./pkgs/opencode-share { inherit pkgs; };
+        # The service lifecycle event log (org.nixos.service-events).
+        service-events = pkgs.callPackage ./pkgs/service-events { };
         symlinker = import ./pkgs/symlinker {
           inherit pkgs;
           symlinkerSrc = ./symlinker.sh;
@@ -500,6 +494,85 @@ rec {
               pytest -q -p no:cacheprovider
               touch $out
             '';
+        # #1149: simple-rebuild.test.sh pins simple-rebuild.sh's
+        # mode-flag parser -- --build-only with --activate-only in
+        # either order and a repeated --activate-only exit 2 naming
+        # the flags instead of silently last-winning across the
+        # no-sudo/sudo privilege split, and valid invocations parse
+        # exactly as before. The suite extracts the real parser
+        # segment from the script and runs it under zsh (the script's
+        # interpreter), so it needs zsh but no build/activation.
+        simple-rebuild-tests =
+          pkgs.runCommandLocal "simple-rebuild-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.zsh
+                pkgs.coreutils
+                pkgs.gnugrep
+                pkgs.gawk
+              ];
+            }
+            ''
+              cp ${./simple-rebuild.sh} simple-rebuild.sh
+              cp ${./simple-rebuild.test.sh} simple-rebuild.test.sh
+              chmod u+w simple-rebuild.sh simple-rebuild.test.sh
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./simple-rebuild.test.sh
+              touch $out
+            '';
+        # #1804: install-determinate-nix.test.sh pins
+        # install-determinate-nix's argument validation -- extra
+        # arguments and flag-shaped hostnames exit 2 naming the
+        # offending argument before any side effect, -h/--help
+        # prints usage with exit 0, and valid default/explicit
+        # hostname invocations parse exactly as before. The suite
+        # extracts the real parse segment from the script and runs
+        # it under zsh (the script's interpreter) with scutil
+        # stubbed, so it needs zsh but no Mac and installs nothing.
+        install-determinate-nix-tests =
+          pkgs.runCommandLocal "install-determinate-nix-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.zsh
+                pkgs.coreutils
+                pkgs.gnugrep
+                pkgs.gawk
+              ];
+            }
+            ''
+              cp ${./install-determinate-nix} install-determinate-nix
+              cp ${./install-determinate-nix.test.sh} install-determinate-nix.test.sh
+              chmod u+w install-determinate-nix install-determinate-nix.test.sh
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./install-determinate-nix.test.sh
+              touch $out
+            '';
+        # #1148: check-pin-sync.test.py — the probes for
+        # pkgs/bun-bin/check-pin-sync.py (missing workflow / missing
+        # hashes / malformed hashes must exit 2, never traceback at
+        # the exit-1 "out of sync" signal; in-sync/out-of-sync
+        # baselines unchanged). The test locates the script beside
+        # itself and its no-arg baseline resolves the repo root two
+        # levels up from the script, so copy both pin files into the
+        # check tree in that layout.
+        bun-pin-sync-tests =
+          pkgs.runCommandLocal "bun-pin-sync-tests"
+            {
+              nativeBuildInputs = [ pkgs.python3 ];
+            }
+            ''
+              mkdir -p pkgs/bun-bin .github/workflows
+              cp ${./pkgs/bun-bin/check-pin-sync.py} pkgs/bun-bin/check-pin-sync.py
+              cp ${./pkgs/bun-bin/check-pin-sync.test.py} pkgs/bun-bin/check-pin-sync.test.py
+              cp ${./pkgs/bun-bin/hashes.json} pkgs/bun-bin/hashes.json
+              cp ${./.github/workflows/buffer-backup-renovate-bun-sync.yml} .github/workflows/buffer-backup-renovate-bun-sync.yml
+              python3 pkgs/bun-bin/check-pin-sync.test.py
+              touch $out
+            '';
         # #414: plugins/warp-import.test.mjs (25 tests) was run by nothing —
         # no workflow, recipe, or check referenced it. Run every
         # plugins/*.test.mjs here so `nix flake check` fails when a plugin
@@ -544,68 +617,780 @@ rec {
             }
             ''
               cp $src/opencode-db-vacuum.sh $src/opencode-db-prune.sh $src/opencode-db-pids.test.sh ./
+              mkdir -p lib
+              cp $src/lib/common.sh lib/
+              cp $src/lib/arg-probe.sh lib/
               chmod u+w ./opencode-db-vacuum.sh ./opencode-db-prune.sh ./opencode-db-pids.test.sh
               export HOME="$TMPDIR/home"
               mkdir -p "$HOME"
               bash ./opencode-db-pids.test.sh
               touch $out
             '';
-        # #478: archive/skills/plannotator-setup-goal/SKILL.test.ts (the
-        # repo's only *.test.ts suite) was run by nothing — no check,
-        # workflow, or recipe referenced it, unlike the flake-tidy,
-        # warp-import, and opencode-db-pids suites (#397/#414/#472). It is
-        # self-contained (bun:test content pins on the sibling SKILL.md),
-        # so run every archived skill suite here.
-        skill-tests =
-          pkgs.runCommandLocal "skill-tests"
+        # #941: opencode-db-args.test.sh pins the argument parsers of (extended to backup-prune, folded into the shared probe matrix, #1147)
+        # opencode-db-vacuum.sh / opencode-db-prune.sh — every
+        # value-taking option must reject an empty or flag-shaped value
+        # naming the option, so "--into --dry-run" cannot swallow the
+        # flag and run a real vacuum (the #930 pattern). Self-contained
+        # apart from sqlite3 for the vacuum happy-path control.
+        opencode-db-args-tests =
+          pkgs.runCommandLocal "opencode-db-args-tests"
             {
-              nativeBuildInputs = [ pkgs.bun ];
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.sqlite
+              ];
               src = inputs.self;
             }
             ''
-              cp -r $src/archive ./archive
-              chmod -R u+w ./archive
+              cp $src/opencode-db-vacuum.sh $src/opencode-db-prune.sh $src/opencode-db-backup-prune.sh $src/opencode-db-args.test.sh ./
+              mkdir -p lib
+              cp $src/lib/common.sh lib/
+              cp $src/lib/arg-probe.sh lib/
+              chmod u+w ./opencode-db-vacuum.sh ./opencode-db-prune.sh ./opencode-db-backup-prune.sh ./opencode-db-args.test.sh
               export HOME="$TMPDIR/home"
               mkdir -p "$HOME"
-              found=0
-              for t in archive/skills/*/SKILL.test.ts; do
-                [ -e "$t" ] || continue
-                found=1
-                echo "== $t"
-                bun test "$t"
-              done
-              if [ "$found" -eq 0 ]; then
-                echo "no archive/skills/*/SKILL.test.ts suites found" >&2
-                exit 1
-              fi
+              bash ./opencode-db-args.test.sh
               touch $out
             '';
-        # developing-today/code#418: the darwin mcpx package rewrites the
-        # canonical checkPhase line from developing-today/code's
-        # pkgs/mcpx/package.nix to add the takeover/handoff -skip list.
-        # Force the aarch64-darwin package's checkPhase here, on every
-        # system: the override now throws when its replaceStrings pattern
-        # no longer matches, and this check additionally asserts the
-        # rewritten phase really carries the skip, so an mcpx-src pin bump
-        # (flake.lock) or a flake.nix edit that breaks the coupling fails
-        # `nix flake check` on Linux instead of a Mac build later.
-        mcpx-darwin-skip =
-          let
-            darwinCheckPhase = packages.aarch64-darwin.mcpx.checkPhase;
-          in
-          pkgs.runCommandLocal "mcpx-darwin-skip-check" { inherit darwinCheckPhase; } ''
-            case "$darwinCheckPhase" in
-            *"-skip="*) ;;
-            *)
-              echo "darwin mcpx checkPhase lost its -skip rewrite:" >&2
-              printf '%s\n' "$darwinCheckPhase" >&2
-              exit 1
-              ;;
-            esac
-            touch $out
-          '';
+        # #1050: opencode-db-prune.test.sh drives the real prune script
+        # against fixture SQLite DBs -- dry-run eligibility, the batched
+        # delete itself (newest/non-snapshot/sync-owned rows survive),
+        # --archive + --restore-session round-trip, integrity asserted.
+        # The destructive core had no executable test while every
+        # peripheral property (args #941, pids #472) was pinned. Needs
+        # gzip for the archive compressor fallback (zstd preferred when
+        # present) and coreutils for date/mktemp.
+        opencode-db-prune-tests =
+          pkgs.runCommandLocal "opencode-db-prune-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.sqlite
+                pkgs.gzip
+                pkgs.coreutils
+              ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/opencode-db-vacuum.sh $src/opencode-db-prune.sh $src/opencode-db-prune.test.sh ./
+              mkdir -p lib
+              cp $src/lib/common.sh lib/
+              cp $src/lib/arg-probe.sh lib/
+              chmod u+w ./opencode-db-vacuum.sh ./opencode-db-prune.sh ./opencode-db-prune.test.sh
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./opencode-db-prune.test.sh
+              touch $out
+            '';
+        # #1088: opencode-db-vacuum.test.sh drives the real vacuum script
+        # against fixture SQLite DBs -- the VACUUM INTO + verify + swap
+        # core (shrink, 500/500/500/10 row counts, .old backup, integrity),
+        # the existing-.old/.compact refusals, --no-backup, a custom
+        # --into, and --auto-vacuum reading back INCREMENTAL. The args and
+        # pids suites pin only the parser and the pid guard; the
+        # destructive swap had no executable test.
+        opencode-db-vacuum-tests =
+          pkgs.runCommandLocal "opencode-db-vacuum-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.sqlite
+                pkgs.coreutils
+              ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/opencode-db-vacuum.sh $src/opencode-db-vacuum.test.sh ./
+              mkdir -p lib
+              cp $src/lib/common.sh lib/
+              cp $src/lib/arg-probe.sh lib/
+              chmod u+w ./opencode-db-vacuum.sh ./opencode-db-vacuum.test.sh
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./opencode-db-vacuum.test.sh
+              touch $out
+            '';
+        # #659: opencode-db-backup-prune.test.sh pins the retention for
+        # `just opencode-db-backup`'s timestamped backup dirs -- dry-run
+        # lists exactly the beyond-keep set and deletes nothing, --apply
+        # deletes exactly that set, the newest backup is never listed,
+        # and non-timestamp entries are never touched. Self-contained:
+        # fixture dirs only, no database needed.
+        opencode-db-backup-prune-tests =
+          pkgs.runCommandLocal "opencode-db-backup-prune-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.coreutils
+              ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/opencode-db-backup-prune.sh $src/opencode-db-backup-prune.test.sh ./
+              mkdir -p lib
+              cp $src/lib/common.sh lib/
+              cp $src/lib/arg-probe.sh lib/
+              chmod u+w ./opencode-db-backup-prune.sh ./opencode-db-backup-prune.test.sh
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./opencode-db-backup-prune.test.sh
+              touch $out
+            '';
+        # #557: var-folders-clean.test.sh (the #553 test for clean.sh's
+        # /private/var/folders sweep) was run by nothing, tested a pasted
+        # copy of the loops instead of the shipped logic, and exited 0 on
+        # failure. The sweep now lives in var-folders-clean.sh (which
+        # clean.sh calls), the test drives that script, and failures exit
+        # non-zero — run it here, by name, like opencode-db-pids above.
+        var-folders-clean-tests =
+          pkgs.runCommandLocal "var-folders-clean-tests"
+            {
+              nativeBuildInputs = [ pkgs.bash ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/var-folders-clean.sh $src/var-folders-clean.test.sh ./
+              chmod u+w ./var-folders-clean.sh ./var-folders-clean.test.sh
+              bash ./var-folders-clean.test.sh
+              touch $out
+            '';
+        # #883/#886: symlinker.test.sh drives the real symlinker.sh through
+        # run -> undo round-trips — colon-named conflicts (BACKUP records),
+        # legacy v2 colon-format undo files, the irrecoverable-undo exit
+        # code, and same-second run-id collisions (via a stubbed date) — so
+        # the undo safety net cannot regress silently.
+        symlinker-tests =
+          pkgs.runCommandLocal "symlinker-tests"
+            {
+              nativeBuildInputs = [ pkgs.bash ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/symlinker.sh $src/symlinker.test.sh ./
+              chmod u+w ./symlinker.sh ./symlinker.test.sh
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./symlinker.test.sh
+              touch $out
+            '';
+        # #1752: tmux-navigator.test.sh extracts the vim-tmux-navigator
+        # block from homeUser.nix and loads it in isolated tmux servers -
+        # the host version and a stubbed tmux 2.9 - pinning the C-backslash
+        # root-table binding for both version branches. The block's old
+        # tmux_version assignment was never shell-evaluated by tmux, so
+        # the binding silently never installed; no suite covered it.
+        tmux-navigator-tests =
+          pkgs.runCommandLocal "tmux-navigator-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.tmux
+                pkgs.coreutils
+                pkgs.gawk
+                pkgs.gnugrep
+                pkgs.gnused
+              ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/homeUser.nix $src/tmux-navigator.test.sh ./
+              chmod u+w ./homeUser.nix ./tmux-navigator.test.sh
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./tmux-navigator.test.sh
+              touch $out
+            '';
+        # #967: symlink-scripts.test.sh drives the real symlink-commands
+        # and symlink-plugins — in place against the repo's real
+        # commands/ and plugins/, and as verbatim copies in a fixture
+        # tree for the edge cases — pinning fresh link, already-linked
+        # no-op, identical-file replacement (not a warning), conflict /
+        # elsewhere / broken-symlink preservation with exit 1, --dry-run
+        # changing nothing, unknown option exit 2, and the glob
+        # divergence (commands links every regular file; plugins only
+        # *.{js,ts}, so *.test.mjs is never linked). Neither script had
+        # a suite or a check before this.
+        symlink-scripts-tests =
+          pkgs.runCommandLocal "symlink-scripts-tests"
+            {
+              nativeBuildInputs = [ pkgs.bash ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/symlink-commands $src/symlink-plugins $src/symlink-scripts.test.sh ./
+              cp -r $src/commands $src/plugins ./
+              chmod u+w ./symlink-commands ./symlink-plugins ./symlink-scripts.test.sh
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./symlink-scripts.test.sh
+              touch $out
+            '';
+        # #983: search.test.sh drives the real search.sh with a stub
+        # brew — PR #959's #957 fix (a failed `brew list --cask` exits
+        # 1 naming the step instead of reporting every app) shipped
+        # with no test and no check. The suite pins failing/missing
+        # brew (exit 1, step named, no findings), working brew (only
+        # non-cask apps reported), empty list (all apps, exit 0), and
+        # `brew list` running exactly once per invocation.
+        search-tests =
+          pkgs.runCommandLocal "search-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.coreutils
+                pkgs.findutils
+                pkgs.gnugrep
+                pkgs.gnused
+              ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/search.sh $src/search.test.sh ./
+              chmod u+w ./search.sh ./search.test.sh
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./search.test.sh
+              touch $out
+            '';
+        # #1167: full-clean.test.sh drives the real full-clean.sh
+        # with its steps (./s, prune, vacuum) and PATH commands
+        # (sudo, nix-collect-garbage, nix, df) stubbed to log every
+        # call -- the script has no argument parser, so --help,
+        # --bogus and --dry-run used to run the full destructive
+        # sequence and exit 0. The suite pins those three (no stub
+        # called, correct exits, argument named) plus a no-argument
+        # control that runs the whole stubbed sequence.
+        full-clean-tests =
+          pkgs.runCommandLocal "full-clean-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.coreutils
+                pkgs.gnugrep
+              ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/full-clean.sh $src/full-clean.test.sh ./
+              chmod u+w ./full-clean.sh ./full-clean.test.sh
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./full-clean.test.sh
+              touch $out
+            '';
+        # #1190: rebuild-backup-zed.test.sh drives the real
+        # rebuild.sh and backup-zed.sh under zsh (their interpreter)
+        # -- PR #1169 added their no-argument guards alongside
+        # full-clean.sh's, but only the bash script got a test. The
+        # suite stubs git/nix/simple-rebuild.sh for rebuild.sh and
+        # uses a fixture HOME for backup-zed.sh, pinning --help/-h
+        # (exit 0, usage, no side effects), unknown arguments
+        # (exit 2, argument named, no side effects), and no-argument
+        # controls for both scripts.
+        rebuild-backup-zed-tests =
+          pkgs.runCommandLocal "rebuild-backup-zed-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.zsh
+                pkgs.coreutils
+                pkgs.gnugrep
+                pkgs.findutils
+              ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/rebuild.sh $src/backup-zed.sh $src/rebuild-backup-zed.test.sh ./
+              chmod u+w ./rebuild.sh ./backup-zed.sh ./rebuild-backup-zed.test.sh
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./rebuild-backup-zed.test.sh
+              touch $out
+            '';
+        # #940: git-discover-repos.test.sh drives the real
+        # git-discover-repos through bad, mixed, regular-file, all-valid,
+        # --count and --dry-run --path runs — a bad --path used to exit 0,
+        # so exit-code-checking callers (clean.sh) saw a successful empty
+        # scan instead of a bad argument. It also pins PR #939's
+        # flag-shaped-value guards (#951): --path/--depth/--find/--user
+        # with a flag-shaped next token exit 2 naming the option.
+        git-discover-repos-tests =
+          pkgs.runCommandLocal "git-discover-repos-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.git
+              ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/git-discover-repos $src/git-discover-repos.test.sh ./
+              mkdir -p lib
+              cp $src/lib/common.sh lib/
+              cp $src/lib/arg-probe.sh lib/
+              chmod u+w ./git-discover-repos ./git-discover-repos.test.sh
+              patchShebangs ./git-discover-repos
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./git-discover-repos.test.sh
+              touch $out
+            '';
+        # #951: clean.test.sh drives the real clean.sh parser -- PR #939
+        # made its value-taking options reject a flag-shaped next token
+        # ("--path --dry-run" used to swallow --dry-run and run the
+        # cleanup for real), but added no test for clean.sh. The suite
+        # pins --path/--depth/--docker-age rejection (exit 2, option
+        # named, no side effects) plus a valid-value control that runs
+        # only the unknown-scratch sweep over an empty isolated HOME.
+        clean-tests =
+          pkgs.runCommandLocal "clean-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.git
+              ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/clean.sh $src/clean.test.sh $src/git-discover-repos $src/var-folders-clean.sh ./
+              mkdir -p lib
+              cp $src/lib/common.sh lib/
+              cp $src/lib/arg-probe.sh lib/
+              cp $src/lib/outcome-probe.sh lib/
+              chmod u+w ./clean.sh ./clean.test.sh ./git-discover-repos ./var-folders-clean.sh
+              patchShebangs ./git-discover-repos
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./clean.test.sh
+              touch $out
+            '';
+        # #1077: pkgs/adopt/adopt.test.sh was run by nothing — no flake
+        # check, workflow, recipe, or package referenced it, so a
+        # regression in adopt.sh (which edits flake.nix) landed silently.
+        # The suite drives the real adopt.sh against a scratch flake,
+        # including the BWK-strict awk shim cases for #1074. Run it here
+        # (checks are eachSystem, so aarch64-darwin gets it too).
+        adopt-tests =
+          pkgs.runCommandLocal "adopt-tests"
+            {
+              nativeBuildInputs = [ pkgs.bash ];
+              src = ./pkgs/adopt;
+            }
+            ''
+              cp -r $src ./adopt-src
+              chmod -R u+w ./adopt-src
+              cd ./adopt-src
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./adopt.test.sh
+              touch $out
+            '';
+        # #951: git-maintain-repos.test.sh drives the real
+        # git-maintain-repos parser -- PR #939's flag-shaped guards for
+        # --path/--depth/--jobs/--pack-threads/--reflog-expire had no
+        # test. The suite pins rejection (exit 2, option named, no side
+        # effects) plus a --dry-run valid-value control over a fixture
+        # repo.
+        # #978: the check copies must be shebang-patched (here and in the
+        # discover/clean/spotlight checks): git-maintain-repos starts worker
+        # copies of itself via xargs, and its consumers execute the sibling
+        # git-discover-repos directly. The nix build sandbox has no
+        # /usr/bin/env, so an unpatched `#!/usr/bin/env bash` copy cannot run.
+        git-maintain-repos-tests =
+          pkgs.runCommandLocal "git-maintain-repos-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.git
+              ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/git-maintain-repos $src/git-maintain-repos.test.sh $src/git-discover-repos ./
+              mkdir -p lib
+              cp $src/lib/common.sh lib/
+              cp $src/lib/arg-probe.sh lib/
+              chmod u+w ./git-maintain-repos ./git-maintain-repos.test.sh ./git-discover-repos
+              patchShebangs ./git-discover-repos ./git-maintain-repos
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./git-maintain-repos.test.sh
+              touch $out
+            '';
+        # #951: spotlight-exclude-artifacts.test.sh drives the real
+        # spotlight-exclude-artifacts parser -- PR #939's flag-shaped
+        # guards for --path/--depth had no test ("--path --dry-run" used
+        # to run the real marking pass). The suite pins rejection
+        # (exit 2, option named, no markers written) plus a --dry-run
+        # valid-value control over a fixture repo.
+        spotlight-exclude-artifacts-tests =
+          pkgs.runCommandLocal "spotlight-exclude-artifacts-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.git
+              ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/spotlight-exclude-artifacts $src/spotlight-exclude-artifacts.test.sh $src/git-discover-repos ./
+              mkdir -p lib
+              cp $src/lib/common.sh lib/
+              cp $src/lib/arg-probe.sh lib/
+              chmod u+w ./spotlight-exclude-artifacts ./spotlight-exclude-artifacts.test.sh ./git-discover-repos
+              patchShebangs ./git-discover-repos
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./spotlight-exclude-artifacts.test.sh
+              touch $out
+            '';
+        # #453: opencode-tmp-guard.test.sh extracts the real guard script
+        # from opencode-tmp-guard.nix and drives it against a fixture temp
+        # tree -- the depth-4 scan used to miss worktree .git pointer files
+        # and repos at depth >= 5 (the metadata dirhelper sweeps first),
+        # node_modules .git dirs were walked, and a regular file at
+        # $TMPDIR/opencode made every run a silent no-op.
+        opencode-tmp-guard-tests =
+          pkgs.runCommandLocal "opencode-tmp-guard-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.python3
+              ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/opencode-tmp-guard.nix $src/opencode-tmp-guard.test.sh ./
+              chmod u+w ./opencode-tmp-guard.test.sh
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./opencode-tmp-guard.test.sh
+              touch $out
+            '';
+        # #1432: exercise the real OpenChamber deploy activation body with a
+        # missing-after-poll password, unchanged-password control, and real
+        # password-rotation fixture. The missing path must fail before key
+        # computation or any service/marker mutation.
+        openchamber-deploy-tests =
+          pkgs.runCommandLocal "openchamber-deploy-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.coreutils
+                pkgs.gawk
+                pkgs.gnugrep
+                pkgs.python3
+              ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/openchamber.nix $src/openchamber-deploy.test.sh ./
+              chmod u+w ./openchamber-deploy.test.sh
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./openchamber-deploy.test.sh
+              touch $out
+            '';
+        # #659: opencode-prune-report.test.sh extracts the real report
+        # script from opencode-prune-report.nix and drives it against stub
+        # pruners -- both invoked, clean.sh gets --dry-run and
+        # --no-git-maintenance, nothing ever gets --apply or
+        # --prune-unknown-scratch, and one pruner failing does not hide the
+        # other's report. #1436: it also rebuilds the tools derivation's
+        # store layout from the derivation's own cp/chmod lines and drives
+        # the REAL store-copied clean.sh against a scratch HOME, so an
+        # incomplete derivation (a missing git-discover-repos cost the
+        # scheduled report a fatal 127 before the scratch section) fails
+        # here instead of on the Mac.
+        opencode-prune-report-tests =
+          pkgs.runCommandLocal "opencode-prune-report-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.bc
+                pkgs.git
+                pkgs.python3
+              ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/opencode-prune-report.nix $src/opencode-prune-report.test.sh ./
+              cp $src/clean.sh $src/opencode-db-backup-prune.sh $src/git-discover-repos $src/git-maintain-repos $src/var-folders-clean.sh $src/casks.nix $src/masApps.nix ./
+              mkdir -p lib
+              cp $src/lib/common.sh lib/
+              chmod u+w ./opencode-prune-report.test.sh
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./opencode-prune-report.test.sh
+              touch $out
+            '';
+        # #945: install-vscode-patch-agent.test.sh drives the real
+        # installer with a scratch HOME and a stub launchctl -- a missing
+        # LaunchAgents dir, a failing launchctl load, and a blocked dir
+        # all used to print "Installed and loaded" and exit 0, so the
+        # patch agent could silently never be installed.
+        install-vscode-patch-agent-tests =
+          pkgs.runCommandLocal "install-vscode-patch-agent-tests"
+            {
+              nativeBuildInputs = [ pkgs.bash ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/install-vscode-patch-agent.sh $src/install-vscode-patch-agent.test.sh ./
+              chmod u+w ./install-vscode-patch-agent.sh ./install-vscode-patch-agent.test.sh
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./install-vscode-patch-agent.test.sh
+              touch $out
+            '';
+        # #969: patch-vscode-insiders.test.sh drives the real
+        # patch-vscode-insiders.sh against a fixture app tree via the
+        # VSCODE_INSIDERS_APP_DIR seam -- the #925 write-only-when-changed
+        # rule and the #925/#938 missing-target / missing-JS exit-1
+        # contracts were verified only by hand (with the /Applications
+        # prefix retargeted in scratch copies), so they could regress
+        # silently.
+        patch-vscode-insiders-tests =
+          pkgs.runCommandLocal "patch-vscode-insiders-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.python3
+              ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/patch-vscode-insiders.sh $src/patch-vscode-insiders.test.sh ./
+              chmod u+w ./patch-vscode-insiders.sh ./patch-vscode-insiders.test.sh
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./patch-vscode-insiders.test.sh
+              touch $out
+            '';
+        # #965: mcp-clients.test.py -- the regression suite for
+        # mcp-clients.py, the every-switch enforcement point that keeps
+        # Claude/Codex/Zed MCP config mcpx-only -- was run by nothing:
+        # no flake check, workflow, or justfile recipe referenced it,
+        # unlike every neighbouring suite. Run the real suite here so
+        # `nix flake check` fails when an enforcement spelling/parsing
+        # fix (#905/#906/#929/#944/#950/#956/#990) regresses.
+        mcp-clients-tests =
+          pkgs.runCommandLocal "mcp-clients-tests"
+            {
+              nativeBuildInputs = [ pkgs.python3 ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/mcp-clients.py $src/mcp-clients.test.py ./
+              chmod u+w ./mcp-clients.py ./mcp-clients.test.py
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              python3 ./mcp-clients.test.py
+              touch $out
+            '';
+        # #1648: pkgs/service-events/monitor.test.py — the direct-import
+        # probes for monitor.py's launchctl/ps parsers (the #1613
+        # Unicode-digit pid regression and the #1643 rotate symlink
+        # guard) — was run by nothing: the service-events package build
+        # copies only event.py and monitor.py and stubs launchd_jobs
+        # out of its own tick scenarios, and no check or workflow named
+        # the test file, so those regressions could recur with every
+        # automated check green. The test inserts its own directory
+        # into sys.path and imports monitor (which imports event), so
+        # copy the three files in their package layout.
+        service-events-tests =
+          pkgs.runCommandLocal "service-events-tests"
+            {
+              nativeBuildInputs = [ pkgs.python3 ];
+            }
+            ''
+              mkdir -p pkgs/service-events
+              cp ${./pkgs/service-events/event.py} pkgs/service-events/event.py
+              cp ${./pkgs/service-events/monitor.py} pkgs/service-events/monitor.py
+              cp ${./pkgs/service-events/monitor.test.py} pkgs/service-events/monitor.test.py
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              python3 pkgs/service-events/monitor.test.py
+              touch $out
+            '';
+        # #1449: exercise the actual home-manager activation wrapper and
+        # mcp-clients.py with a scratch HOME and a service-event stub. A
+        # partial enforcement must be durably reported without blocking the
+        # rest of activation; failure to record it must still fail activation.
+        mcp-clients-activation-tests =
+          pkgs.runCommandLocal "mcp-clients-activation-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.coreutils
+                pkgs.gnugrep
+                pkgs.gnused
+                pkgs.python3
+              ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/mcp-clients-activation.sh $src/mcp-clients-activation.test.sh $src/mcp-clients.py ./
+              chmod u+w ./mcp-clients-activation.test.sh
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./mcp-clients-activation.test.sh
+              touch $out
+            '';
+        # #1454: activation must durably record failures from the root and
+        # primary-user helper runs without hiding helper output or blocking
+        # later activation entries when the event write succeeds.
+        system-activation-helper-tests =
+          pkgs.runCommandLocal "system-activation-helper-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.coreutils
+                pkgs.gnugrep
+              ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/system-activation-helper.sh $src/system-activation-helper.test.sh ./
+              chmod u+w ./system-activation-helper.test.sh
+              bash ./system-activation-helper.test.sh
+              touch $out
+            '';
+        # #1791: brew-adopt-unmanaged.test.sh drives the real
+        # brew-adopt-unmanaged.sh against stub stat/chown/sudo/brew/
+        # PlistBuddy — the root-owned-Chrome chown+adopt path, the
+        # adopt→force fallback, and the OneDrive self-updated-past-the-
+        # vendored-pin guard are what stand between Drew and the
+        # every-activation brew bundle failure coming back, so they
+        # cannot regress silently.
+        brew-adopt-unmanaged-tests =
+          pkgs.runCommandLocal "brew-adopt-unmanaged-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.coreutils
+                pkgs.gnugrep
+                pkgs.gnused
+              ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/brew-adopt-unmanaged.sh $src/brew-adopt-unmanaged.test.sh ./
+              chmod u+w ./brew-adopt-unmanaged.test.sh
+              bash ./brew-adopt-unmanaged.test.sh
+              touch $out
+            '';
+        # #907: opencode-share.test.sh drives the real opencode-share.sh
+        # in --dry-run mode through [good, missing, good], all-good, and
+        # all-fail target lists — the post-increment error counter used
+        # to abort the run at the first failing target under `set -e`,
+        # so multi-target runs cannot silently skip later targets again.
+        opencode-share-tests =
+          pkgs.runCommandLocal "opencode-share-tests"
+            {
+              nativeBuildInputs = [ pkgs.bash ];
+              src = ./pkgs/opencode-share;
+            }
+            ''
+              cp $src/opencode-share.sh $src/opencode-share.test.sh ./
+              chmod u+w ./opencode-share.sh ./opencode-share.test.sh
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./opencode-share.test.sh
+              touch $out
+            '';
+        # #927/#926: brew-repair.test.sh drives the real brew-repair.sh
+        # against a call-logging stub brew — '-s --dry-run' / '-s -n' used
+        # to swallow the option as the skip value and run real reinstalls,
+        # and a failed/unparseable `brew info` scan used to exit 0 as
+        # "All cask apps are healthy!", so the parse errors, the scan
+        # failures, and the valid-value/healthy controls cannot regress
+        # silently.
+        brew-repair-tests =
+          pkgs.runCommandLocal "brew-repair-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.python3
+              ];
+              src = ./pkgs/brew-repair;
+            }
+            ''
+              cp $src/brew-repair.sh $src/brew-repair.test.sh ./
+              chmod u+w ./brew-repair.sh ./brew-repair.test.sh
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./brew-repair.test.sh
+              touch $out
+            '';
+        # #1287: code-install-extensions.test.sh drives the real
+        # code-install-extensions.sh with a stub `code` — a failed
+        # install used to exit 0 unless it was the script's last line,
+        # so the all-succeed, middle-failure, last-line-failure, and
+        # two-failure shapes (exit status, failure summary naming and
+        # counting the failures, and every extension still attempted
+        # in order) cannot regress silently.
+        code-install-extensions-tests =
+          pkgs.runCommandLocal "code-install-extensions-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.coreutils
+                pkgs.gnugrep
+                pkgs.gnused
+                pkgs.gawk
+              ];
+            }
+            ''
+              cp ${./code-install-extensions.sh} code-install-extensions.sh
+              cp ${./code-install-extensions.test.sh} code-install-extensions.test.sh
+              cp ${./config.toml} config.toml
+              cp ${./vsc-extensions.txt} vsc-extensions.txt
+              chmod u+w code-install-extensions.sh code-install-extensions.test.sh config.toml vsc-extensions.txt
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./code-install-extensions.test.sh
+              touch $out
+            '';
+        # #1435: pm-dispatch-launch.test.sh drives the real launch
+        # script extracted from agents.yml with a stub curl and the
+        # real jq -- payload construction, the four GITHUB_OUTPUT keys
+        # the Summarize step consumes, and the prompt-fetch / OIDC /
+        # non-2xx failure messages and exit codes cannot regress or
+        # drift between the three dispatch tasks (there is now one
+        # implementation, but its contract is pinned here).
+        pm-dispatch-launch-tests =
+          pkgs.runCommandLocal "pm-dispatch-launch-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.coreutils
+                pkgs.jq
+              ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/.github/scripts/pm-dispatch-launch.sh $src/.github/scripts/pm-dispatch-launch.test.sh ./
+              chmod u+w ./pm-dispatch-launch.sh ./pm-dispatch-launch.test.sh
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./pm-dispatch-launch.test.sh
+              touch $out
+            '';
+        # skill-tests (the archive/skills/*/SKILL.test.ts suites, #478)
+        # retired 2026-11-07: the vendored skills moved to dezren39/cairn
+        # (.agents/skills-examples/) per developing-today/code#5982, and
+        # their suites moved with them.
       }
       // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
+        # #1768: build the Lisp dependencies and run upstream's --help install check.
+        mac-app-util =
+          assert pkgs.lib.assertMsg (pkgs.lib.versionAtLeast
+            inputs.mac-app-util.inputs.nixpkgs.legacyPackages.${pkgs.stdenv.hostPlatform.system}.sbcl.version
+            "2.6.6"
+          ) "mac-app-util requires SBCL >= 2.6.6 on newer macOS";
+          inputs.mac-app-util.packages.${pkgs.stdenv.hostPlatform.system}.default;
+        mcpx = (mkPackages pkgs).mcpx;
         sidepulse = (mkPackages pkgs).sidepulse;
         sidepulse-wrapper =
           let
@@ -638,6 +1423,283 @@ rec {
               touch "$out"
             '';
       }
+      // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+        # #343: the mcpx modules, evaluated end to end on Linux. Full
+        # module-system evaluation is the equivalence proof available
+        # here: the NixOS unit must carry the launchd agent's
+        # semantics (start at login, keep running, 20 s stop window,
+        # $HOME working directory, explicit --config) and the
+        # rendered config.json must carry settings verbatim plus
+        # servers as mcpServers — for both the NixOS and the
+        # home-manager module. A module edit that breaks evaluation
+        # or drops a field fails here instead of at switch time.
+        mcpx-nixos-module =
+          let
+            eval = inputs.nixpkgs.lib.nixosSystem {
+              system = pkgs.stdenv.hostPlatform.system;
+              modules = [
+                inputs.self.nixosModules.mcpx
+                {
+                  services.mcpx = {
+                    enable = true;
+                    settings.daemon.autostart = false;
+                    # #1244: a settings-written mcpServers must survive
+                    # (merged per-server; servers wins for `example`).
+                    settings.mcpServers.from-settings = {
+                      command = "/bin/settings-only";
+                    };
+                    settings.mcpServers.example = {
+                      command = "/bin/should-lose";
+                      args = [ "settings" ];
+                    };
+                    servers.example = {
+                      command = "/bin/true";
+                      args = [ "mcp" ];
+                    };
+                    environment.MCPX_TEST_MARKER = "present";
+                    environmentFile = "/home/mcpx-test/mcpx.env";
+                  };
+                  # The minimum a nixosSystem evaluation asks for.
+                  boot.loader.grub.enable = false;
+                  fileSystems."/" = {
+                    device = "/dev/null";
+                    fsType = "ext4";
+                  };
+                  system.stateVersion = "25.11";
+                }
+              ];
+            };
+            unit = eval.config.systemd.user.services.mcpx;
+          in
+          pkgs.runCommandLocal "mcpx-nixos-module-check"
+            {
+              execStart = unit.serviceConfig.ExecStart;
+              restart = unit.serviceConfig.Restart;
+              timeoutStopSec = toString unit.serviceConfig.TimeoutStopSec;
+              workingDirectory = unit.serviceConfig.WorkingDirectory;
+              marker = unit.environment.MCPX_TEST_MARKER;
+              wantedBy = pkgs.lib.concatStringsSep " " unit.wantedBy;
+              environmentFile = unit.serviceConfig.EnvironmentFile;
+              mcpxConfig = eval.config.environment.sessionVariables.MCPX_CONFIG;
+              configFile = eval.config.services.mcpx.configFile;
+              nativeBuildInputs = [ pkgs.jq ];
+            }
+            ''
+              case "$execStart" in
+              *"/bin/mcpx daemon --config "*) ;;
+              *)
+                echo "ExecStart lost the daemon --config form: $execStart" >&2
+                exit 1
+                ;;
+              esac
+              [ "$restart" = "always" ] || { echo "Restart=$restart, want always" >&2; exit 1; }
+              [ "$timeoutStopSec" = "20" ] || { echo "TimeoutStopSec=$timeoutStopSec, want 20" >&2; exit 1; }
+              [ "$workingDirectory" = "%h" ] || { echo "WorkingDirectory=$workingDirectory, want %h" >&2; exit 1; }
+              [ "$wantedBy" = "default.target" ] || { echo "wantedBy=$wantedBy, want default.target" >&2; exit 1; }
+              [ "$marker" = "present" ] || { echo "environment did not reach the unit" >&2; exit 1; }
+              [ "$environmentFile" = "/home/mcpx-test/mcpx.env" ] || { echo "EnvironmentFile=$environmentFile, want the runtime file path" >&2; exit 1; }
+              [ "$mcpxConfig" = "$configFile" ] || { echo "MCPX_CONFIG=$mcpxConfig does not name the rendered config $configFile" >&2; exit 1; }
+              jq -e '.daemon.autostart == false and .mcpServers.example.command == "/bin/true" and .mcpServers.example.args == ["mcp"] and .mcpServers."from-settings".command == "/bin/settings-only"' "$configFile" > /dev/null \
+                || { echo "rendered config.json mismatch:" >&2; cat "$configFile" >&2; exit 1; }
+              touch $out
+            '';
+        # #1244: settings.mcpServers with servers unset must not be
+        # erased by the empty servers default.
+        mcpx-nixos-settings-mcpservers =
+          let
+            eval = inputs.nixpkgs.lib.nixosSystem {
+              system = pkgs.stdenv.hostPlatform.system;
+              modules = [
+                inputs.self.nixosModules.mcpx
+                {
+                  services.mcpx = {
+                    enable = true;
+                    settings.mcpServers.only = {
+                      command = "/bin/only-from-settings";
+                      args = [ "mcp" ];
+                    };
+                  };
+                  boot.loader.grub.enable = false;
+                  fileSystems."/" = {
+                    device = "/dev/null";
+                    fsType = "ext4";
+                  };
+                  system.stateVersion = "25.11";
+                }
+              ];
+            };
+          in
+          pkgs.runCommandLocal "mcpx-nixos-settings-mcpservers-check"
+            {
+              configFile = eval.config.services.mcpx.configFile;
+              nativeBuildInputs = [ pkgs.jq ];
+            }
+            ''
+              jq -e '.mcpServers.only.command == "/bin/only-from-settings" and .mcpServers.only.args == ["mcp"] and (.mcpServers | length) == 1' "$configFile" > /dev/null \
+                || { echo "settings.mcpServers was not preserved:" >&2; cat "$configFile" >&2; exit 1; }
+              touch $out
+            '';
+        mcpx-home-manager-module =
+          let
+            eval = inputs.home-manager.lib.homeManagerConfiguration {
+              inherit pkgs;
+              modules = [
+                inputs.self.homeManagerModules.mcpx
+                {
+                  services.mcpx = {
+                    enable = true;
+                    settings.daemon.autostart = false;
+                    servers.example = {
+                      command = "/bin/true";
+                      args = [ "mcp" ];
+                    };
+                    environment.MCPX_TEST_MARKER = "present";
+                    environmentFile = "/home/mcpx-test/mcpx.env";
+                  };
+                  home = {
+                    username = "mcpx-test";
+                    homeDirectory = "/home/mcpx-test";
+                    stateVersion = "25.11";
+                  };
+                }
+              ];
+            };
+            service = eval.config.systemd.user.services.mcpx.Service;
+          in
+          pkgs.runCommandLocal "mcpx-home-manager-module-check"
+            {
+              execStart = service.ExecStart;
+              restart = service.Restart;
+              timeoutStopSec = toString service.TimeoutStopSec;
+              wantedBy = pkgs.lib.concatStringsSep " " eval.config.systemd.user.services.mcpx.Install.WantedBy;
+              marker =
+                if builtins.elem "MCPX_TEST_MARKER=present" service.Environment then "present" else "missing";
+              environmentFile = service.EnvironmentFile;
+              mcpxConfig = eval.config.home.sessionVariables.MCPX_CONFIG;
+              xdgSource = eval.config.xdg.configFile."mcpx/config.json".source;
+              configFile = eval.config.services.mcpx.configFile;
+              nativeBuildInputs = [ pkgs.jq ];
+            }
+            ''
+              case "$execStart" in
+              *"/bin/mcpx daemon --config "*) ;;
+              *)
+                echo "ExecStart lost the daemon --config form: $execStart" >&2
+                exit 1
+                ;;
+              esac
+              [ "$restart" = "always" ] || { echo "Restart=$restart, want always" >&2; exit 1; }
+              [ "$timeoutStopSec" = "20" ] || { echo "TimeoutStopSec=$timeoutStopSec, want 20" >&2; exit 1; }
+              [ "$wantedBy" = "default.target" ] || { echo "WantedBy=$wantedBy, want default.target" >&2; exit 1; }
+              [ "$marker" = "present" ] || { echo "environment did not reach the unit" >&2; exit 1; }
+              [ "$environmentFile" = "/home/mcpx-test/mcpx.env" ] || { echo "EnvironmentFile=$environmentFile, want the runtime file path" >&2; exit 1; }
+              [ "$mcpxConfig" = "$configFile" ] || { echo "MCPX_CONFIG=$mcpxConfig does not name the rendered config $configFile" >&2; exit 1; }
+              [ "$xdgSource" = "$configFile" ] || { echo "xdg config source=$xdgSource is not the rendered config $configFile" >&2; exit 1; }
+              jq -e '.daemon.autostart == false and .mcpServers.example.command == "/bin/true" and .mcpServers.example.args == ["mcp"]' "$configFile" > /dev/null \
+                || { echo "rendered config.json mismatch:" >&2; cat "$configFile" >&2; exit 1; }
+              touch $out
+            '';
+        # code#5362: the fleet-brokers home-manager module must render
+        # all three fleet service units pointing at the flake's own packages.
+        fleet-brokers-home-manager-module =
+          # The module's service config is guarded by hostPlatform.isLinux,
+          # so the check must not evaluate it on Darwin (codex P1 on #1459).
+          if !pkgs.stdenv.hostPlatform.isLinux then
+            pkgs.runCommandLocal "fleet-brokers-home-manager-module-check" { } "touch $out"
+          else
+            let
+              selfPkgs = mkPackages pkgs;
+              eval = inputs.home-manager.lib.homeManagerConfiguration {
+                inherit pkgs;
+                modules = [
+                  inputs.self.homeManagerModules.fleet-brokers
+                  {
+                    services.fleet-brokers = {
+                      enable = true;
+                      package = selfPkgs.fleet-brokers;
+                      laptopAgentPackage = selfPkgs.laptop-agent;
+                      # nixpkgs' bws is unfree; the check only needs a
+                      # package on the unit PATH, so a stub stands in.
+                      bwsPackage = pkgs.coreutils;
+                    };
+                    home = {
+                      username = "fleet-test";
+                      homeDirectory = "/home/fleet-test";
+                      stateVersion = "25.11";
+                    };
+                  }
+                ];
+              };
+              qb = eval.config.systemd.user.services.queue-broker.Service;
+              sb = eval.config.systemd.user.services.secrets-broker.Service;
+              la = eval.config.systemd.user.services.laptop-agent.Service;
+              repoQueueAlias = eval.config.home.file.".local/bin/repo-queue".source;
+            in
+            pkgs.runCommandLocal "fleet-brokers-home-manager-module-check"
+              {
+                qbExec = qb.ExecStart;
+                sbExec = sb.ExecStart;
+                sbPath = pkgs.lib.concatStringsSep ":" sb.Environment;
+                bwsBin = "${pkgs.coreutils}/bin";
+                laExec = la.ExecStart;
+                inherit repoQueueAlias;
+                repoQueueBinary = "${selfPkgs.fleet-brokers}/bin/repo-queue";
+                wantedBy = pkgs.lib.concatStringsSep " " eval.config.systemd.user.services.queue-broker.Install.WantedBy;
+              }
+              ''
+                case "$qbExec" in
+                *"/bin/queue-broker") ;;
+                *)
+                  echo "queue-broker ExecStart wrong: $qbExec" >&2
+                  exit 1
+                  ;;
+                esac
+                case "$sbExec" in
+                *"/bin/secrets-broker") ;;
+                *)
+                  echo "secrets-broker ExecStart wrong: $sbExec" >&2
+                  exit 1
+                  ;;
+                esac
+                case "$sbPath" in
+                *"$bwsBin"*) ;;
+                *)
+                  echo "secrets-broker PATH lacks bwsPackage: $sbPath" >&2
+                  exit 1
+                  ;;
+                esac
+                case "$laExec" in
+                *"/bin/laptop-agent") ;;
+                *)
+                  echo "laptop-agent ExecStart wrong: $laExec" >&2
+                  exit 1
+                  ;;
+                esac
+                [ "$repoQueueAlias" = "$repoQueueBinary" ] || {
+                  echo "repo-queue alias target=$repoQueueAlias, want packaged binary $repoQueueBinary" >&2
+                  exit 1
+                }
+                [ -x "$repoQueueAlias" ] || {
+                  echo "repo-queue alias target is not an executable provisioned binary: $repoQueueAlias" >&2
+                  exit 1
+                }
+                [ "$wantedBy" = "default.target" ] || { echo "WantedBy=$wantedBy, want default.target" >&2; exit 1; }
+                touch $out
+              '';
+        # code#5343: the laptop-agent must reject an empty token at startup
+        # and authenticate requests by header (PR #1459 codex P1).
+        laptop-agent-tests =
+          pkgs.runCommandLocal "laptop-agent-tests"
+            {
+              nativeBuildInputs = [ pkgs.python3 ];
+            }
+            ''
+              cp -r ${./pkgs/laptop-agent/src} src
+              cp -r ${./pkgs/laptop-agent/tests} tests
+              python3 -m unittest discover -s tests -v
+              touch $out
+            '';
+      }
     );
     apps = eachSystem (
       pkgs:
@@ -648,6 +1710,10 @@ rec {
         flake-tidy = {
           type = "app";
           program = "${selfPkgs.flake-tidy}/bin/flake-tidy";
+        };
+        adopt = {
+          type = "app";
+          program = "${selfPkgs.adopt}/bin/adopt";
         };
         mcpx = {
           type = "app";
@@ -711,6 +1777,23 @@ rec {
             echo "  git        $(git --version 2>/dev/null || echo 'not found')"
             echo "  gh         $(gh --version 2>/dev/null | head -1 || echo 'not found')"
           '';
+        };
+        # Lean shell for CI warming (fleet-build image + binary caches).
+        # The default shell pulls this repo's own from-source builds
+        # (selfPkgs.opencode), which a CI export job has to
+        # compile from scratch — that realisation ran 2h+ and died
+        # (dezren39/darwin-nix#1381). Everything below substitutes from
+        # cache.nixos.org instead: same tools, no local builds.
+        fleet = pkgs.mkShell {
+          packages = [
+            pkgs.opencode
+            pkgs.just
+            pkgs.nixfmt
+            pkgs.git
+            pkgs.gh
+            pkgs.jq
+            pkgs.ripgrep
+          ];
         };
       }
     );

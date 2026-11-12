@@ -30,7 +30,10 @@ openchamber.nix        OpenChamber server launchd agent + desktop client (§5)
 docs/                  services.md (how OpenChamber, OpenCode and mcpx run, are replaced
                        on a switch, checked and debugged), mcp.md (every MCP server, its
                        auth and credentials), dated reviews, sidepulse docs
+                       (canonical copies of services.md, mcp.md and the dated reviews:
+                       developing-today/code doc/fleet/)
 instructions/          OpenCode instruction files (worktrees, recordings, work-strategies; archive/)
+                       (canonical copies: developing-today/code doc/platform/)
 commands/              OpenCode slash commands (/gha-fix, /gha-why)
 .agents/skills/        Repo-local agent skills (see §7)
 opencode-global.jsonc  OpenCode v2 global config, meant to be linked as ~/.config/opencode/opencode.jsonc (currently not; see §5)
@@ -42,7 +45,7 @@ rebuild.sh r / simple-rebuild.sh s / clean(.sh) / path.sh   Rebuild + cleanup sc
 symlinker.sh           Large bash symlink manager (source for pkgs/symlinker)
 .aerospace.toml        AeroSpace tiling WM config
 mcpx.config.nix        Every MCP server, and how mcpx pools it
-config.toml            VSCode extension source-of-truth list (used by code-install-extensions.sh)
+config.toml            One of three copies of the VSCode extension list (with code-install-extensions.sh's hardcoded lines and vsc-extensions.txt); the installer never reads it — the copies are kept identical by the drift check in code-install-extensions-tests (#1547)
 .github/workflows/     opencode.yml (/oc comment bot), mcpx-nixbuild.yml (mcpx package build)
 ```
 
@@ -70,24 +73,25 @@ flake.nix → ./configuration.nix
 - **Stack inputs:** determinate (Determinate Nix), nix-darwin, home-manager,
   mac-app-util, nix-homebrew (+ brew-src, homebrew-core/cask/bundle/services and
   third-party taps), NUR, fenix (Rust), treefmt-nix, just, nixpkgs-terraform,
-  `opencode` (github:developing-today/opencode, our fork) and `openchamber`
-  (github:developing-today/openchamber, our fork; its `opencode` follows ours).
+  `opencode` (github:developing-today-forks/opencode, our fork) and `openchamber`
+  (github:developing-today-forks/openchamber, our fork; its `opencode` follows ours).
 - **Input hygiene:** a heavy `follows` graph plus `nixpkgs-hoisted*` inputs keeps
   transitive nixpkgs deduplicated. This is maintained by the custom **flake-tidy**
   tool (§4).
 - **`mkPackages`** (single source of package defs, reused by `packages`, `apps`,
-  `devShells`, `checks`): builds `bun-bin` and `mcpx`; `opencode-unwrapped`
-  (the fork's package with our mcpx) and `opencode` (a wrapper pinning
+  `devShells`, `checks`): builds `bun-bin`; `mcpx` (the fork's build,
+  re-exposed from the openchamber -> opencode chain - not built here,
+  #1388); `opencode-unwrapped` (the fork's package, unmodified - it
+  already bundles the fork's mcpx) and `opencode` (a wrapper pinning
   `OPENCODE_DB` and `TMPDIR`); `openchamber` (the fork's server built against
   that `opencode`); plus `brew-repair`, `codedb`, `flake-tidy`, `twg-cli`,
   `npm-mcp-servers`, `opencode-share`, `symlinker`.
 - **checks:** `formatting` (treefmt), `tidy` (flake-tidy `--check`),
   `flake-tidy-tests` (the flake-tidy pytest suite), `plugins-tests`
-  (plugins/*.test.mjs), `opencode-db-pids-tests` and `skill-tests`
-  (archive/skills/*/SKILL.test.ts) on every supported system; the Sidepulse
+  (plugins/*.test.mjs), `opencode-db-pids-tests` on every supported system; the Sidepulse
   package build/test and setup smoke test run on Darwin only.
 - **apps:** `flake-tidy`, `mcpx`, `opencode`, `openchamber`, `opencode-share`,
-  `symlinker`; Sidepulse apps are Darwin-only.
+  `symlinker`, `adopt`; Sidepulse apps are Darwin-only.
 - **devShell:** opencode, flake-tidy, symlinker, just, nixfmt, git, gh (with a
   version-printing shellHook); Sidepulse tools are added on Darwin only.
 
@@ -144,9 +148,10 @@ into projects). Also atuin (Ctrl-R history), starship, direnv+nix-direnv, git
 | Package | Lang | Wrapper | What it does |
 | --- | --- | --- | --- |
 | **flake-tidy** ⭐ | Python 3 (~3300 lines) | `writeShellApplication` | Deduplicates/merges/flattens flake inputs by adding `follows`; edits `flake.nix`, reruns `nix flake lock` with backout, reformats. `dedup`/`merge`/`flatten`/`all` subcommands, `--check`/`--dry-run`. **~144 pytest tests** + fixtures. |
-| bun-bin | Nix | `mkDerivation` | Prebuilt Bun (currently 1.3.14); Darwin re-signs via `install_name_tool`+`rcodesign`. Hashes in `hashes.json`. |
-| mcpx | Go | `buildGo127Module` | MCP gateway / Code Mode runner, built from the pinned `mcpx-src` input (developing-today/code's `pkgs/mcpx`, the only copy); its daemon runs as a launchd agent. Darwin skips the Linux-only takeover tests (flake.nix). |
+| bun-bin | Nix | `mkDerivation` | Prebuilt Bun (currently 1.4.4); Darwin re-signs via `install_name_tool`+`rcodesign`. Hashes in `hashes.json`. |
+| mcpx | Go | `buildGo127Module` (upstream) | MCP gateway / Code Mode runner. Source is developing-today/code's `pkgs/mcpx` (the only copy); the package is not built here - it arrives through the openchamber -> opencode chain (#1388) and flake.nix only re-exposes it. Its daemon runs as a launchd agent. Darwin skips the Linux-only takeover tests (the -skip list is constructed in code's package, not in flake.nix). |
 | brew-repair | Bash (+py) | `writeShellScriptBin` | Detects casks brew thinks are installed but whose `.app` is missing; selectively reinstalls. `--dry-run/--quiet/--skip`. |
+| adopt | Bash | `writeShellScriptBin` | `nix run .#adopt [TEMPLATE]`: adds the current Mac (its LocalHostName) to flake.nix's `hosts` map — default entry, a copy of an existing host, or a template file — so its darwinConfiguration exists; then `./s`. Idempotent. |
 | opencode-share | Bash | `writeShellApplication` | Shares one `.opencode` across projects via nested **bindfs** mounts while keeping per-project `plans/`. mount/unmount/status/dry-run. |
 | symlinker | Bash (~1250 lines, source at repo root `symlinker.sh`) | `writeShellApplication` | Bulk symlink manager with backup, undo (v2 RELINK), filters, dry-run. |
 | buffer-backup | TypeScript (own flake) | own flake | VS Code extension: auto-backs-up unsaved buffers with SHA-256 dedup + retention. |
@@ -154,7 +159,7 @@ into projects). Also atuin (Ctrl-R history), starship, direnv+nix-direnv, git
 | codedb | Zig binary | `fetchurl` | Pinned signed/notarized AST-aware code search and MCP server. |
 | fff-mcp | Rust binary | `fetchurl` | Pinned frecency-ranked file/content search MCP server. |
 | npm-mcp-servers | Node/Nix | `importNpmLock.buildNodeModules` | `mcp-remote` and `chrome-devtools-mcp`, which are only published to npm, pinned by a committed `package-lock.json`. |
-| sidepulse | Python/PyObjC | `buildPythonApplication` | Darwin-only SidePulse CLI/status-bar app. Individually documented, an ordered stack of twelve patch files applies upstream PRs #14, #17, #26, #28, #29, #30, #31 and #32. PRs #33, #34 and #35 are local-only: #33 holds the LED completion signal until the user is visibly back at a terminal (`src/sidepulse/presence.py`) instead of timing out after 4s; #34 stops failures and permission prompts expiring on a clock (they persist while the owning process is alive, and are released when the session is deleted or its terminal is closed), keeps a failure from being overwritten by the idle that follows it, and widens OpenCode error capture to `message.updated` and the `session.next.*` runner; #35 adds multi-signal composition (`src/sidepulse/compose.py`): ten display modes over a ranked signal registry with demand/ambient tiers, eight static (`priority`, `round-robin`, `split`, `paired`, `orbit`, `depth`, `beacon`, `tide`) and two host-driven (`drift`, `live`), plus per-signal arrival announcements, a `tempo` pace dial and per-LED colour correction for the Dot's opposed LEDs. Selected by `multi_signal.mode`, defaulting to `beacon`. dezren39/nix#378 (`sidepulse-dezren39-nix-378-opencode-v2-plugin.patch`, last in the stack) makes `opencode_plugin_source()` generate the OpenCode v2 plugin (`export default { id, setup(ctx) }`, v2 run-lifecycle events mapped to the v1 names SidePulse already handles), so `sidepulse setup opencode` writes a plugin the v2 loader accepts. See `docs/sidepulse-modes.md` for every display mode, `docs/sidepulse-customisations.md` for what each local patch adds and the live LED configuration, and `docs/sidepulse-leds.md` for the verified hardware limits they work within. |
+| sidepulse | Python/PyObjC | `buildPythonApplication` | Darwin-only SidePulse CLI/status-bar app. Individually documented, an ordered stack of twelve patch files applies upstream PRs #14, #17, #26, #28, #29, #30, #31 and #32. PRs #33, #34 and #35 are local-only: #33 holds the LED completion signal until the user is visibly back at a terminal (`src/sidepulse/presence.py`) instead of timing out after 4s; #34 stops failures and permission prompts expiring on a clock (they persist while the owning process is alive, and are released when the session is deleted or its terminal is closed), keeps a failure from being overwritten by the idle that follows it, and widens OpenCode error capture to `message.updated` and the `session.next.*` runner; #35 adds multi-signal composition (`src/sidepulse/compose.py`): ten display modes over a ranked signal registry with demand/ambient tiers, eight static (`priority`, `round-robin`, `split`, `paired`, `orbit`, `depth`, `beacon`, `tide`) and two host-driven (`drift`, `live`), plus per-signal arrival announcements, a `tempo` pace dial and per-LED colour correction for the Dot's opposed LEDs. Selected by `multi_signal.mode`, defaulting to `beacon`. dezren39/darwin-nix#378 (`sidepulse-dezren39-nix-378-opencode-v2-plugin.patch`, last in the stack) makes `opencode_plugin_source()` generate the OpenCode v2 plugin (`export default { id, setup(ctx) }`, v2 run-lifecycle events mapped to the v1 names SidePulse already handles), so `sidepulse setup opencode` writes a plugin the v2 loader accepts. See `docs/sidepulse-modes.md` for every display mode, `docs/sidepulse-customisations.md` for what each local patch adds and the live LED configuration, and `docs/sidepulse-leds.md` for the verified hardware limits they work within. |
 | sidepulse-setup | Bash/Nix | `writeShellApplication` | Darwin-only wrapper providing `sidepulse --setup opencode` and `sidepulse setup opencode`; setup defaults to all upstream-supported providers. Home Manager invokes the packaged `sidepulse setup <provider>` for the configured provider list on every switch. |
 
 ---
@@ -194,12 +199,12 @@ into projects). Also atuin (Ctrl-R history), starship, direnv+nix-direnv, git
 ### OpenCode and OpenChamber: our forks, no local patches
 
 OpenCode and OpenChamber are built from forks we own
-(developing-today/opencode and developing-today/openchamber, both `main`). Fixes
+(developing-today-forks/opencode and developing-today-forks/openchamber, both `main`). Fixes
 go into the fork, then the pins move up: opencode fork -> openchamber's lock ->
 this repo's lock. `.agents/skills/update-opencode` is the procedure. The old
 local patch stack was retired (TUI-only changes do not reach OpenChamber, the
-rest is covered by v2); remaining server-side gaps are developing-today/opencode#13
-and developing-today/openchamber#28.
+rest is covered by v2); remaining server-side gaps are developing-today-forks/opencode#13
+and developing-today-forks/openchamber#28.
 
 - **One database.** `~/.local/share/opencode/opencode.db` holds every session.
   The `opencode` wrapper forces `OPENCODE_DB` to it, and `OPENCODE_DB` is also

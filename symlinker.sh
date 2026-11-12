@@ -25,6 +25,13 @@ INPUT_DIR=""
 OUTPUT_DIR=""
 BACKUP_SUFFIX=".bak.$RUN_TIMESTAMP"
 
+# Only-once tracking for the value options above (#1126): a repeat used
+# to silently last-win, discarding the first value.
+INPUT_DIR_SET=0
+OUTPUT_DIR_SET=0
+BACKUP_SUFFIX_SET=0
+UNDO_SET=0
+
 # Default excludes — override with SYMLINKER_DEFAULT_EXCLUDES (colon-separated)
 IFS=':' read -r -a DEFAULT_EXCLUDES <<< "${SYMLINKER_DEFAULT_EXCLUDES:-.DS_Store}"
 EXTRA_EXCLUDES=()
@@ -99,16 +106,21 @@ NAME FILTERS
     symlinker.sh ... --match git --suffix config  # contains "git" AND ends in "config"
 
 UNDO
-  --undo <timestamp>      Undo a previous run (unlink symlinks, restore backups)
+  --undo <timestamp>      Undo a previous run (unlink symlinks, restore backups);
+                          the timestamp is the digits-only run id shown at link time
   --skip-restore          With --undo, don't restore backed-up conflicts
+
+  Run ids are digits-only. If several runs start in the same second, each
+  later run's id is bumped to the next free value, so their log, undo and
+  backup files never collide or overwrite each other.
+  Undo exits non-zero when any item could not be restored (irrecoverable)
+  or any operation errored; a fully successful undo exits 0.
 
   Undo supports the same flags as normal operation:
     --dry-run             Preview what undo would do
     --force               Force restore even if paths are occupied (removes them)
     --verbose             Show full paths
-    --simple              Omit details
     --strict              Stop on first error
-    --no-input, --yes     Skip confirmation
 
   Undo generates its own undo file, so you can undo an undo:
     symlinker.sh --undo <original-timestamp>         # undo a run
@@ -117,16 +129,19 @@ UNDO
   If the original run used --skip-backup, deleted items cannot be restored.
   Undo will report these as irrecoverable and explain why.
 
-UNDO FILE FORMAT (v2)
+UNDO FILE FORMAT (v3)
   Undo files are written to:
     ${XDG_CACHE_HOME:-~/.config}/symlinker/<timestamp>.undo
 
   Records:
     SYMLINK:<link>\t<target>     Symlink created (undo: remove it)
-    BACKUP:<original>:<backup>   Backup created (undo: restore it)
+    BACKUP:<original>\t<backup>  Backup created (undo: restore it)
     DELETE:<backup>\t<original>  Backup deleted (undo: irrecoverable)
     RELINK:<link>\t<target>      Symlink to recreate (from undo-of-undo)
 
+  v2 files are still supported: their BACKUP records are colon-separated
+  (BACKUP:<original>:<backup>) and split at the first colon, which is
+  unambiguous only for paths containing no colon — the flaw v3 fixes.
   v1 files (LINK:<path>) are still supported for backward compatibility.
 
 EXCLUDES
@@ -177,68 +192,141 @@ EOF
 
 # ─── Parse arguments ─────────────────────────────────────────────────────────
 
+# Forward-only options (#1730): these configure the forward run and are
+# never consumed by the undo branch, so accepting them alongside --undo
+# silently ignored them — a caller could believe an input path or filter
+# constrained an undo that can unlink unrelated symlinks. Record every
+# forward-only option seen; reject it (exit 2, naming the flag and the
+# --undo mode) immediately when --undo was already given, and again after
+# the loop for the flag-before---undo order. --dry-run, --force,
+# --verbose, --strict and --skip-restore stay valid in undo mode, and
+# --help stays mode-independent.
+# Undo-only options (#1750): --skip-restore is consumed only by the undo
+# branch (the BACKUP-record restore handling), so accepting it in a
+# forward run silently ignored it -- the mirror of the above. Record it
+# when seen before --undo; reject it (exit 2, naming the flag and that
+# it is undo-only) after the loop if no --undo was given. The
+# flag-before---undo order stays valid: the post-loop judge only fires
+# when UNDO_SET is still 0.
+UNDO_ONLY_SEEN=()
+note_undo_only() {
+  if (( ! UNDO_SET )); then
+    UNDO_ONLY_SEEN+=("$1")
+  fi
+}
+FORWARD_ONLY_SEEN=()
+reject_forward_only_in_undo() {
+  if (( UNDO_SET )); then
+    echo "Error: $1 cannot be used in --undo mode (forward-only option)" >&2; exit 2
+  fi
+  FORWARD_ONLY_SEEN+=("$1")
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --input-dir)
-      [[ -n "${2:-}" ]] || { echo "Error: --input-dir requires a value" >&2; exit 1; }
-      INPUT_DIR="$2"; shift 2 ;;
+      reject_forward_only_in_undo "$1"
+      [[ -n "${2:-}" && "$2" != -* ]] || { echo "Error: --input-dir requires a value" >&2; exit 1; }
+      [[ "$INPUT_DIR_SET" -eq 0 ]] || { echo "Error: --input-dir may be given only once" >&2; exit 1; }
+      INPUT_DIR="$2"; INPUT_DIR_SET=1; shift 2 ;;
     --output-dir)
-      [[ -n "${2:-}" ]] || { echo "Error: --output-dir requires a value" >&2; exit 1; }
-      OUTPUT_DIR="$2"; shift 2 ;;
+      reject_forward_only_in_undo "$1"
+      [[ -n "${2:-}" && "$2" != -* ]] || { echo "Error: --output-dir requires a value" >&2; exit 1; }
+      [[ "$OUTPUT_DIR_SET" -eq 0 ]] || { echo "Error: --output-dir may be given only once" >&2; exit 1; }
+      OUTPUT_DIR="$2"; OUTPUT_DIR_SET=1; shift 2 ;;
     --backup-suffix)
-      [[ -n "${2:-}" ]] || { echo "Error: --backup-suffix requires a value" >&2; exit 1; }
-      BACKUP_SUFFIX="$2"; shift 2 ;;
+      reject_forward_only_in_undo "$1"
+      [[ -n "${2:-}" && "$2" != -* ]] || { echo "Error: --backup-suffix requires a value" >&2; exit 1; }
+      [[ "$BACKUP_SUFFIX_SET" -eq 0 ]] || { echo "Error: --backup-suffix may be given only once" >&2; exit 1; }
+      [[ "$2" != */* ]] || { echo "Error: --backup-suffix must not contain '/' (got: $2)" >&2; exit 1; }
+      BACKUP_SUFFIX="$2"; BACKUP_SUFFIX_SET=1; shift 2 ;;
     --undo)
-      [[ -n "${2:-}" ]] || { echo "Error: --undo requires a timestamp" >&2; exit 1; }
-      UNDO_TIMESTAMP="$2"; shift 2 ;;
+      [[ -n "${2:-}" && "$2" != -* ]] || { echo "Error: --undo requires a timestamp" >&2; exit 1; }
+      [[ "$UNDO_SET" -eq 0 ]] || { echo "Error: --undo may be given only once" >&2; exit 1; }
+      UNDO_TIMESTAMP="$2"; UNDO_SET=1; shift 2 ;;
     --dry-run)           DRY_RUN=true;       shift ;;
     --force)             FORCE=true;         shift ;;
     --verbose)           VERBOSE=true;       shift ;;
-    --simple)            SIMPLE=true;        shift ;;
-    --no-input|--yes|-y) NO_INPUT=true;      shift ;;
-    --skip-backup)       SKIP_BACKUP=true;   shift ;;
-    --skip-conflict)     SKIP_CONFLICT=true; shift ;;
-    --skip-restore)      SKIP_RESTORE=true;  shift ;;
+    --simple)            reject_forward_only_in_undo "$1"; SIMPLE=true; shift ;;
+    --no-input|--yes|-y) reject_forward_only_in_undo "$1"; NO_INPUT=true;      shift ;;
+    --skip-backup)       reject_forward_only_in_undo "$1"; SKIP_BACKUP=true;   shift ;;
+    --skip-conflict)     reject_forward_only_in_undo "$1"; SKIP_CONFLICT=true; shift ;;
+    --skip-restore)      note_undo_only "$1"; SKIP_RESTORE=true;  shift ;;
     --strict)            STRICT=true;        shift ;;
-    --only-files)        ONLY_FILES=true;    shift ;;
-    --only-dirs)         ONLY_DIRS=true;     shift ;;
+    --only-files)        reject_forward_only_in_undo "$1"; ONLY_FILES=true;    shift ;;
+    --only-dirs)         reject_forward_only_in_undo "$1"; ONLY_DIRS=true;     shift ;;
     --exclude)
-      [[ -n "${2:-}" ]] || { echo "Error: --exclude requires a value" >&2; exit 1; }
+      reject_forward_only_in_undo "$1"
+      [[ -n "${2:-}" && "$2" != -* ]] || { echo "Error: --exclude requires a value" >&2; exit 1; }
       EXTRA_EXCLUDES+=("$2"); shift 2 ;;
     --exact)
+      reject_forward_only_in_undo "$1"
+      # NOTE (#912): the empty-occurrence guard must compare against the
+      # count before this occurrence consumed values — testing the
+      # cumulative array lets a repeated empty flag pass silently.
       shift
+      before=${#FILTER_EXACT[@]}
       while [[ $# -gt 0 && "$1" != --* ]]; do
+        # NOTE (#1220): an empty value counts toward the #912 guard but
+        # silently changes the filter; reject it at parse time.
+        [[ -n "$1" ]] || { echo "Error: --exact requires a non-empty value" >&2; exit 1; }
         FILTER_EXACT+=("$1"); shift
       done
-      [[ ${#FILTER_EXACT[@]} -gt 0 ]] || { echo "Error: --exact requires at least one value" >&2; exit 1; }
+      [[ ${#FILTER_EXACT[@]} -gt $before ]] || { echo "Error: --exact requires at least one value" >&2; exit 1; }
       ;;
     --prefix|--starts-with)
+      reject_forward_only_in_undo "$1"
       shift
+      before=${#FILTER_PREFIX[@]}
       while [[ $# -gt 0 && "$1" != --* ]]; do
+        # NOTE (#1220): an empty value counts toward the #912 guard but
+        # silently changes the filter; reject it at parse time.
+        [[ -n "$1" ]] || { echo "Error: --prefix/--starts-with requires a non-empty value" >&2; exit 1; }
         FILTER_PREFIX+=("$1"); shift
       done
-      [[ ${#FILTER_PREFIX[@]} -gt 0 ]] || { echo "Error: --prefix/--starts-with requires at least one value" >&2; exit 1; }
+      [[ ${#FILTER_PREFIX[@]} -gt $before ]] || { echo "Error: --prefix/--starts-with requires at least one value" >&2; exit 1; }
       ;;
     --suffix|--ends-with)
+      reject_forward_only_in_undo "$1"
       shift
+      before=${#FILTER_SUFFIX[@]}
       while [[ $# -gt 0 && "$1" != --* ]]; do
+        # NOTE (#1220): an empty value counts toward the #912 guard but
+        # silently changes the filter; reject it at parse time.
+        [[ -n "$1" ]] || { echo "Error: --suffix/--ends-with requires a non-empty value" >&2; exit 1; }
         FILTER_SUFFIX+=("$1"); shift
       done
-      [[ ${#FILTER_SUFFIX[@]} -gt 0 ]] || { echo "Error: --suffix/--ends-with requires at least one value" >&2; exit 1; }
+      [[ ${#FILTER_SUFFIX[@]} -gt $before ]] || { echo "Error: --suffix/--ends-with requires at least one value" >&2; exit 1; }
       ;;
     --regex)
+      reject_forward_only_in_undo "$1"
       shift
+      before=${#FILTER_REGEX[@]}
       while [[ $# -gt 0 && "$1" != --* ]]; do
+        # NOTE (#1220): an empty value counts toward the #912 guard but
+        # silently changes the filter; reject it at parse time.
+        [[ -n "$1" ]] || { echo "Error: --regex requires a non-empty value" >&2; exit 1; }
+        # NOTE (#1254): an invalid ERE makes bash =~ return status 2 in
+        # name_matches_filters, which collapses into "no match" (exit 0).
+        # Validate at parse time: status 2 against an empty string means
+        # the pattern itself does not compile (0/1 are match/no-match).
+        [[ "" =~ $1 ]] 2>/dev/null; regex_status=$?
+        (( regex_status != 2 )) || { echo "Error: --regex pattern is not a valid regular expression: $1" >&2; exit 1; }
         FILTER_REGEX+=("$1"); shift
       done
-      [[ ${#FILTER_REGEX[@]} -gt 0 ]] || { echo "Error: --regex requires at least one value" >&2; exit 1; }
+      [[ ${#FILTER_REGEX[@]} -gt $before ]] || { echo "Error: --regex requires at least one value" >&2; exit 1; }
       ;;
     --match)
+      reject_forward_only_in_undo "$1"
       shift
+      before=${#FILTER_MATCH[@]}
       while [[ $# -gt 0 && "$1" != --* ]]; do
+        # NOTE (#1220): an empty value counts toward the #912 guard but
+        # silently changes the filter; reject it at parse time.
+        [[ -n "$1" ]] || { echo "Error: --match requires a non-empty value" >&2; exit 1; }
         FILTER_MATCH+=("$1"); shift
       done
-      [[ ${#FILTER_MATCH[@]} -gt 0 ]] || { echo "Error: --match requires at least one value" >&2; exit 1; }
+      [[ ${#FILTER_MATCH[@]} -gt $before ]] || { echo "Error: --match requires at least one value" >&2; exit 1; }
       ;;
     -h|--help)           usage; exit 0 ;;
     *)
@@ -249,10 +337,42 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Forward-only options given before --undo (#1730): no undo work has
+# happened yet (this is still parse time), so reject here with exit 2.
+if (( UNDO_SET )) && (( ${#FORWARD_ONLY_SEEN[@]} > 0 )); then
+  echo "Error: ${FORWARD_ONLY_SEEN[*]} cannot be used in --undo mode (forward-only option)" >&2; exit 2
+fi
+
+# Undo-only options given without --undo (#1750): no linking has
+# happened yet (this is still parse time), so reject here with exit 2.
+if (( ! UNDO_SET )) && (( ${#UNDO_ONLY_SEEN[@]} > 0 )); then
+  echo "Error: ${UNDO_ONLY_SEEN[*]} cannot be used in forward mode (undo-only option; use with --undo)" >&2; exit 2
+fi
+
 # Validate conflicting type filters
 if $ONLY_FILES && $ONLY_DIRS; then
   echo "Error: --only-files and --only-dirs are mutually exclusive" >&2; exit 1
 fi
+
+# ─── Run-id uniqueness (#886) ──────────────────────────────────────────────
+# RUN_TIMESTAMP has one-second resolution (date +%s) and names every per-run
+# artifact: the .log, the .undo, the undo-of-undo file, and the backup
+# suffix. Two invocations started in the same second would otherwise share
+# an id — worst case, an undo's undo-of-undo file IS the undo file it is
+# about to read, and writing its header truncates the source records before
+# the loop reads them ("0 unlinked", exit 0, undo file destroyed). Bump the
+# id (staying digits-only, per the #884 --undo validation) until none of
+# this run's artifacts exist yet, and keep a default backup suffix in step.
+_run_id_base="$RUN_TIMESTAMP"
+while [[ -e "$LOG_DIR/$RUN_TIMESTAMP.undo" \
+      || -e "$LOG_DIR/$RUN_TIMESTAMP.log" \
+      || -e "$LOG_DIR/$RUN_TIMESTAMP.undo-log" ]]; do
+  RUN_TIMESTAMP="$((RUN_TIMESTAMP + 1))"
+done
+if [[ "$RUN_TIMESTAMP" != "$_run_id_base" && "$BACKUP_SUFFIX" == ".bak.$_run_id_base" ]]; then
+  BACKUP_SUFFIX=".bak.$RUN_TIMESTAMP"
+fi
+unset _run_id_base
 
 # ─── Display helpers (basic — enhanced after validate for forward path) ──────
 
@@ -293,6 +413,15 @@ ulog() {
 # ─── Undo operation ─────────────────────────────────────────────────────────
 
 if [[ -n "$UNDO_TIMESTAMP" ]]; then
+  # The timestamp becomes a path component below, so judge it whole first
+  # (#884): timestamps this script generates are pure digits (date +%s), and
+  # anything else — above all a value containing '/' or '..' — would load an
+  # undo file outside the log directory and act on its records.
+  case "$UNDO_TIMESTAMP" in
+    *[!0-9]*|'')
+      echo "Error: --undo timestamp must be digits only (got: $UNDO_TIMESTAMP)" >&2
+      exit 1 ;;
+  esac
   UNDO_FILE="$LOG_DIR/$UNDO_TIMESTAMP.undo"
   if [[ ! -f "$UNDO_FILE" ]]; then
     echo "Error: No undo file found for timestamp $UNDO_TIMESTAMP" >&2
@@ -319,6 +448,7 @@ if [[ -n "$UNDO_TIMESTAMP" ]]; then
   while IFS= read -r hdr; do
     case "$hdr" in
       "# UNDO_VERSION:2") UNDO_VERSION=2 ;;
+      "# UNDO_VERSION:3") UNDO_VERSION=3 ;;
       "# ORIGINAL_CMD:"*) UNDO_ORIG_CMD="${hdr#"# ORIGINAL_CMD:"}" ;;
       "# input-dir:"*)    UNDO_ORIG_INPUT_DIR="${hdr#"# input-dir: "}" ;;
       "# output-dir:"*)   UNDO_ORIG_OUTPUT_DIR="${hdr#"# output-dir: "}" ;;
@@ -339,7 +469,7 @@ if [[ -n "$UNDO_TIMESTAMP" ]]; then
   # Set up undo-of-undo file (so this undo can itself be reversed)
   UNDO_OF_UNDO_FILE="$LOG_DIR/${RUN_TIMESTAMP}.undo"
   {
-    echo "# UNDO_VERSION:2"
+    echo "# UNDO_VERSION:3"
     echo "# symlinker undo — $RUN_TIMESTAMP"
     echo "# ORIGINAL_CMD:$ORIGINAL_CMD"
     echo "# undoing: $UNDO_TIMESTAMP"
@@ -364,7 +494,30 @@ if [[ -n "$UNDO_TIMESTAMP" ]]; then
   ulog ""
 
   # ─── Undo: process records ────────────────────────────────────────────
-  while IFS= read -r line; do
+  # RELINK records are processed after all other records (#889): an
+  # undo-of-undo file lists each RELINK before the swapped BACKUP record
+  # that moves the restored original file out of the link path (to its
+  # .bak.<ts> name). Processed in written order the relink always fails
+  # "already exists, cannot relink", and the BACKUP then strands the
+  # original under .bak.<ts> with no symlink recreated. Deferring every
+  # RELINK until the BACKUP restores have freed their paths fixes the
+  # round-trip generally; records keep their relative order within each
+  # class, and single-undo files (no RELINK records) process as before.
+  undo_records=()
+  while IFS= read -r _rec || [[ -n "$_rec" ]]; do
+    case "$_rec" in
+      RELINK:*) ;;
+      *) undo_records+=("$_rec") ;;
+    esac
+  done < "$UNDO_FILE"
+  while IFS= read -r _rec || [[ -n "$_rec" ]]; do
+    case "$_rec" in
+      RELINK:*) undo_records+=("$_rec") ;;
+    esac
+  done < "$UNDO_FILE"
+  unset _rec
+
+  for line in "${undo_records[@]}"; do
     case "$line" in
       "#"*) continue ;;  # skip comments/headers
 
@@ -420,10 +573,18 @@ if [[ -n "$UNDO_TIMESTAMP" ]]; then
         ;;
 
       BACKUP:*)
-        # v1+v2: BACKUP:<original>:<backup>
+        # v3: BACKUP:<original><TAB><backup> — tab-separated like the
+        # SYMLINK:/DELETE:/RELINK: records, so paths containing ':' parse
+        # unambiguously (#883). v1+v2 records are colon-separated
+        # (BACKUP:<original>:<backup>) and split at the first colon, which
+        # stays exact for the colon-free paths those files could record.
         rest="${line#BACKUP:}"
-        original="${rest%%:*}"
-        backup="${rest#*:}"
+        if [[ "$rest" == *$'\t'* ]]; then
+          IFS=$'\t' read -r original backup <<< "$rest"
+        else
+          original="${rest%%:*}"
+          backup="${rest#*:}"
+        fi
 
         if $SKIP_RESTORE; then
           undo_skipped_restore+=("$original")
@@ -436,7 +597,7 @@ if [[ -n "$UNDO_TIMESTAMP" ]]; then
             undo_restored_orig+=("$original")
             undo_restored_bak+=("$backup")
             # Record for undo-of-undo: move it back (swap fields)
-            echo "BACKUP:${backup}:${original}" >> "$UNDO_OF_UNDO_FILE"
+            echo "BACKUP:${backup}	${original}" >> "$UNDO_OF_UNDO_FILE"
           else
             ulog "  Backup gone: $backup (cannot restore $original)"
             undo_irrecoverable_paths+=("$original")
@@ -455,7 +616,7 @@ if [[ -n "$UNDO_TIMESTAMP" ]]; then
                   ulog "  mv $backup $original (forced)"
                   undo_restored_orig+=("$original")
                   undo_restored_bak+=("$backup")
-                  echo "BACKUP:${backup}:${original}" >> "$UNDO_OF_UNDO_FILE"
+                  echo "BACKUP:${backup}	${original}" >> "$UNDO_OF_UNDO_FILE"
                 else
                   ulog "  Error: Failed to restore $backup -> $original: $err_msg" >&2
                   undo_error_paths+=("$original")
@@ -483,7 +644,7 @@ if [[ -n "$UNDO_TIMESTAMP" ]]; then
               ulog "  mv $backup $original"
               undo_restored_orig+=("$original")
               undo_restored_bak+=("$backup")
-              echo "BACKUP:${backup}:${original}" >> "$UNDO_OF_UNDO_FILE"
+              echo "BACKUP:${backup}	${original}" >> "$UNDO_OF_UNDO_FILE"
             else
               ulog "  Error: Failed to restore $backup -> $original: $err_msg" >&2
               undo_error_paths+=("$original")
@@ -567,7 +728,15 @@ if [[ -n "$UNDO_TIMESTAMP" ]]; then
         fi
         ;;
     esac
-  done < "$UNDO_FILE"
+  done
+  unset undo_records
+
+  # An undo that could not restore everything is not a success (#883):
+  # irrecoverable items (missing backups, DELETE records) fail the run
+  # instead of being reported under a 0 exit code.
+  if (( ${#undo_irrecoverable_paths[@]} > 0 )); then
+    UNDO_EXIT_CODE=1
+  fi
 
   # ─── Undo: print results ──────────────────────────────────────────────
 
@@ -796,18 +965,19 @@ name_matches_filters() {
 }
 
 # Returns 0 (true) if the entry passes the type filter.
+# The -f/-d tests follow symlinks, so a symlink is classified by its
+# target (a broken symlink matches neither). Do NOT resolve the target
+# with readlink -f instead: -f is GNU-only, stock macOS readlink rejects
+# it, and the old code silently filtered out every symlink-to-dir under
+# --only-dirs on macOS (#1092).
 type_matches_filter() {
   local entry="$1"
   if $ONLY_FILES; then
     [[ -f "$entry" && ! -d "$entry" ]] && return 0
-    # Also accept symlinks that point to files
-    [[ -L "$entry" ]] && [[ -f "$(readlink -f "$entry" 2>/dev/null)" ]] && return 0
     return 1
   fi
   if $ONLY_DIRS; then
-    [[ -d "$entry" && ! -L "$entry" ]] && return 0
-    # Also accept symlinks that point to dirs
-    [[ -L "$entry" ]] && [[ -d "$(readlink -f "$entry" 2>/dev/null)" ]] && return 0
+    [[ -d "$entry" ]] && return 0
     return 1
   fi
   return 0
@@ -826,6 +996,32 @@ filtered_count=0
 skip_links=();     skip_targets=()
 create_links=();   create_targets=()
 conflict_links=(); conflict_targets=()
+unresolvable_links=(); unresolvable_targets=()
+
+# Capture the input enumeration to a file and check find's status
+# before scanning (#1335, the #1325 find-to-file pattern): the scan
+# used to read find's output through a process substitution, whose
+# exit status cannot reach the script, so a failed enumeration (e.g.
+# an execute-only --input-dir, which passes the cd validation above
+# but cannot be listed) ran the loop zero times and fell into the
+# "Nothing found" all-clear at exit 0. find's stderr is captured too,
+# so the failure is named alongside symlinker's own error.
+scan_list="$(mktemp)"
+scan_err="$(mktemp)"
+if ! find "$INPUT_DIR" -mindepth 1 -maxdepth 1 -print0 >"$scan_list" 2>"$scan_err"; then
+  cat "$scan_err" >&2
+  echo "Error: failed to enumerate: $INPUT_DIR" >&2
+  rm -f "$scan_list" "$scan_err"
+  exit 1
+fi
+rm -f "$scan_err"
+scan_sorted="$(mktemp)"
+if ! sort -z "$scan_list" >"$scan_sorted"; then
+  echo "Error: failed to sort enumeration of: $INPUT_DIR" >&2
+  rm -f "$scan_list" "$scan_sorted"
+  exit 1
+fi
+rm -f "$scan_list"
 
 while IFS= read -r -d '' entry; do
   name="$(basename "$entry")"
@@ -848,7 +1044,20 @@ while IFS= read -r -d '' entry; do
     continue
   fi
 
-  target="$(realpath "$entry" 2>/dev/null)" || continue
+  if [[ -L "$entry" && ! -e "$entry" ]] || ! target="$(realpath "$entry" 2>/dev/null)"; then
+    # Unresolvable entry (a broken symlink, or one realpath cannot
+    # resolve): its target does not exist, so it must never be linked
+    # (#1092), but it must not vanish
+    # either (#1280) — record it by name, with its dangling target
+    # when it has one, so the report and summary account for it.
+    unresolvable_links+=("$entry")
+    if [[ -L "$entry" ]]; then
+      unresolvable_targets+=("$(readlink "$entry")")
+    else
+      unresolvable_targets+=("")
+    fi
+    continue
+  fi
   link="$OUTPUT_DIR/$name"
 
   if [[ -L "$link" ]]; then
@@ -863,9 +1072,29 @@ while IFS= read -r -d '' entry; do
   else
     create_links+=("$link");      create_targets+=("$target")
   fi
-done < <(find "$INPUT_DIR" -mindepth 1 -maxdepth 1 -print0 | sort -z)
+done < "$scan_sorted"
+rm -f "$scan_sorted"
 
 total=$(( ${#skip_links[@]} + ${#create_links[@]} + ${#conflict_links[@]} ))
+if (( total == 0 )) && (( ${#unresolvable_links[@]} > 0 )); then
+  # Broken-only input is not an empty input (#1280): report the
+  # unresolvable entries instead of claiming nothing was found.
+  log "=== Unresolvable (target does not exist, not linked) ==="
+  for i in "${!unresolvable_links[@]}"; do
+    log "  $(disp "${unresolvable_links[$i]}") ->"
+    if [[ -n "${unresolvable_targets[$i]}" ]]; then
+      log "    $(disp "${unresolvable_targets[$i]}") (missing)"
+    else
+      log "    (target cannot be resolved)"
+    fi
+    log ""
+  done
+  summary_line="Summary: 0 skipped, 0 to create, 0 conflicts, ${excluded_count} excluded"
+  (( filtered_count > 0 )) && summary_line+=", ${filtered_count} filtered"
+  summary_line+=", ${#unresolvable_links[@]} unresolvable"
+  log "$summary_line"
+  exit 0
+fi
 if (( total == 0 )); then
   if $HAS_NAME_FILTERS || $ONLY_FILES || $ONLY_DIRS; then
     log "Nothing matched in $(disp "$INPUT_DIR") (${filtered_count} filtered out, ${excluded_count} excluded)."
@@ -962,10 +1191,26 @@ if (( ${#conflict_links[@]} > 0 )); then
   fi
 fi
 
+# ─── Report: Unresolvable ───────────────────────────────────────────────────
+
+if (( ${#unresolvable_links[@]} > 0 )); then
+  log "=== Unresolvable (target does not exist, not linked) ==="
+  for i in "${!unresolvable_links[@]}"; do
+    log "  $(disp "${unresolvable_links[$i]}") ->"
+    if [[ -n "${unresolvable_targets[$i]}" ]]; then
+      log "    $(disp "${unresolvable_targets[$i]}") (missing)"
+    else
+      log "    (target cannot be resolved)"
+    fi
+    log ""
+  done
+fi
+
 # ─── Summary ─────────────────────────────────────────────────────────────────
 
 summary_line="Summary: ${#skip_links[@]} skipped, ${#create_links[@]} to create, ${#conflict_links[@]} conflicts, ${excluded_count} excluded"
 (( filtered_count > 0 )) && summary_line+=", ${filtered_count} filtered"
+(( ${#unresolvable_links[@]} > 0 )) && summary_line+=", ${#unresolvable_links[@]} unresolvable"
 log "$summary_line"
 
 # ─── Conflict error (default) ───────────────────────────────────────────────
@@ -1092,6 +1337,7 @@ print_results() {
   (( ${#done_error_paths[@]} > 0 )) && summary+=", ${#done_error_paths[@]} error(s)"
   summary+=", ${excluded_count} excluded"
   (( filtered_count > 0 )) && summary+=", ${filtered_count} filtered"
+  (( ${#unresolvable_links[@]} > 0 )) && summary+=", ${#unresolvable_links[@]} unresolvable"
   if $DRY_RUN; then
     log "${prefix}${summary}"
   else
@@ -1136,10 +1382,10 @@ if $DRY_RUN; then
   log ""
   log "Log: $LOG_FILE"
 else
-  # Write undo file header (v2 format)
+  # Write undo file header (v3 format)
   UNDO_FILE="$LOG_DIR/$RUN_TIMESTAMP.undo"
   {
-    echo "# UNDO_VERSION:2"
+    echo "# UNDO_VERSION:3"
     echo "# symlinker undo — $RUN_TIMESTAMP"
     echo "# ORIGINAL_CMD:$ORIGINAL_CMD"
     echo "# input-dir: $INPUT_DIR"
@@ -1195,13 +1441,13 @@ else
         done_linked_links+=("$lnk")
         done_linked_targets+=("$tgt")
         if ! $SKIP_BACKUP; then
-          echo "BACKUP:$lnk:$bak" >> "$UNDO_FILE"
+          echo "BACKUP:$lnk	$bak" >> "$UNDO_FILE"
         fi
         deletable_orig+=("$lnk")
         deletable_bak+=("$bak")
       else
         # Symlink failed after backup — record backup in undo for restore
-        echo "BACKUP:$lnk:$bak" >> "$UNDO_FILE"
+        echo "BACKUP:$lnk	$bak" >> "$UNDO_FILE"
         done_error_paths+=("$lnk")
         done_error_msgs+=("symlink failed after backup: $err_msg")
         EXIT_CODE=1
@@ -1219,7 +1465,7 @@ else
           done_deleted_paths+=("$bak")
         else
           # Deletion failed — record backup in undo so it can be restored
-          echo "BACKUP:$orig:$bak" >> "$UNDO_FILE"
+          echo "BACKUP:$orig	$bak" >> "$UNDO_FILE"
           done_error_paths+=("$bak")
           done_error_msgs+=("delete failed: $err_msg")
           EXIT_CODE=1

@@ -77,6 +77,104 @@ class TestCLI:
         args_default = self.parser.parse_args([])
         assert args_default.max_depth is None
 
+    def test_max_depth_negative_rejected(self, capsys):
+        """--max-depth -1 is a parse error (#1224).
+
+        The same value in a config file is rejected by validate_config
+        ("max-depth must be >= 0", exit 2); the CLI spelling used to
+        bypass the validator (it runs only in load_config, before
+        merge_cli_into_config overwrites the value) and silently
+        disabled all traversal while exiting 0.
+        """
+        with pytest.raises(SystemExit) as excinfo:
+            self.parser.parse_args(["--max-depth", "-1"])
+        assert excinfo.value.code == 2
+        assert "max-depth must be >= 0" in capsys.readouterr().err
+
+        # 0 (unlimited) and positive values behave exactly as before.
+        assert self.parser.parse_args(["--max-depth", "0"]).max_depth == 0
+        assert self.parser.parse_args(["--max-depth", "6"]).max_depth == 6
+
+    def test_flake_dir_empty_rejected(self, capsys):
+        """--flake-dir '' is a parse error (#1229).
+
+        os.path.abspath("") is the caller's current directory, so an
+        explicitly empty value used to silently tidy whatever directory
+        the caller happened to be standing in -- and in non-check mode
+        format and edit its flake.nix -- instead of being rejected.
+        """
+        with pytest.raises(SystemExit) as excinfo:
+            self.parser.parse_args(["--flake-dir", ""])
+        assert excinfo.value.code == 2
+        assert "--flake-dir" in capsys.readouterr().err
+
+        # The default (option omitted) and non-empty values are unchanged.
+        assert self.parser.parse_args([]).flake_dir == "."
+        assert self.parser.parse_args(["--flake-dir", "/tmp/x"]).flake_dir == "/tmp/x"
+
+    def test_config_empty_rejected(self, capsys):
+        """--config '' is a parse error (#1233).
+
+        load_config picks the explicit source with a falsy chain
+        (config_file or $FLAKE_TIDY_CONFIG), so an explicitly empty
+        value used to be silently discarded and the run loaded a config
+        from the env var / nix eval / import probe -- a config the
+        caller did not ask for -- instead of being rejected.
+        """
+        with pytest.raises(SystemExit) as excinfo:
+            self.parser.parse_args(["--config", ""])
+        assert excinfo.value.code == 2
+        assert "--config" in capsys.readouterr().err
+
+        # Omitting --config and non-empty values are unchanged.
+        assert self.parser.parse_args([]).config_file is None
+        assert self.parser.parse_args(["--config", "/tmp/x.json"]).config_file == "/tmp/x.json"
+
+    def test_include_exclude_empty_name_rejected(self, capsys):
+        """--include*/--exclude* '' is a parse error naming the option (#1239).
+
+        An empty include name matches nothing, so --check used to pass
+        vacuously (exit 0) on a flake needing changes; an empty exclude
+        name silently dropped real proposals. Every one of the eight
+        list options rejects an empty name at parse time.
+        """
+        options = [
+            "--include",
+            "--include-dedup",
+            "--include-merge",
+            "--include-flatten",
+            "--exclude-input",
+            "--exclude-dedup",
+            "--exclude-merge",
+            "--exclude-flatten",
+        ]
+        for option in options:
+            with pytest.raises(SystemExit) as excinfo:
+                self.parser.parse_args([option, ""])
+            assert excinfo.value.code == 2
+            assert option in capsys.readouterr().err
+
+    def test_include_mixed_list_with_empty_name_rejected(self, capsys):
+        """--include nixpkgs '' is a parse error too (#1239).
+
+        The guard is per element, not per list: one empty name in an
+        otherwise well-formed list still vacuums/drops part of the run.
+        """
+        with pytest.raises(SystemExit) as excinfo:
+            self.parser.parse_args(["--include", "nixpkgs", ""])
+        assert excinfo.value.code == 2
+        assert "--include" in capsys.readouterr().err
+
+        with pytest.raises(SystemExit) as excinfo:
+            self.parser.parse_args(["--exclude-input", "nixpkgs", ""])
+        assert excinfo.value.code == 2
+        assert "--exclude-input" in capsys.readouterr().err
+
+        # Well-formed names are unchanged.
+        assert self.parser.parse_args(["--include", "nixpkgs"]).include == [
+            "nixpkgs"
+        ]
+
     def test_include_args(self):
         """--include foo bar."""
         args = self.parser.parse_args(["--include", "foo", "bar"])
@@ -116,3 +214,161 @@ class TestCLI:
         """--exclude-flatten foo."""
         args = self.parser.parse_args(["--exclude-flatten", "foo"])
         assert args.exclude_flatten == ["foo"]
+
+
+class TestMainFormatting:
+    def _fixture(self, tmp_path):
+        flake_nix = tmp_path / "flake.nix"
+        original = b"{ inputs = {}; }\n"
+        flake_nix.write_bytes(original)
+        (tmp_path / "flake.lock").write_text("{}\n")
+        config = tmp_path / "config.json"
+        config.write_text("{}\n")
+        return flake_nix, config, original
+
+    def _stub_operations(self, monkeypatch, calls):
+        def run_nixfmt(flake_dir):
+            calls.append("nixfmt")
+            with open(os.path.join(flake_dir, "flake.nix"), "wb") as output:
+                output.write(b"{ inputs = {}; }  # formatted\n")
+
+        def dedup(*args, **kwargs):
+            calls.append("dedup")
+            return 0
+
+        monkeypatch.setattr(flake_tidy, "run_nixfmt", run_nixfmt)
+        monkeypatch.setattr(flake_tidy, "dedup", dedup)
+
+    def test_dry_run_skips_initial_format_and_preserves_flake_nix(
+        self, monkeypatch, tmp_path
+    ):
+        flake_nix, config, original = self._fixture(tmp_path)
+        calls = []
+        self._stub_operations(monkeypatch, calls)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "flake-tidy",
+                "dedup",
+                "--dry-run",
+                "--config",
+                str(config),
+                "--flake-dir",
+                str(tmp_path),
+            ],
+        )
+
+        flake_tidy.main()
+
+        assert calls == ["dedup"]
+        assert flake_nix.read_bytes() == original
+
+    def test_normal_run_formats_before_operation(self, monkeypatch, tmp_path):
+        flake_nix, config, original = self._fixture(tmp_path)
+        calls = []
+        self._stub_operations(monkeypatch, calls)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "flake-tidy",
+                "dedup",
+                "--config",
+                str(config),
+                "--flake-dir",
+                str(tmp_path),
+            ],
+        )
+
+        flake_tidy.main()
+
+        assert calls == ["nixfmt", "dedup"]
+        assert flake_nix.read_bytes() != original
+
+    def test_check_mode_still_skips_initial_format(self, monkeypatch, tmp_path):
+        flake_nix, config, original = self._fixture(tmp_path)
+        calls = []
+        self._stub_operations(monkeypatch, calls)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "flake-tidy",
+                "dedup",
+                "--check",
+                "--config",
+                str(config),
+                "--flake-dir",
+                str(tmp_path),
+            ],
+        )
+
+        with pytest.raises(SystemExit) as excinfo:
+            flake_tidy.main()
+
+        assert excinfo.value.code == 0
+        assert calls == ["dedup"]
+        assert flake_nix.read_bytes() == original
+
+
+class TestMissingFlakeFiles:
+    """main() missing flake.lock / flake.nix is exit 2, not 1 (#1250).
+
+    Exit 1 is the --check verdict ("changes needed") on a well-formed
+    flake; a directory with no flake at all is an invocation error,
+    like ConfigLoadError / LockLoadError in the same main() and the
+    missing-file guards in check-lock-sync / check-pin-sync.
+    """
+
+    def _run_main(self, monkeypatch, capsys, tmp_path, files, extra_args):
+        from unittest.mock import patch
+
+        for name in files:
+            (tmp_path / name).write_text("{}\n" if name.endswith(".lock") else "{ inputs = {}; }\n")
+        cfg = tmp_path / "cfg.json"
+        cfg.write_text("{}\n")
+        argv = ["flake-tidy", *extra_args, "--config", str(cfg), "--flake-dir", str(tmp_path)]
+        monkeypatch.setattr(sys, "argv", argv)
+        with patch.object(flake_tidy, "run_nixfmt", return_value=None):
+            with pytest.raises(SystemExit) as excinfo:
+                flake_tidy.main()
+        out, err = capsys.readouterr()
+        return excinfo.value.code, out, err
+
+    @pytest.mark.parametrize("extra_args", [["--check"], []], ids=["check", "non-check"])
+    def test_missing_flake_lock_exit_2(self, monkeypatch, capsys, tmp_path, extra_args):
+        code, out, err = self._run_main(monkeypatch, capsys, tmp_path, ["flake.nix"], extra_args)
+        assert code == 2
+        assert "no flake.lock" in err
+        assert "Traceback" not in out + err
+
+    @pytest.mark.parametrize("extra_args", [["--check"], []], ids=["check", "non-check"])
+    def test_missing_flake_nix_exit_2(self, monkeypatch, capsys, tmp_path, extra_args):
+        code, out, err = self._run_main(monkeypatch, capsys, tmp_path, ["flake.lock"], extra_args)
+        assert code == 2
+        assert "no flake.nix" in err
+        assert "Traceback" not in out + err
+
+    def test_missing_both_exit_2(self, monkeypatch, capsys, tmp_path):
+        code, out, err = self._run_main(monkeypatch, capsys, tmp_path, [], ["--check"])
+        assert code == 2
+        assert "no flake.lock" in err
+
+    def test_verdict_control_still_exit_1(self, monkeypatch, capsys, tmp_path):
+        """A well-formed flake needing changes still exits 1 in --check."""
+        import shutil
+
+        fixture = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "sample-flake")
+        work = tmp_path / "sample"
+        shutil.copytree(fixture, work)
+        cfg = tmp_path / "cfg.json"
+        cfg.write_text("{}\n")
+        monkeypatch.setattr(sys, "argv", ["flake-tidy", "--check", "--config", str(cfg), "--flake-dir", str(work)])
+        from unittest.mock import patch
+
+        with patch.object(flake_tidy, "run_nixfmt", return_value=None):
+            with pytest.raises(SystemExit) as excinfo:
+                flake_tidy.main()
+        assert excinfo.value.code == 1
+        assert "check failed" in capsys.readouterr().out

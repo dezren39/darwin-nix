@@ -10,15 +10,15 @@
   ...
 }:
 let
-  # The mcpx launchd agent's program (see launchd.user.agents.mcpx). Built in
-  # the store, installed as a copy at the fixed mcpxAgentPath so the agent's
-  # executable, and the name macOS shows for it, never change.
-  mcpxAgent = pkgs.writeShellScript "mcpx" ''
-    cfg=/Users/drewry.pope/.config/mcpx/config.json
-    ${inputs.self.packages.${system}.mcpx}/bin/mcpx --config "$cfg" stop || true
-    exec ${inputs.self.packages.${system}.mcpx}/bin/mcpx daemon --config "$cfg"
+  serviceEvents = inputs.self.packages.${system}.service-events;
+  serviceEvent = "${serviceEvents}/bin/service-event";
+  serviceEventAsPrimaryUser = pkgs.writeShellScript "service-event-as-primary-user" ''
+    set -euo pipefail
+    primary_uid=$(/usr/bin/id -u ${config.system.primaryUser})
+    exec /bin/launchctl asuser "$primary_uid" \
+      /usr/bin/sudo -u ${config.system.primaryUser} \
+      ${serviceEvent} "$@"
   '';
-  mcpxAgentPath = "/usr/local/libexec/mcpx/mcpx";
 in
 lib.recursiveUpdate {
   imports = [
@@ -29,6 +29,8 @@ lib.recursiveUpdate {
     ./services.nix
     # OpenChamber server agent + desktop client; see the header there.
     ./openchamber.nix
+    ./opencode-tmp-guard.nix
+    ./opencode-prune-report.nix
     # ./home.nix
   ];
 
@@ -88,6 +90,19 @@ lib.recursiveUpdate {
   # launchd.user.envVariables and homeUser.nix sessionVariables because each
   # reaches a context the others do not.
   environment.variables.OPENCODE_DB = "/Users/drewry.pope/.local/share/opencode/opencode.db";
+  # The OpenChamber desktop app reads these from the login shell's environment
+  # (packages/electron/README.md: "Desktop imports this from the user's
+  # login-shell environment"), not only from launchd's. launchd.user.envVariables
+  # below is set by `launchctl setenv` during activation only, so it is gone
+  # after every reboot until the next successful switch. On 2026-10-21 the app
+  # started at login without them, ran its own server (0.0.0.0:57123) and
+  # OpenCode next to the launchd agent's, and the two managers killed each
+  # other's OpenCode every 30 minutes through the shared
+  # ~/.config/openchamber/managed-opencode state (dezren39/darwin-nix#670). Exported
+  # here they are in every login shell, so the app always attaches to the
+  # agent's server instead.
+  environment.variables.OPENCHAMBER_SERVER_URL = "http://127.0.0.1:3000";
+  environment.variables.OPENCHAMBER_SKIP_LOCAL_SERVER = "1";
 
   nixpkgs = {
     # TODO: module nixpkgs
@@ -462,6 +477,16 @@ lib.recursiveUpdate {
       "Dimentium/homebrew-autoraise" = inputs.homebrew-autoraise;
       "gromgit/homebrew-fuse" = inputs.homebrew-fuse;
       "gabrimatic/homebrew-local-whisper" = inputs.homebrew-local-whisper;
+      # In-repo tap (#1791): vendors the onedrive cask at the build
+      # installed on this machine (26.198.1011.0006). Upstream
+      # homebrew-cask tracks Microsoft's Deferred ring and lags the
+      # Production-ring build the machine self-updates to, so its pkg
+      # refused the "downgrade" on every activation. See
+      # homebrew-local/Casks/onedrive.rb for the retirement condition.
+      "dezren39/homebrew-local" = pkgs.runCommandLocal "homebrew-local-tap" { } ''
+        mkdir -p $out/Casks
+        cp ${./homebrew-local/Casks/onedrive.rb} $out/Casks/onedrive.rb
+      '';
 
     };
     mutableTaps = false;
@@ -471,6 +496,9 @@ lib.recursiveUpdate {
     # survives fresh setups. Prefer specific formulae over whole-tap trust.
     # ref: https://github.com/zhaofengli/nix-homebrew README "trust" + https://docs.brew.sh/Tap-Trust
     trust = {
+      casks = [
+        "dezren39/local/onedrive"
+      ];
       formulae = [
         "null-dev/firefox-profile-switcher/firefox-profile-switcher-connector"
         "dimentium/autoraise/autoraise"
@@ -517,9 +545,13 @@ lib.recursiveUpdate {
       # terminal returned 0. Run from the script, brew's sudo calls reuse the
       # one approval. Installing missing casks still happens in activation.
       upgrade = false;
+      # No "--force": it makes `brew bundle` reinstall casks that are already
+      # installed, which fails for self-updating apps that are newer than the
+      # cask (google-chrome: permission denied on its own bundle; onedrive:
+      # "A newer version is already installed") and for casks whose download
+      # URL has gone stale (safari-technology-preview 403), aborting activation.
       extraFlags = [
         "--verbose"
-        "--force"
       ];
     };
     # caskArgs
@@ -602,6 +634,44 @@ lib.recursiveUpdate {
     Defaults timestamp_timeout=15
   '';
 
+  # macFUSE has to be installed before nix-darwin's `brew bundle` runs, because
+  # bindfs-mac (brews.nix) refuses to install without it and bundle installs
+  # every formula before any cask, so the macfuse cask in casks.nix is too late
+  # on a fresh Mac. nix-homebrew's setup-homebrew is mkBefore (order 500) in
+  # activationScripts.homebrew and nix-darwin's own text is order 1000, so order
+  # 600 runs after brew exists and before the bundle. Failure only warns.
+  system.activationScripts.homebrew.text = lib.mkOrder 600 ''
+    if [ -x /opt/homebrew/bin/brew ] && ! /usr/bin/sudo --user=${config.system.primaryUser} --set-home \
+      /opt/homebrew/bin/brew list --cask macfuse >/dev/null 2>&1; then
+      echo "installing macfuse cask before brew bundle (bindfs-mac requires it)..." >&2
+      /usr/bin/sudo --user=${config.system.primaryUser} --set-home \
+        env HOMEBREW_NO_AUTO_UPDATE=1 /opt/homebrew/bin/brew install --cask macfuse ||
+        echo "warning: macfuse install failed; bindfs-mac may fail" >&2
+    fi
+
+    # #1791: google-chrome and onedrive exist on this machine outside
+    # brew, and `brew bundle` reads both as missing, so it used to fail
+    # on them every activation (root-owned Chrome bundle: chgrp
+    # "Operation not permitted" on every file; OneDrive newer than the
+    # upstream cask: its pkg refuses the downgrade).
+    # brew-adopt-unmanaged.sh brings both under brew here, still before
+    # the bundle: it chowns Chrome's bundle to the primary user and
+    # adopts it (`brew install --cask --adopt`: receipt-only for
+    # auto_updates casks), and for OneDrive it guards the vendored pin
+    # in the dezren39/homebrew-local tap (same-version pkg install by
+    # the bundle writes the receipt). Unlike the macfuse install above
+    # it is NOT warn-only: its two exit-1 states (Chrome still
+    # foreign-owned after chown; OneDrive self-updated past the
+    # vendored pin before adoption) are exactly the states that would
+    # fail the bundle anyway, and failing here names the remedy in
+    # plain words instead of brew's chgrp wall or the installer's
+    # refusal. (Same text block as macfuse because a module file can
+    # only define this option once.)
+    if [ -x /opt/homebrew/bin/brew ]; then
+      /run/current-system/sw/bin/bash ${./brew-adopt-unmanaged.sh} ${config.system.primaryUser}
+    fi
+  '';
+
   # Restart skhd after rebuild so config changes take effect
   # Fix Spotlight indexing and exclude noisy directories
   # Clean up stale Caskroom artifacts before homebrew runs (e.g. after cask renames)
@@ -630,20 +700,6 @@ lib.recursiveUpdate {
   # src/sidepulse/lid_sleep.py, or sidepulse decides the file drifted and
   # re-prompts on every launch.
   system.activationScripts.extraActivation.text = ''
-    # mcpx's launchd agent runs the fixed path ${mcpxAgentPath} (see
-    # launchd.user.agents.mcpx). Refresh the copy here, before launchd is set
-    # up, and remember whether it changed so postActivation restarts the
-    # agent: its plist no longer changes when mcpx does. Root-owned and not
-    # user-writable, like the store copy it mirrors.
-    mcpxAgentChanged=0
-    if ! /usr/bin/cmp -s ${mcpxAgent} ${mcpxAgentPath}; then
-      echo "installing ${mcpxAgentPath}" >&2
-      /bin/mkdir -p "$(/usr/bin/dirname ${mcpxAgentPath})"
-      /usr/bin/install -o root -g wheel -m 0755 ${mcpxAgent} ${mcpxAgentPath}.tmp
-      /bin/mv -f ${mcpxAgentPath}.tmp ${mcpxAgentPath}
-      mcpxAgentChanged=1
-    fi
-
     sidepulseSudoers=/etc/sudoers.d/sidepulse-disablesleep
     sidepulseRule='${config.system.primaryUser} ALL=(root) NOPASSWD: /usr/bin/pmset -a disablesleep 0, /usr/bin/pmset -a disablesleep 1'
 
@@ -680,14 +736,6 @@ lib.recursiveUpdate {
 
     if /bin/launchctl list | grep -q org.nixos.skhd; then
       /bin/launchctl kickstart -k "gui/$(id -u)/org.nixos.skhd" || true
-    fi
-
-    # A new mcpx (or launcher) was installed at ${mcpxAgentPath} in
-    # extraActivation; restart the agent onto it. The plist is unchanged, so
-    # nix-darwin's user launchd step did not.
-    if [ "''${mcpxAgentChanged:-0}" = 1 ]; then
-      echo "restarting org.nixos.mcpx onto the new ${mcpxAgentPath}" >&2
-      /bin/launchctl kickstart -k "gui/$(/usr/bin/id -u ${config.system.primaryUser})/org.nixos.mcpx" || true
     fi
 
     # Xcode and the Command Line Tools ask for their license to be accepted
@@ -856,28 +904,49 @@ lib.recursiveUpdate {
         cp ${./lib/common.sh} $out/lib/common.sh
       ''
     }/spotlight-exclude-artifacts
-    git_maintain=${./git-maintain-repos}
+    # git-maintain-repos sources lib/common.sh beside itself too (the
+    # argument guard helpers, #1146), so it gets the same runCommandLocal
+    # wrap as spotlight_exclude above -- a bare ''${./git-maintain-repos}
+    # would land in the store without its library and fail at source time.
+    git_maintain=${
+      pkgs.runCommandLocal "git-maintain-repos" { } ''
+        mkdir -p $out/lib
+        cp ${./git-maintain-repos} $out/git-maintain-repos
+        cp ${./lib/common.sh} $out/lib/common.sh
+      ''
+    }/git-maintain-repos
+    system_activation_helper=${./system-activation-helper.sh}
+    service_event=${serviceEvent}
+    service_event_as_user=${serviceEventAsPrimaryUser}
     as_user="/bin/launchctl asuser $primary_uid /usr/bin/sudo -u ${config.system.primaryUser}"
     helper_env="/usr/bin/env PATH=/run/current-system/sw/bin:/usr/bin:/bin"
 
     # exclude: --system re-asserts the static list only (~40 ms). Consider
     # dropping --system to get the default --auto instead: it adds the per-repo
     # walk for only ~3 s, and would mark newly-created repos automatically.
-    $helper_env /run/current-system/sw/bin/bash "$spotlight_exclude" --system || true
+    $helper_env /run/current-system/sw/bin/bash "$system_activation_helper" \
+      spotlight-exclude-artifacts root "$service_event_as_user" -- \
+      /run/current-system/sw/bin/bash "$spotlight_exclude" --system
     # maintain: --system only (~80 ms). Do NOT drop --system here -- the default
     # scope is --auto, which walks every repo under ~/git and takes roughly 3
     # minutes. Adding --deep on top would also expire reflogs and prune. Run
     # `just git-maintain` / `just git-maintain-quick` deliberately instead.
-    $helper_env /run/current-system/sw/bin/bash "$git_maintain" --system || true
+    $helper_env /run/current-system/sw/bin/bash "$system_activation_helper" \
+      git-maintain-repos root "$service_event_as_user" -- \
+      /run/current-system/sw/bin/bash "$git_maintain" --system
 
     # shellcheck disable=SC2086
     # same trade-off as above: --system ~40 ms, default --auto adds the ~3 s walk
-    $as_user $helper_env /run/current-system/sw/bin/bash "$spotlight_exclude" --system || true
+    $as_user $helper_env /run/current-system/sw/bin/bash "$system_activation_helper" \
+      spotlight-exclude-artifacts user "$service_event" -- \
+      /run/current-system/sw/bin/bash "$spotlight_exclude" --system
     # shellcheck disable=SC2086
     # --system only. No scheduler is installed for root: macOS offers only
     # launchd, and `git maintenance start` writes launchd *agents*, which
     # require a GUI Aqua session that root does not have.
-    $as_user $helper_env /run/current-system/sw/bin/bash "$git_maintain" --system || true
+    $as_user $helper_env /run/current-system/sw/bin/bash "$system_activation_helper" \
+      git-maintain-repos user "$service_event" -- \
+      /run/current-system/sw/bin/bash "$git_maintain" --system
 
     # Point xcode-select at full Xcode.app if installed (idempotent, instant)
     if [ -d "/Applications/Xcode.app/Contents/Developer" ]; then
@@ -929,6 +998,47 @@ lib.recursiveUpdate {
   # the home directory literal rather than "$HOME/go"; the HIST* variables are
   # deliberately omitted because they only mean anything to an interactive
   # shell, which already gets them from the profile.
+  # The mcpx daemon (#343): the reusable darwin module
+  # (darwinModules.mcpx, imported in flake.nix) now owns the launchd
+  # agent this file used to hand-roll below -- same fixed program
+  # path (/usr/local/libexec/mcpx/mcpx, refreshed by the module's
+  # activation scripts), same semantics: RunAtLoad, KeepAlive, a 20 s
+  # ExitTimeOut, $HOME as working directory, logs at
+  # ~/Library/Logs/mcpx.log, and a wrapper that stops whatever
+  # already serves the config's socket before starting. The module
+  # starts the daemon on its rendered configFile and points clients
+  # at it with MCPX_CONFIG, so every client computes the same daemon
+  # socket without the ~/.config/mcpx/config.json path having to be
+  # the daemon's config. homeUser.nix still writes that file from the
+  # same mcpx.config.nix for the clients that name it explicitly.
+  #
+  # settings is mcpx.config.nix verbatim: the module renders it to
+  # config.json exactly as homeUser.nix does (builtins.toJSON of the
+  # same import), so the daemon's config does not change.
+  #
+  # Two conscious deltas from the hand-rolled agent:
+  # - Its service-events start hook is gone: the canonical module
+  #   deliberately omits it (its header says so); mcpx starts are no
+  #   longer recorded in the service-events log.
+  # - environment.PATH below preserves the hand-rolled agent's PATH
+  #   (the MCP servers mcpx.config.nix starts inherit it).
+  services.mcpx = {
+    enable = true;
+    package = inputs.self.packages.${system}.mcpx;
+    settings = import ./mcpx.config.nix { inherit lib; };
+    environment.PATH = (
+      lib.makeBinPath [
+        pkgs.bash
+        pkgs.coreutils
+        pkgs.nodejs
+        inputs.self.packages.${system}.codedb
+        pkgs.codebase-memory-mcp
+        pkgs.fff-mcp
+      ]
+      + ":/usr/bin:/bin"
+    );
+  };
+
   launchd.user.envVariables = {
     EDITOR = "zed --wait";
     LANG = "en_US.UTF-8";
@@ -1004,67 +1114,24 @@ lib.recursiveUpdate {
         StandardOutPath = "/tmp/natural_scrolling.out.log";
       };
     };
-    # The mcpx daemon, started at login and kept running, so the first `mcpx`
-    # command in a shell does not pay for a cold start.
-    #
-    # It reads ~/.config/mcpx/config.json (homeUser.nix, from mcpx.config.nix).
-    # The working directory is $HOME on purpose: mcpx keys a daemon by the set
-    # of config files it finds searching up from where it starts, and a CLI run
-    # from a directory with no project config finds the same set, so it uses
-    # this daemon instead of starting its own.
-    #
-    # The program is a fixed path, /usr/local/libexec/mcpx/mcpx, not a store
-    # path. macOS lists a background item under its executable's file name and
-    # tracks it by path: the store path of the old writeShellScript wrapper
-    # showed as "d0b6q5234j1gab2qwswfimg23zgk1w2f-mcpx-agent", and every mcpx
-    # build (9 path changes Oct 2-22) gave it a new name and executable. The
-    # fixed file is a copy of mcpxAgent, refreshed by extraActivation below
-    # before launchd is set up; since the plist no longer changes with mcpx,
-    # postActivation kickstarts the agent whenever the copy changed.
-    mcpx = {
+    # The service lifecycle event log, ~/Library/Logs/nix-services/events.jsonl:
+    # every start, exit and replacement of OpenChamber (agent, desktop app and
+    # dev servers), their OpenCode processes and mcpx, and the connections
+    # their servers drop and regain, with timestamps; plus what the switch
+    # and the agents' wrappers record through `service-event`. It also
+    # size-bounds the agents' logs. Read it with `just service-events`;
+    # docs/services.md lists the events (dezren39/darwin-nix#670, #668).
+    service-events = {
       serviceConfig = {
+        ProgramArguments = [ "${serviceEvents}/bin/service-monitor" ];
         EnvironmentVariables.HOME = "/Users/drewry.pope";
-        # The MCP servers it starts (mcpx.config.nix runs them by absolute
-        # path; their own children use this PATH). mcpx's own wrapper adds
-        # deno, bun, node and git for scripts.
-        EnvironmentVariables.PATH = lib.mkForce (
-          lib.makeBinPath [
-            pkgs.bash
-            pkgs.coreutils
-            pkgs.nodejs
-            inputs.self.packages.${system}.codedb
-            pkgs.codebase-memory-mcp
-            pkgs.fff-mcp
-          ]
-          + ":/usr/bin:/bin"
-        );
+        EnvironmentVariables.PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
         KeepAlive = true;
         RunAtLoad = true;
-        # launchd's default here is 5 s before SIGKILL, but mcpx's stop can
-        # take up to 10 s: it drains HTTP (http.shutdownGrace, 5 s, capped to
-        # the window) and stops its MCP server processes, all bounded by
-        # limits.execDrainTimeout (10 s; internal/daemon/server.go
-        # stopServing). So every restart was cut off mid-shutdown.
-        ExitTimeOut = 20;
-        WorkingDirectory = "/Users/drewry.pope";
-        # --config, not discovery: at login or right after `just switch` this
-        # can start before the file is in place. Named explicitly, a missing
-        # file is an error, the process exits and KeepAlive retries.
-        #
-        # mcpx names its socket after the config file's resolved path, so it
-        # matches what every CLI computes only because homeUser.nix
-        # (mcpxConfig) writes a real file at this fixed path.
-        #
-        # Before starting, stop whatever already serves this socket. launchd
-        # never runs two copies of one job, so that is a daemon something else
-        # started -- the CLI's autostart did on 2026-10-19 (now off in
-        # mcpx.config.nix), and the OpenCode fork's mcpx plugin still can
-        # (developing-today/opencode#134). Left
-        # running, it holds the socket, this daemon exits "a daemon is already
-        # listening", and KeepAlive respawns it every 10 s (822 times that day).
-        ProgramArguments = [ mcpxAgentPath ];
-        StandardErrorPath = "/tmp/mcpx.err.log";
-        StandardOutPath = "/tmp/mcpx.out.log";
+        ProcessType = "Background";
+        LowPriorityIO = true;
+        ThrottleInterval = 30;
+        StandardErrorPath = "/Users/drewry.pope/Library/Logs/nix-services/monitor.err.log";
       };
     };
   };

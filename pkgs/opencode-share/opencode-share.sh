@@ -9,9 +9,12 @@ VERSION="1.0.0"
 SOURCE="${OPENCODE_SHARE_SOURCE:-$HOME/.config/nix/.opencode}"
 DRY_RUN=false
 ACTION="mount" # mount | unmount | status
+ACTION_SET=false # true once an action flag is given on the command line
+SOURCE_SET=false # true once --source is given (SOURCE itself has a default)
 
-# Colors (disabled if not a terminal)
-if [[ -t 1 ]]; then
+# Colors (disabled if not a terminal, or when NO_COLOR is set --
+# https://no-color.org; #1465)
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
   RED='\033[0;31m'
   GREEN='\033[0;32m'
   YELLOW='\033[1;33m'
@@ -120,7 +123,12 @@ run() {
 }
 
 is_mounted() {
-  mount | grep -qF " on $1 (" 2>/dev/null
+  # NOTE (#1455): no grep -q here. Under pipefail, -q exits on the first
+  # match; when the match is early and mount is still writing, mount dies
+  # with SIGPIPE (141) and pipefail turns the pipeline into a failure, so
+  # a present mount reads as not mounted. A full-read grep consumes the
+  # whole stream, so mount always exits normally; mount output is small.
+  mount | grep -F " on $1 (" >/dev/null 2>&1
 }
 
 check_deps() {
@@ -135,6 +143,11 @@ check_deps() {
   [[ -d "/Library/Filesystems/macfuse.fs" ]] && macfuse_found=true
   [[ -f "/usr/local/lib/libfuse.dylib" ]] && macfuse_found=true
   [[ -f "/opt/homebrew/lib/libfuse.dylib" ]] && macfuse_found=true
+  # Test-only seam for environments that cannot create one of the real
+  # absolute-path markers. With the variable unset, production checks above
+  # remain unchanged.
+  local test_marker="${OPENCODE_SHARE_TEST_MACFUSE_MARKER:-}"
+  [[ -n "$test_marker" && -e "$test_marker" ]] && macfuse_found=true
   if ! $macfuse_found; then
     missing+=("macFUSE — install via: brew install --cask macfuse (reboot required)")
   fi
@@ -233,6 +246,14 @@ do_unmount() {
   local target="$1"
   local target_opencode="$target/.opencode"
   local target_plans="$target/plans"
+  # NOTE (#1323): a failed umount used to be silently swallowed -- both
+  # umount calls ran through `run` unchecked and the function ended with
+  # a successful `log`, so the dispatch never counted an error and the
+  # run reported "Unmounted" / exit 0 with both mounts still up.
+  # Mirror do_mount: check each umount result AND re-check is_mounted
+  # afterwards, name any failure on stderr, and return non-zero so the
+  # target counts in the dispatch summary.
+  local failed=0
 
   echo ""
   info "${BOLD}Unmounting:${NC} $target"
@@ -240,7 +261,13 @@ do_unmount() {
   # Unmount plans overlay first (inner mount must go before outer)
   if is_mounted "$target_opencode/plans"; then
     info "Unmounting plans overlay: $target_opencode/plans"
-    run umount "$target_opencode/plans"
+    if ! run umount "$target_opencode/plans"; then
+      err "Failed to unmount plans overlay: $target_opencode/plans"
+      failed=1
+    elif ! $DRY_RUN && is_mounted "$target_opencode/plans"; then
+      err "Failed to unmount plans overlay (still mounted): $target_opencode/plans"
+      failed=1
+    fi
   else
     info "Plans overlay not mounted (skipping)"
   fi
@@ -248,14 +275,23 @@ do_unmount() {
   # Unmount .opencode (outer mount)
   if is_mounted "$target_opencode"; then
     info "Unmounting .opencode: $target_opencode"
-    run umount "$target_opencode"
+    if ! run umount "$target_opencode"; then
+      err "Failed to unmount .opencode: $target_opencode"
+      failed=1
+    elif ! $DRY_RUN && is_mounted "$target_opencode"; then
+      err "Failed to unmount .opencode (still mounted): $target_opencode"
+      failed=1
+    fi
   else
     info ".opencode not mounted (skipping)"
   fi
 
-  # Clean up empty mount point directory (only if empty)
+  # Clean up empty mount point directory (only if empty and not still
+  # mounted -- rmdir must never run against a live mount point)
   if [[ -d "$target_opencode" ]]; then
-    if [[ -z "$(ls -A "$target_opencode" 2>/dev/null)" ]]; then
+    if ! $DRY_RUN && is_mounted "$target_opencode"; then
+      warn "Still mounted, leaving mount point: $target_opencode"
+    elif [[ -z "$(ls -A "$target_opencode" 2>/dev/null)" ]]; then
       info "Removing empty mount point: $target_opencode"
       run rmdir "$target_opencode"
     else
@@ -268,6 +304,11 @@ do_unmount() {
     local plan_count
     plan_count=$(find "$target_plans" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
     log "Project plans preserved: $target_plans ($plan_count files)"
+  fi
+
+  if [[ $failed -ne 0 ]]; then
+    err "Failed to unmount .opencode from $target"
+    return 1
   fi
 
   log "Unmounted .opencode from $target"
@@ -286,11 +327,11 @@ do_status() {
     warn ".opencode is a symlink -> $link_target (not a bindfs mount)"
   elif is_mounted "$target_opencode"; then
     local mount_src
-    mount_src=$(mount | grep " on $target_opencode (" | awk '{print $1}')
+    mount_src=$(mount | grep -F " on $target_opencode (" | awk 'NR==1 {print $1}')
     log ".opencode: mounted (source: $mount_src)"
 
     if is_mounted "$target_opencode/plans"; then
-      mount_src=$(mount | grep " on $target_opencode/plans (" | awk '{print $1}')
+      mount_src=$(mount | grep -F " on $target_opencode/plans (" | awk 'NR==1 {print $1}')
       log "plans/:   mounted (source: $mount_src)"
     else
       warn "plans/:   NOT mounted (using shared plans from source)"
@@ -316,15 +357,54 @@ TARGETS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --source)
+      # NOTE (#908/#930): guard the missing-value case — under `set -u` a
+      # trailing --source otherwise dies on unbound $2 with no usage, and a
+      # flag-shaped value (--source --dry-run) was swallowed as the source,
+      # discarding the flag and running the mount for real.
+      # NOTE (#1220): an empty value (--source "") also slips past the
+      # flag-shaped check, so reject it with the same parse error.
+      if [[ $# -lt 2 || -z "${2:-}" || "$2" == -* ]]; then
+        err "--source requires a directory argument"
+        echo ""
+        usage
+        exit 1
+      fi
+      # NOTE (#1106): a repeated --source used to silently discard the
+      # first value (the #1103 shape). Reject it at parse time.
+      if [[ "$SOURCE_SET" == true ]]; then
+        err "--source may be given only once (repeated --source)"
+        echo ""
+        usage
+        exit 1
+      fi
       SOURCE="$2"
+      SOURCE_SET=true
       shift 2
       ;;
     --unmount | --umount | -u)
+      # NOTE (#1106): a different action flag already given is a conflict,
+      # not a last-win override -- --unmount --status used to run status
+      # and exit 0, leaving the mounts up under a success report.
+      # Repeating the SAME action (any spelling) is accepted idempotently.
+      if [[ "$ACTION_SET" == true && "$ACTION" != "unmount" ]]; then
+        err "conflicting action flags: $1 conflicts with --$ACTION already given"
+        echo ""
+        usage
+        exit 1
+      fi
       ACTION="unmount"
+      ACTION_SET=true
       shift
       ;;
     --status | -s)
+      if [[ "$ACTION_SET" == true && "$ACTION" != "status" ]]; then
+        err "conflicting action flags: $1 conflicts with --$ACTION already given"
+        echo ""
+        usage
+        exit 1
+      fi
       ACTION="status"
+      ACTION_SET=true
       shift
       ;;
     --dry-run | -n)
@@ -342,7 +422,16 @@ while [[ $# -gt 0 ]]; do
     --)
       shift
       # Everything after -- is a target
+      # NOTE (#1223): an empty target ("") must be rejected here too --
+      # cd "" succeeds and resolves to the caller's cwd, so without this
+      # guard the cwd would be reported on / mounted as if named.
       for arg in "$@"; do
+        if [[ -z "$arg" ]]; then
+          err "empty target argument (target must not be empty)"
+          echo ""
+          usage
+          exit 1
+        fi
         TARGETS+=("$(cd "$arg" 2>/dev/null && pwd -P || echo "$arg")")
       done
       break
@@ -354,12 +443,34 @@ while [[ $# -gt 0 ]]; do
       exit 1
       ;;
     *)
+      # NOTE (#1223): reject an empty target at parse time -- cd ""
+      # succeeds in the resolution subshell and yields the caller's cwd,
+      # so an empty target would silently report on / mount the cwd.
+      if [[ -z "$1" ]]; then
+        err "empty target argument (target must not be empty)"
+        echo ""
+        usage
+        exit 1
+      fi
       # Resolve to absolute physical path
       TARGETS+=("$(cd "$1" 2>/dev/null && pwd -P || echo "$1")")
       shift
       ;;
   esac
 done
+
+# Mode-effectiveness judge (#1772, #1722 contract rule 4): --dry-run is
+# consumed only by the mount/unmount paths; do_status never reads it, so
+# in status mode it was parsed and silently dropped -- refuse it
+# post-parse, naming the flag and the mode, exit 2. Message shape mirrors
+# lib/common.sh arg_refuse_in_mode (this tool is packaged standalone and
+# cannot source it). --source is deliberately NOT judged here: it is a
+# global option the test corpus passes with every action (scenarios K,
+# L, N), so it stays accepted in all modes; see #1772.
+if [[ "$ACTION" == "status" ]] && $DRY_RUN; then
+  echo "$PROG: --status conflicts with mode flags: --dry-run (--status changes nothing, so there is nothing to preview)" >&2
+  exit 2
+fi
 
 if [[ ${#TARGETS[@]} -eq 0 ]]; then
   err "No target directories specified"
@@ -390,9 +501,12 @@ fi
 ERRORS=0
 for target in "${TARGETS[@]}"; do
   case "$ACTION" in
-    mount) do_mount "$target" || ((ERRORS++)) ;;
-    unmount) do_unmount "$target" || ((ERRORS++)) ;;
-    status) do_status "$target" || ((ERRORS++)) ;;
+    # NOTE (#907): do not use a post-increment for ERRORS here — it
+    # evaluates to 0 when ERRORS=0, so the compound returns status 1 and
+    # `set -e` aborts the whole run at the first failing target.
+    mount) do_mount "$target" || ERRORS=$((ERRORS + 1)) ;;
+    unmount) do_unmount "$target" || ERRORS=$((ERRORS + 1)) ;;
+    status) do_status "$target" || ERRORS=$((ERRORS + 1)) ;;
   esac
 done
 

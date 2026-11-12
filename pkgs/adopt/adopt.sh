@@ -1,0 +1,218 @@
+#!/usr/bin/env bash
+# adopt: add this Mac as a darwin host in flake.nix
+#
+# A host in this flake is one entry in the `hosts` map in flake.nix: the key
+# is the machine's LocalHostName (what darwin-rebuild matches on), and the
+# value says how it differs from defaultDarwinSystem -- usually nothing, so
+# adopting a new Mac is one small block. This script writes that block, from
+# a template, so a new (or freshly reinstalled, renamed) Mac is:
+#
+#   nix run .#adopt                     # this Mac, default template
+#   nix run .#adopt -- MGM9JJ4V3R       # copy an existing host's entry
+#   nix run .#adopt -- ./host-body.nix  # body from a template file
+#   ./s                                 # build + switch onto it
+#
+# Idempotent: adopting a host that already has an entry changes nothing.
+set -euo pipefail
+
+usage() {
+  cat <<EOF
+Usage: adopt [TEMPLATE] [--host NAME] [--flake FILE] [--dry-run]
+
+Add the current Mac to the hosts map in flake.nix, creating its
+darwinConfiguration from a template.
+
+TEMPLATE is one of:
+  default          an entry that inherits everything (the default)
+  <existing host>  copy that host's entry from flake.nix (e.g. MGM9JJ4V3R)
+  <file>           a file whose contents become the entry's body
+
+Options:
+  --host NAME   host name to create (default: this Mac's LocalHostName,
+                via scutil, falling back to hostname -s)
+  --flake FILE  flake.nix to edit (default: ./flake.nix)
+  --dry-run     print the entry that would be added, change nothing
+  -h, --help    this help
+EOF
+}
+
+template="default"
+template_set=0
+host=""
+host_set=0
+flake="./flake.nix"
+flake_set=0
+dry_run=0
+while (( $# )); do
+  case "$1" in
+    --host)    [[ $# -ge 2 && "$2" != --* ]] || { echo "adopt: --host needs a value" >&2; exit 2; }
+               [[ -n "$2" ]] || { echo "adopt: --host value must not be empty" >&2; usage >&2; exit 2; }
+               if (( host_set )); then
+                 echo "adopt: --host may be given only once" >&2
+                 usage >&2
+                 exit 2
+               fi
+               host="$2"; host_set=1; shift ;;
+    --flake)   [[ $# -ge 2 && "$2" != --* ]] || { echo "adopt: --flake needs a value" >&2; exit 2; }
+               [[ -n "$2" ]] || { echo "adopt: --flake value must not be empty" >&2; usage >&2; exit 2; }
+               if (( flake_set )); then
+                 echo "adopt: --flake may be given only once" >&2
+                 usage >&2
+                 exit 2
+               fi
+               flake="$2"; flake_set=1; shift ;;
+    --dry-run) dry_run=1 ;;
+    -h|--help) usage; exit 0 ;;
+    -*)        echo "adopt: unknown option $1" >&2; usage >&2; exit 2 ;;
+    *)         if (( template_set )); then
+                 echo "adopt: unexpected extra argument '$1' (only one TEMPLATE may be given)" >&2
+                 usage >&2
+                 exit 2
+               fi
+               template="$1"; template_set=1 ;;
+  esac
+  shift
+done
+
+[[ -f "$flake" ]] || { echo "adopt: no flake at $flake (run from the repo root, or pass --flake)" >&2; exit 1; }
+
+# Write through a symlinked --flake to its target (#1557): a rename onto
+# the symlink would replace the link itself with a detached regular file,
+# leaving the real flake unchanged while reporting success. Resolve the
+# link chain (readlink with one argument is portable across GNU/BSD) and
+# write to the target instead; the link stays intact.
+write_flake="$flake"
+link_hops=0
+while [[ -L "$write_flake" ]]; do
+  link_hops=$((link_hops + 1))
+  if (( link_hops > 40 )); then
+    echo "adopt: too many symlinks resolving $flake" >&2; exit 1
+  fi
+  link_target="$(readlink "$write_flake")"
+  case "$link_target" in
+    /*) write_flake="$link_target" ;;
+    *)  write_flake="$(dirname "$write_flake")/$link_target" ;;
+  esac
+done
+
+# Preserve the original file's mode (#1557): forcing 644 would widen a
+# 600 flake on every edit. stat flags differ: GNU -c %a, BSD/macOS -f %Lp.
+orig_mode="$(stat -c %a "$write_flake" 2>/dev/null || stat -f %Lp "$write_flake")" ||
+  { echo "adopt: cannot stat $write_flake" >&2; exit 1; }
+
+# This Mac's name, the way darwin-rebuild matches it (flake.nix: darwin-
+# rebuild matches via scutil --get LocalHostName).
+if [[ -z "$host" ]]; then
+  if command -v scutil >/dev/null 2>&1; then
+    host="$(scutil --get LocalHostName)"
+  else
+    host="$(hostname -s)"
+  fi
+fi
+[[ "$host" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] ||
+  { echo "adopt: host name '$host' is not a valid flake attribute name" >&2; exit 2; }
+
+# The hosts-map key as written in flake.nix: a name that is a valid bare
+# Nix identifier ([a-zA-Z_][a-zA-Z0-9_'-]*, hyphens included) is written
+# bare; anything else the validation above accepts -- in practice a
+# digit-leading name like 3DPrinter (#1746) -- must be written as a
+# quoted attribute name, because a bare digit-leading key makes the
+# whole flake fail to parse. The validated charset contains no quote
+# or backslash, so quoting needs no escaping.
+attr_name() {
+  if [[ "$1" =~ ^[A-Za-z_][A-Za-z0-9_-]*$ ]]; then
+    printf '%s' "$1"
+  else
+    printf '"%s"' "$1"
+  fi
+}
+
+# Print the indented entry block for host $2 from template $1 to stdout.
+make_block() {
+  local tmpl="$1" name="$2"
+  local attr
+  attr="$(attr_name "$name")"
+  if [[ "$tmpl" == default ]]; then
+    cat <<EOF
+      $attr = {
+        # inherits default system "aarch64-darwin"
+        # extraModules = [ ];
+        # extraSpecialArgs = { };
+      };
+EOF
+  elif [[ -f "$tmpl" ]]; then
+    echo "      $attr = {"
+    sed 's/^/        /' "$tmpl" ||
+      { echo "adopt: cannot read template file '$tmpl'" >&2; return 1; }
+    echo "      };"
+  else
+    [[ "$tmpl" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] ||
+      { echo "adopt: template '$tmpl' is not a host name or a file" >&2; return 2; }
+    local block
+    block="$(awk -v n="$tmpl" '
+      $0 ~ "^      \"?" n "\"? = [{]" { found = 1; start = NR }
+      found { print }
+      found && NR == start && /};[[:space:]]*(#.*)?$/ { exit }
+      found && /^      };[[:space:]]*(#.*)?$/ { exit }
+    ' "$flake")"
+    [[ -n "$block" ]] ||
+      { echo "adopt: no host '$tmpl' in $flake to copy (existing: $(list_hosts))" >&2; return 1; }
+    sed "1s/^      [^ ]* = {/      $attr = {/" <<<"$block"
+  fi
+}
+
+# Host names currently in the hosts map, space-separated (for messages).
+list_hosts() {
+  awk '
+    /^    hosts = [{]$/ { in_hosts = 1; next }
+    in_hosts && /^    };$/ { exit }
+    in_hosts && /^      "?[A-Za-z0-9_-]+"? = [{]/ { name = $1; gsub(/"/, "", name); printf "%s ", name }
+  ' "$flake"
+}
+
+for existing in $(list_hosts); do
+  if [[ "$existing" == "$host" ]]; then
+    echo "adopt: $host is already a host in $flake; nothing to do"
+    exit 0
+  fi
+done
+
+block="$(make_block "$template" "$host")"
+
+if (( dry_run )); then
+  echo "adopt: would add to $flake (template: $template):"
+  echo "$block"
+  exit 0
+fi
+
+tmp="$(mktemp "${write_flake}.adopt.XXXXXX")"
+blockfile="$(mktemp "${write_flake}.adopt-block.XXXXXX")"
+trap 'rm -f "$tmp" "$blockfile"' EXIT
+printf '%s\n' "$block" >"$blockfile"
+# The block reaches awk through a file, never a -v assignment: macOS awk
+# (BWK) rejects a literal newline in a -v value ("newline in string"), so
+# the first version of this script died here on a Mac -- and its || handler
+# then misreported that as a missing hosts map (#1074). GNU awk and mawk
+# accept multiline -v, which is why Linux testing missed it.
+awk -v blockfile="$blockfile" '
+  /^    hosts = [{]$/ {
+    print
+    while ((getline line < blockfile) > 0) print line
+    close(blockfile)
+    done = 1
+    next
+  }
+  { print }
+  END { if (!done) exit 1 }
+' "$flake" >"$tmp" || { echo "adopt: no 'hosts = {' map found in $flake" >&2; exit 1; }
+chmod "$orig_mode" "$tmp"
+mv "$tmp" "$write_flake"
+trap - EXIT
+rm -f "$blockfile"
+
+# No nixfmt pass: the inserted block is written in nixfmt style already, and
+# flake.nix carries pre-existing formatting drift, so formatting the whole
+# file here would bury the one-entry change under unrelated reformatting.
+
+echo "adopt: added host $host to $flake (template: $template)"
+echo "adopt: next: nix eval .#darwinConfigurations.$(attr_name "$host").system.drvPath  # sanity, then ./s"

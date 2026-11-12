@@ -1,0 +1,177 @@
+#!/usr/bin/env bash
+# Regression test for simple-rebuild.sh's mode-flag parser (#1149).
+#
+# --build-only and --activate-only are documented alternatives
+# ([--build-only|--activate-only [GENERATION]]) but the parser assigned
+# mode unconditionally, so both together silently last-won:
+# `--build-only --activate-only` ran the sudo activation phase, the
+# reverse silently dropped to a build, a repeated --activate-only
+# silently discarded the first GENERATION, and
+# `--activate-only 5 --build-only` stranded the generation in a build
+# run, exit 0. The build/activate split is a privilege boundary
+# (no sudo vs sudo), so the parser now rejects all of those at parse
+# time with exit 2 naming the flags.
+#
+# This suite cannot drive the real script end to end (a valid control
+# would run a real nix build / darwin activation), so it extracts the
+# REAL parser segment from simple-rebuild.sh -- from `mode="all"`
+# through the GENERATION and HEALTH_TIMEOUT validation, stopping at the
+# end-of-parse marker comment -- and runs that segment under zsh, the
+# script's interpreter.
+# Nothing is a pasted copy: if the shipped parser changes, the
+# extracted segment changes with it, and a missing marker fails here.
+#
+# Run: ./simple-rebuild.test.sh
+# It is run by the flake check `simple-rebuild-tests`.
+set -uo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT="$SELF_DIR/simple-rebuild.sh"
+
+command -v zsh >/dev/null || { echo "zsh required" >&2; exit 1; }
+
+TMP_ROOT="$(mktemp -d)"
+trap 'rm -rf "$TMP_ROOT"' EXIT
+
+failures=0
+fail() { echo "FAIL: $1" >&2; failures=$((failures + 1)); }
+ok() { echo "ok: $1"; }
+
+# Extract the parser segment from the real script.
+SEGMENT="$TMP_ROOT/parser.zsh"
+awk '/^mode="all"/{f=1} /^# End of parse-time validation/{f=0} f' "$SCRIPT" >"$SEGMENT"
+[ -s "$SEGMENT" ] || { echo "could not extract parser segment from simple-rebuild.sh" >&2; exit 1; }
+grep -q 'seen_activate' "$SEGMENT" || fail "extracted segment lacks the #1149 mode-flag guards"
+grep -q 'HEALTH_TIMEOUT' "$SEGMENT" || fail "extracted segment lacks the HEALTH_TIMEOUT validation"
+
+# --- Ordering pin (#1316): parse + validation precede side effects ---
+line_of() { grep -n -m1 -- "$1" "$SCRIPT" | cut -d: -f1; }
+parse_line="$(line_of '^mode="all"')"
+gen_line="$(line_of 'GENERATION must be a positive integer')"
+ht_line="$(line_of 'HEALTH_TIMEOUT must be a positive integer')"
+reclaim_line="$(line_of '^reclaim_root_owned$')"
+gitadd_line="$(awk '/^  git add \.$/{print NR; exit}' "$SCRIPT")"
+token_line="$(line_of '^refresh_nix_access_token$')"
+if [ -n "$parse_line" ] && [ -n "$gen_line" ] && [ -n "$ht_line" ] && [ -n "$reclaim_line" ] \
+  && [ -n "$gitadd_line" ] && [ -n "$token_line" ] \
+  && [ "$parse_line" -lt "$reclaim_line" ] && [ "$parse_line" -lt "$gitadd_line" ] \
+  && [ "$parse_line" -lt "$token_line" ] && [ "$gen_line" -lt "$reclaim_line" ] \
+  && [ "$ht_line" -lt "$reclaim_line" ]; then
+  ok "parse + GENERATION + HEALTH_TIMEOUT validation precede reclaim/git add/token refresh (#1316)"
+else
+  fail "ordering pin (#1316): parse=$parse_line gen=$gen_line ht=$ht_line reclaim=$reclaim_line gitadd=$gitadd_line token=$token_line"
+fi
+
+PROBE="$TMP_ROOT/probe.zsh"
+cat >"$PROBE" <<EOF
+#!/usr/bin/env zsh
+source "$SEGMENT" "\$@"
+echo "mode=\$mode generation=\$generation no_commit=\$no_commit"
+EOF
+
+run() { # run <args...> -- sets OUT, ERR, STATUS
+  OUT="$(zsh "$PROBE" "$@" 2>"$TMP_ROOT/err")"; STATUS=$?
+  ERR="$(cat "$TMP_ROOT/err")"
+}
+
+expect_reject() { # expect_reject <label> <needle1> <needle2> <args...>
+  local label="$1" n1="$2" n2="$3"; shift 3
+  run "$@"
+  [ "$STATUS" -eq 2 ] || { fail "$label exited $STATUS (want 2)"; return; }
+  case "$ERR" in *"$n1"*) : ;; *) fail "$label stderr did not name $n1 (got: $ERR)"; return ;; esac
+  if [ -n "$n2" ]; then
+    case "$ERR" in *"$n2"*) : ;; *) fail "$label stderr did not name $n2 (got: $ERR)"; return ;; esac
+  fi
+  ok "$label rejected, exit 2, flags named"
+}
+
+expect_parse() { # expect_parse <label> <want mode=...> <args...>
+  local label="$1" want="$2"; shift 2
+  run "$@"
+  [ "$STATUS" -eq 0 ] || { fail "$label exited $STATUS (want 0; err: $ERR)"; return; }
+  [ "$OUT" = "$want" ] || { fail "$label parsed as '$OUT' (want '$want')"; return; }
+  ok "$label parses as $want"
+}
+
+# --- Conflicting / repeated mode flags are rejected at parse time ---
+expect_reject "--build-only --activate-only" "--build-only" "--activate-only" --build-only --activate-only
+expect_reject "--activate-only --build-only" "--activate-only" "--build-only" --activate-only --build-only
+expect_reject "--build-only --activate-only 5" "--build-only" "--activate-only" --build-only --activate-only 5
+expect_reject "--activate-only 5 --build-only (stranded generation)" "--activate-only" "--build-only" --activate-only 5 --build-only
+expect_reject "--activate-only 5 --activate-only 7" "--activate-only" "" --activate-only 5 --activate-only 7
+expect_reject "--activate-only --activate-only" "--activate-only" "" --activate-only --activate-only
+expect_reject "--no-commit --build-only --activate-only" "--build-only" "--activate-only" --no-commit --build-only --activate-only
+
+# --- Valid invocations parse exactly as before ----------------------
+expect_parse "no flags" "mode=all generation= no_commit=0"
+expect_parse "--build-only" "mode=build generation= no_commit=0" --build-only
+expect_parse "--activate-only" "mode=activate generation= no_commit=0" --activate-only
+expect_parse "--activate-only 5" "mode=activate generation=5 no_commit=0" --activate-only 5
+expect_parse "--no-commit" "mode=all generation= no_commit=1" --no-commit
+expect_parse "--no-commit --build-only" "mode=build generation= no_commit=1" --no-commit --build-only
+expect_parse "--build-only --no-commit" "mode=build generation= no_commit=1" --build-only --no-commit
+expect_parse "--activate-only 5 --no-commit" "mode=activate generation=5 no_commit=1" --activate-only 5 --no-commit
+
+# --- Pre-existing parser behaviour is intact ------------------------
+# GENERATION validation (#1022): non-numeric still exits 2, and
+# leading zeros are still normalised away.
+expect_reject "--activate-only abc" "GENERATION" "" --activate-only abc
+expect_parse "--activate-only 007" "mode=activate generation=7 no_commit=0" --activate-only 007
+expect_reject "--bogus" "usage:" "" --bogus
+
+# --- -h/--help: usage on stdout, exit 0, decided at parse time -------
+expect_help() { # expect_help <flag>
+  run "$1"
+  [ "$STATUS" -eq 0 ] || { fail "$1 exited $STATUS (want 0)"; return; }
+  case "$OUT" in *"usage:"*) ok "$1 prints usage, exit 0" ;; *) fail "$1 stdout lacked usage (got: $OUT)" ;; esac
+}
+expect_help --help
+expect_help -h
+
+# --- Error headline color gate follows stderr's tty + NO_COLOR state ----
+GATE="$TMP_ROOT/color-gate.zsh"
+awk '/^print_error\(\) \{$/ { capture=1 } capture { print } capture && /^}$/ { exit }' "$SCRIPT" >"$GATE"
+[ -s "$GATE" ] || { echo "could not extract print_error from simple-rebuild.sh" >&2; exit 1; }
+grep -Fq '[[ -t 2 && -z "${NO_COLOR:-}" ]]' "$GATE" \
+  || fail "error color gate must test stderr tty and NO_COLOR"
+grep -Fq 'print_error "==> build failed; nothing activated, nothing committed"' "$SCRIPT" \
+  || fail "build failure headline does not use print_error"
+grep -Fq 'print_error "==> $label is not up"' "$SCRIPT" \
+  || fail "agent failure headline does not use print_error"
+grep -Fq 'print_error "==> switch done and recorded, but $failed agent(s) are not up (above)" >&2' "$SCRIPT" \
+  || fail "activation health headline does not use print_error on stderr"
+
+GATE_PROBE="$TMP_ROOT/color-gate-probe.zsh"
+cat >"$GATE_PROBE" <<EOF
+source "$GATE"
+print_error "gate probe"
+EOF
+for gate_mode in captured no-color; do
+  if [ "$gate_mode" = no-color ]; then
+    NO_COLOR=1 zsh "$GATE_PROBE" >"$TMP_ROOT/gate.out" 2>"$TMP_ROOT/gate.err"
+  else
+    zsh "$GATE_PROBE" >"$TMP_ROOT/gate.out" 2>"$TMP_ROOT/gate.err"
+  fi
+  gate_err="$(cat "$TMP_ROOT/gate.err")"
+  [ ! -s "$TMP_ROOT/gate.out" ] || fail "$gate_mode error headline wrote to stdout"
+  [ "$gate_err" = "gate probe" ] || fail "$gate_mode stderr was '$gate_err' (want plain 'gate probe')"
+  case "$gate_err" in
+    *$'\033'*) fail "$gate_mode captured stderr contains ANSI escape bytes" ;;
+    *) ok "$gate_mode stderr is plain and escape-free" ;;
+  esac
+done
+
+# --- HEALTH_TIMEOUT validation runs inside the extracted segment -----
+OUT="$(HEALTH_TIMEOUT=abc zsh "$PROBE" 2>"$TMP_ROOT/err")"; STATUS=$?
+ERR="$(cat "$TMP_ROOT/err")"
+if [ "$STATUS" -eq 2 ]; then
+  case "$ERR" in *"HEALTH_TIMEOUT"*) ok "HEALTH_TIMEOUT=abc rejected at parse time, exit 2" ;; *) fail "HEALTH_TIMEOUT=abc stderr did not name HEALTH_TIMEOUT (got: $ERR)" ;; esac
+else
+  fail "HEALTH_TIMEOUT=abc exited $STATUS (want 2)"
+fi
+
+if [ "$failures" -gt 0 ]; then
+  echo "$failures simple-rebuild parser check(s) failed" >&2
+  exit 1
+fi
+echo "all simple-rebuild parser checks passed"

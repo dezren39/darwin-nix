@@ -30,6 +30,12 @@
 
           buildPhase = ''
             export HOME=$(mktemp -d)
+            # This build installs from bun.lock ONLY, while Renovate
+            # updates package-lock.json ONLY (#781): the two lockfiles
+            # drift unless bun.lock is regenerated (`bun install`)
+            # when a Renovate PR lands. The lock-sync check below
+            # (`nix flake check` here, or check-lock-sync.py) fails
+            # when they resolve a dependency to different versions.
             bun install --frozen-lockfile 2>/dev/null || bun install
             bun x tsc -p ./
           '';
@@ -54,6 +60,61 @@
             fi
           done
         '';
+
+        # #781: fail when bun.lock and package-lock.json resolve the
+        # same package.json dependency to different versions.
+        checks.lock-sync =
+          pkgs.runCommand "buffer-backup-lock-sync"
+            {
+              nativeBuildInputs = [ pkgs.python3 ];
+            }
+            ''
+              python3 ${./check-lock-sync.py} ${./.}
+              touch $out
+            '';
+
+        # #1141: check-lock-sync.test.py -- the invocation probes for
+        # check-lock-sync.py (unknown flag / extra argument / missing
+        # dir / missing lockfile must exit 2, never traceback at the
+        # exit-1 "out of sync" signal). The test locates the script
+        # relative to its own location, so copy both into the check
+        # tree side by side, like cleanup-count below.
+        checks.check-lock-sync-args =
+          pkgs.runCommand "buffer-backup-check-lock-sync-args"
+            {
+              nativeBuildInputs = [ pkgs.python3 ];
+            }
+            ''
+              cp ${./check-lock-sync.py} check-lock-sync.py
+              cp ${./check-lock-sync.test.py} check-lock-sync.test.py
+              cp ${./package.json} package.json
+              cp ${./package-lock.json} package-lock.json
+              cp ${./bun.lock} bun.lock
+              python3 check-lock-sync.test.py
+              touch $out
+            '';
+
+        # #1013: cleanup-count.test.mjs -- the #1002 regression suite
+        # for cleanupCount one-pass convergence (plus the cleanupSize
+        # control) -- was run by nothing: no flake check, workflow, or
+        # npm script referenced it, so an extension.ts change could
+        # silently break the #1002 post-condition and merge green.
+        # Run the real suite here, following the house pattern (#965):
+        # the test reads src/extension.ts relative to its own
+        # location, so copy both into the check tree in that layout.
+        # The buffer-backup workflow also runs the suite directly.
+        checks.cleanup-count =
+          pkgs.runCommand "buffer-backup-cleanup-count"
+            {
+              nativeBuildInputs = [ pkgs.nodejs_22 ];
+            }
+            ''
+              mkdir -p src
+              cp ${./cleanup-count.test.mjs} cleanup-count.test.mjs
+              cp ${./src/extension.ts} src/extension.ts
+              node cleanup-count.test.mjs
+              touch $out
+            '';
 
         devShells.default = pkgs.mkShell {
           packages = [

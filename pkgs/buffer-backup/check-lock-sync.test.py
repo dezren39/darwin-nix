@@ -1,0 +1,313 @@
+#!/usr/bin/env python3
+"""Invocation probes for check-lock-sync.py (#1141).
+
+Before #1141 the script validated nothing about its invocation:
+unknown flags and missing directories crashed with a traceback at
+exit 1 — the same code as "lockfiles out of sync", which the
+bun-sync workflow branches on — and extra arguments were silently
+ignored. These probes pin the new contract:
+
+- --help prints usage, exit 0.
+- An unknown flag or an extra positional argument exits 2 with a
+  usage line naming the offending argument, before any file is read.
+- A missing package dir or a missing package.json / package-lock.json
+  / bun.lock exits 2 with a one-line error naming the file — no
+  traceback.
+- The old signals are unchanged: 0 = in sync, 1 = out of sync with
+  the original message.
+- A package file that is valid JSON with the wrong shape (non-object
+  top level / dependencies / packages / entry) exits 2 naming the
+  file, no traceback (#1159).
+- A non-UTF-8 package.json, package-lock.json, or bun.lock exits 2
+  naming that file and noting it is not valid UTF-8, no traceback
+  (#1210) -- mirroring the check-pin-sync probes (#1189).
+- A package-lock entry whose version is present but not a string
+  exits 2 naming the file and entry, with no regenerate advice
+  (#1204) -- malformed input, not drift.
+- A bun.lock that yields zero package entries while package.json
+  declares dependencies (garbage text, truncated document) exits 2
+  naming bun.lock, never the exit-1 drift report; a zero-dependency
+  package is not newly failed (#1249).
+
+Run: python3 check-lock-sync.test.py  (exit 0 = all probes passed)
+"""
+
+import json
+import os
+import subprocess
+import sys
+import tempfile
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+SCRIPT = os.path.join(HERE, "check-lock-sync.py")
+FAILURES = []
+
+
+def run(*args):
+    return subprocess.run(
+        [sys.executable, SCRIPT, *args], capture_output=True, text=True
+    )
+
+
+def check(name, ok, detail=""):
+    if ok:
+        print(f"ok: {name}")
+    else:
+        FAILURES.append(name)
+        print(f"FAIL: {name} {detail}")
+
+
+def expect_invocation_error(name, result, needle):
+    check(
+        name,
+        result.returncode == 2
+        and needle in result.stderr
+        and "Traceback" not in result.stderr,
+        f"(rc={result.returncode}, stderr={result.stderr!r})",
+    )
+
+
+def write(path, text):
+    with open(path, "w") as fh:
+        fh.write(text)
+
+
+def write_bytes(path, data):
+    with open(path, "wb") as fh:
+        fh.write(data)
+
+
+def seed_package(dirpath, bun_version="1.0.0", with_bun=True):
+    os.makedirs(dirpath, exist_ok=True)
+    write(
+        os.path.join(dirpath, "package.json"),
+        json.dumps({"dependencies": {"example-dep": "^1.0.0"}}),
+    )
+    write(
+        os.path.join(dirpath, "package-lock.json"),
+        json.dumps(
+            {"packages": {"node_modules/example-dep": {"version": "1.0.0"}}}
+        ),
+    )
+    if with_bun:
+        write(
+            os.path.join(dirpath, "bun.lock"),
+            '"example-dep": ["example-dep@%s", "", {}, "sha512-x"]' % bun_version,
+        )
+
+
+def main():
+    # --help prints usage and exits 0.
+    result = run("--help")
+    check(
+        "--help prints usage, exit 0",
+        result.returncode == 0 and "usage:" in result.stdout,
+        f"(rc={result.returncode}, stdout={result.stdout!r})",
+    )
+
+    # Unknown flag: exit 2 naming the flag, no traceback.
+    expect_invocation_error("unknown flag", run("--bogus"), "--bogus")
+
+    # Extra positional argument: exit 2 naming it. The first dir is a
+    # real in-sync tree, so exit 0 here would prove the second
+    # argument was silently dropped (the pre-#1141 behaviour).
+    expect_invocation_error(
+        "extra argument",
+        run(HERE, "/nonexistent-xyz"),
+        "/nonexistent-xyz",
+    )
+
+    # Empty-string dir must not silently become the caller's cwd.
+    expect_invocation_error("empty argument", run(""), "empty")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # Missing dir: exit 2 naming the missing package.json.
+        missing = os.path.join(tmp, "nope")
+        expect_invocation_error(
+            "missing dir", run(missing), os.path.join(missing, "package.json")
+        )
+
+        # Missing lockfile: exit 2 naming bun.lock.
+        partial = os.path.join(tmp, "partial")
+        seed_package(partial, with_bun=False)
+        expect_invocation_error(
+            "missing bun.lock", run(partial), os.path.join(partial, "bun.lock")
+        )
+
+        # Wrong-shaped package files (#1159): valid JSON, wrong shape
+        # must exit 2 naming the offending file, never traceback at 1.
+        def wrong_shape(name, filename, text, needle):
+            d = os.path.join(tmp, name)
+            seed_package(d)
+            write(os.path.join(d, filename), text)
+            expect_invocation_error(name, run(d), needle)
+
+        wrong_shape(
+            "package.json is a list", "package.json", "[]",
+            os.path.join("package.json"),
+        )
+        wrong_shape(
+            "package.json dependencies is a list", "package.json",
+            json.dumps({"dependencies": []}),
+            os.path.join("package.json"),
+        )
+        wrong_shape(
+            "package-lock.json is a list", "package-lock.json", "[]",
+            os.path.join("package-lock.json"),
+        )
+        wrong_shape(
+            "package-lock packages is a list", "package-lock.json",
+            json.dumps({"packages": []}),
+            os.path.join("package-lock.json"),
+        )
+        wrong_shape(
+            "package-lock entry is not an object", "package-lock.json",
+            json.dumps({"packages": {"node_modules/example-dep": "1.0.0"}}),
+            os.path.join("package-lock.json"),
+        )
+
+        # Malformed JSON (#1494): a raw JSONDecodeError message names
+        # no file -- exit 2 must still name the offending file, for
+        # package-lock.json and for package.json alike.
+        for name, filename in (
+            ("malformed package-lock.json", "package-lock.json"),
+            ("malformed package.json", "package.json"),
+        ):
+            d = os.path.join(tmp, name.replace(" ", "-").replace(".", "_"))
+            seed_package(d)
+            write(os.path.join(d, filename), "{ not json")
+            expect_invocation_error(
+                name, run(d), os.path.join(d, filename)
+            )
+
+        # Non-string entry version (#1204): malformed input, exit 2
+        # naming package-lock.json -- never exit-1 drift with the
+        # "Regenerate bun.lock" remedy, which cannot fix a bad file.
+        for name, value in (("number", 123), ("list", ["1.0.0"]),
+                            ("bool", True)):
+            d = os.path.join(tmp, f"nonstring-version-{name}")
+            seed_package(d)
+            write(
+                os.path.join(d, "package-lock.json"),
+                json.dumps(
+                    {"packages": {
+                        "node_modules/example-dep": {"version": value}}}
+                ),
+            )
+            result = run(d)
+            expect_invocation_error(
+                f"non-string entry version ({name})", result,
+                os.path.join("package-lock.json"),
+            )
+            check(
+                f"non-string entry version ({name}) names the entry",
+                "node_modules/example-dep" in result.stderr
+                and "Regenerate" not in result.stderr,
+                f"(stderr={result.stderr!r})",
+            )
+
+        # Non-UTF-8 package files (#1210): exit 2 naming the corrupt
+        # file and noting it is not valid UTF-8, no traceback -- the
+        # pre-fix error carried only a byte position, naming no file.
+        for filename in ("package.json", "package-lock.json", "bun.lock"):
+            d = os.path.join(tmp, f"non-utf8-{filename}")
+            seed_package(d)
+            write_bytes(os.path.join(d, filename), bytes([255, 254]) + b" not utf-8")
+            result = run(d)
+            expect_invocation_error(
+                f"non-UTF-8 {filename}", result, os.path.join(d, filename)
+            )
+            check(
+                f"non-UTF-8 {filename} notes the encoding problem",
+                "not valid UTF-8" in result.stderr,
+                f"(stderr={result.stderr!r})",
+            )
+
+        # bun.lock extracts zero entries (#1249): garbage, truncated, or
+        # empty content is a malformed document -- exit 2 naming the file,
+        # never the exit-1 drift report whose remedy ("regenerate
+        # bun.lock") cannot be applied to a document that was never read.
+        for name, text in (
+            ("garbage bun.lock", "this is not a lockfile at all\n"),
+            (
+                "truncated bun.lock",
+                '{\n  "lockfileVersion": 1,\n  "workspaces": {\n',
+            ),
+            ("empty bun.lock", ""),
+        ):
+            d = os.path.join(tmp, name.replace(" ", "-"))
+            seed_package(d)
+            write(os.path.join(d, "bun.lock"), text)
+            result = run(d)
+            expect_invocation_error(name, result, os.path.join(d, "bun.lock"))
+            check(
+                f"{name} is not reported as drift",
+                "Regenerate" not in result.stderr
+                and "lockfiles out of sync" not in result.stderr,
+                f"(stderr={result.stderr!r})",
+            )
+
+        # A zero-dependency package is not newly failed (#1249): with no
+        # declared dependency there is nothing for bun entries to disagree
+        # with, so an entry-less bun.lock stays a clean exit 0.
+        nodeps = os.path.join(tmp, "zero-deps")
+        os.makedirs(nodeps, exist_ok=True)
+        write(
+            os.path.join(nodeps, "package.json"),
+            json.dumps({"dependencies": {}}),
+        )
+        write(
+            os.path.join(nodeps, "package-lock.json"),
+            json.dumps({"packages": {}}),
+        )
+        write(
+            os.path.join(nodeps, "bun.lock"),
+            '{\n  "lockfileVersion": 1\n}\n',
+        )
+        result = run(nodeps)
+        check(
+            "zero-dependency package with no bun entries exits 0",
+            result.returncode == 0 and "lockfiles in sync" in result.stdout,
+            f"(rc={result.returncode}, stderr={result.stderr!r})",
+        )
+
+        # In-sync fixture: exit 0.
+        synced = os.path.join(tmp, "synced")
+        seed_package(synced)
+        result = run(synced)
+        check(
+            "in-sync fixture exits 0",
+            result.returncode == 0 and "lockfiles in sync" in result.stdout,
+            f"(rc={result.returncode}, stdout={result.stdout!r})",
+        )
+
+        # Desynced fixture: exit 1 with the original out-of-sync message.
+        desynced = os.path.join(tmp, "desynced")
+        seed_package(desynced, bun_version="2.0.0")
+        result = run(desynced)
+        check(
+            "desynced fixture exits 1, message unchanged",
+            result.returncode == 1
+            and "lockfiles out of sync" in result.stderr,
+            f"(rc={result.returncode}, stderr={result.stderr!r})",
+        )
+
+    # Baselines on the real tree: no-arg and single-dir calls exit 0.
+    for name, args in (("no-arg baseline", ()), ("dir baseline", (HERE,))):
+        result = run(*args)
+        check(
+            name,
+            result.returncode == 0 and "lockfiles in sync" in result.stdout,
+            f"(rc={result.returncode}, stdout={result.stdout!r}, "
+            f"stderr={result.stderr!r})",
+        )
+
+    if FAILURES:
+        print(f"{len(FAILURES)} probe(s) failed")
+        return 1
+    print("all probes passed")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

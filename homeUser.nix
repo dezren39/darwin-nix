@@ -125,14 +125,42 @@ lib.recursiveUpdate {
           run /bin/launchctl kickstart -k "gui/$(/usr/bin/id -u)/org.nixos.mcpx" || true
         fi
       '';
-      installPlaywright = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
-        run ${pkgs.nodejs}/bin/npm install -g playwright@latest 2>/dev/null || true
+      # Every other MCP client (Copilot CLI, Claude Code, Codex, Zed) gets mcpx
+      # as its only MCP server, `mcpx --config <that file> serve`; see
+      # mcp-clients.py. Real files the clients also write, so only their MCP
+      # key is set, on every switch. dezren39/darwin-nix#671.
+      mcpClients = lib.hm.dag.entryAfter [ "mcpxConfig" ] ''
+        run ${pkgs.bash}/bin/bash ${./mcp-clients-activation.sh} \
+          ${pkgs.python3}/bin/python3 ${./mcp-clients.py} \
+          ${lib.getExe' inputs.self.packages.${system}.service-events "service-event"}
       '';
       # installGhCopilot: gh copilot is now built into gh (>=2.65) and executes
       # the native `copilot` binary from PATH (managed via copilot-cli cask).
-      installPlannotator = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
-        run ${pkgs.curl}/bin/curl -fsSL https://plannotator.ai/install.sh | run ${pkgs.bash}/bin/bash 2>/dev/null || true
+      #
+      # Migration for the removed installPlaywright entry (Codex P2 on
+      # PR #1445): the old entry's `npm install -g` left a mutable
+      # `playwright` in ~/.npm-global/bin, and homePrograms.nix
+      # prepends that directory to PATH, so the stale executable would
+      # shadow the pinned playwright-test CLI indefinitely. Remove
+      # exactly the artifacts that entry created -- the bin shim and
+      # the package dirs (playwright-core is Playwright's own
+      # dependency) -- with no network and no npm invocation.
+      removeStaleNpmPlaywright = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+        run /bin/rm -f "$HOME/.npm-global/bin/playwright"
+        run /bin/rm -rf "$HOME/.npm-global/lib/node_modules/playwright" "$HOME/.npm-global/lib/node_modules/playwright-core"
       '';
+      # No installPlaywright / installPlannotator activation entries
+      # (#1433): activation used to run an npm global install of Playwright's
+      # mutable latest tag and the Plannotator install script piped
+      # straight to bash on every
+      # switch -- mutable versions, a network dependency for routine
+      # switches, remote shell code in the user account, and failures
+      # swallowed by `2>/dev/null || true`. Playwright now comes from
+      # the pinned nixpkgs playwright-test in systemPackages.nix (with
+      # playwright-driver.browsers, already installed there), and
+      # Plannotator is installed or updated only by explicitly running
+      # `plannotator-setup` (also systemPackages.nix), which surfaces
+      # installer failures instead of suppressing them.
       setupSidePulse = mkSidePulseActivation { providers = sidepulseProviders; };
       installAltTab = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
         app="$HOME/Applications/AltTab.app"
@@ -178,6 +206,29 @@ lib.recursiveUpdate {
       # the real key from ~/.config/cai-claude-apim-proxy/key.<env>.
       ANTHROPIC_BASE_URL = "http://127.0.0.1:8787";
       ANTHROPIC_API_KEY = "placeholder-replaced-by-proxy";
+      # OpenCode feature flags (Drew, 2026-10-20): both web-search backends
+      # (Exa + Parallel) so the websearch tool works with any provider, and
+      # the interesting experimental features. OPENCODE_EXPERIMENTAL is the
+      # umbrella (code mode already keys off it). NATIVE_LLM is deliberately
+      # not enabled yet.
+      OPENCODE_ENABLE_EXA = "1";
+      OPENCODE_ENABLE_PARALLEL = "1";
+      OPENCODE_ENABLE_EXPERIMENTAL_MODELS = "1";
+      OPENCODE_EXPERIMENTAL = "1";
+      OPENCODE_EXPERIMENTAL_PARALLEL = "1";
+      OPENCODE_EXPERIMENTAL_PLAN_MODE = "1";
+      OPENCODE_EXPERIMENTAL_SCOUT = "1";
+      OPENCODE_EXPERIMENTAL_WORKSPACES = "1";
+      OPENCODE_EXPERIMENTAL_LSP_TOOL = "1";
+      OPENCODE_EXPERIMENTAL_OXFMT = "1";
+      OPENCODE_EXPERIMENTAL_EXA = "1";
+      OPENCODE_EXPERIMENTAL_EVENT_SYSTEM = "1";
+      OPENCODE_EXPERIMENTAL_ICON_DISCOVERY = "1";
+      OPENCODE_EXPERIMENTAL_DISABLE_COPY_ON_SELECT = "1";
+      # File watcher off by default (Drew, 2026-10-20): the working trees
+      # are giant, and watching costs more than the live-external-edit
+      # awareness it buys. Diffs are git-computed on demand either way.
+      OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER = "1";
 
       # Go: user-local install directory
       GOPATH = "$HOME/go";
@@ -466,10 +517,14 @@ lib.recursiveUpdate {
        bind-key -n 'C-j' if-shell "$is_vim" 'send-keys C-j'  'select-pane -D'
        bind-key -n 'C-k' if-shell "$is_vim" 'send-keys C-k'  'select-pane -U'
        bind-key -n 'C-l' if-shell "$is_vim" 'send-keys C-l'  'select-pane -R'
-       tmux_version='$(tmux -V | sed -En "s/^tmux ([0-9]+(.[0-9]+)?).*TODO_REMOVE_THIS_BLOCK/\1/p")'
-       if-shell -b '[ "$(echo "$tmux_version < 3.0" | bc)" = 1 ]' \
+       # tmux config assignments are never shell-evaluated, so the old
+       # tmux_version line stayed a literal string and both bc gates below
+       # it silently never fired (#1752). Ask the shell directly instead:
+       # if-shell -b runs its command with /bin/sh, which parses the real
+       # tmux -V output at load time.
+       if-shell -b 'tmux -V | grep -Eq "^tmux (next-)?[12][.]"' \
          "bind-key -n 'C-\\' if-shell \"$is_vim\" 'send-keys C-\\'  'select-pane -l'"
-       if-shell -b '[ "$(echo "$tmux_version >= 3.0" | bc)" = 1 ]' \
+       if-shell -b 'tmux -V | grep -Eq "^tmux (next-)?([3-9]|[1-9][0-9])"' \
          "bind-key -n 'C-\\' if-shell \"$is_vim\" 'send-keys C-\\\\'  'select-pane -l'"
 
        bind-key -T copy-mode-vi 'C-h' select-pane -L

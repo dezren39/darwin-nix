@@ -19,6 +19,50 @@ class TestValidateConfig:
         assert errors == []
         assert warnings == []
 
+    def test_validate_config_max_depth_bool(self):
+        """error when max-depth is a bool (#1241).
+
+        bool is an int subclass, so true silently acted as depth 1.
+        """
+        cfg = {"max-depth": True}
+        errors, warnings = flake_tidy.validate_config(cfg)
+        assert len(errors) == 1
+        assert "max-depth" in errors[0]
+        assert "bool" in errors[0]
+
+    def test_validate_config_max_depth_non_integer_float(self):
+        """error when max-depth is a non-integer float (#1241)."""
+        cfg = {"max-depth": 2.5}
+        errors, warnings = flake_tidy.validate_config(cfg)
+        assert len(errors) == 1
+        assert "max-depth" in errors[0]
+
+    def test_validate_config_max_depth_nan(self):
+        """error when max-depth is NaN (#1241).
+
+        json.load accepts the NaN literal; NaN < 0 is False, so the old
+        range check passed it and depth > NaN was always False, silently
+        disabling the depth limit.
+        """
+        cfg = json.loads('{"max-depth": NaN}')
+        errors, warnings = flake_tidy.validate_config(cfg)
+        assert len(errors) == 1
+        assert "max-depth" in errors[0]
+
+    def test_validate_config_max_depth_infinity(self):
+        """error when max-depth is +/-Infinity (#1241)."""
+        for value in (float("inf"), float("-inf")):
+            cfg = {"max-depth": value}
+            errors, warnings = flake_tidy.validate_config(cfg)
+            assert len(errors) == 1
+            assert "max-depth" in errors[0]
+
+    def test_validate_config_max_depth_non_negative_ints_pass(self):
+        """non-negative int max-depth (incl. 0 = unlimited) passes (#1241)."""
+        for value in (0, 6):
+            errors, warnings = flake_tidy.validate_config({"max-depth": value})
+            assert errors == []
+
     def test_validate_config_max_depth_string(self):
         """error when max-depth is string."""
         cfg = {"max-depth": "six"}
@@ -35,6 +79,45 @@ class TestValidateConfig:
         assert len(warnings) == 1
         assert "unknown config key" in warnings[0]
         assert "unknown-option" in warnings[0]
+
+    def test_validate_config_empty_include_entry(self):
+        """error when an include entry is an empty string (#1239).
+
+        The empty name matches nothing, so a config carrying it made
+        --check pass vacuously on a flake needing changes.
+        """
+        cfg = {"include": {"input": [""]}}
+        errors, warnings = flake_tidy.validate_config(cfg)
+        assert len(errors) == 1
+        assert "include.input" in errors[0]
+
+    def test_validate_config_non_string_exclude_entry(self):
+        """error when an exclude entry is not a string (#1239)."""
+        cfg = {"exclude": {"input": [42]}}
+        errors, warnings = flake_tidy.validate_config(cfg)
+        assert len(errors) == 1
+        assert "exclude.input" in errors[0]
+        assert "42" in errors[0]
+
+    def test_validate_config_empty_exclude_entry(self):
+        """error when an exclude entry is an empty string (#1239).
+
+        The empty exclude silently dropped real proposals (2 of the
+        sample flake's 4) instead of being rejected.
+        """
+        cfg = {"exclude": {"dedup": ["nixpkgs", ""]}}
+        errors, warnings = flake_tidy.validate_config(cfg)
+        assert len(errors) == 1
+        assert "exclude.dedup" in errors[0]
+
+    def test_validate_config_well_formed_names_pass(self):
+        """well-formed include/exclude names are unchanged (#1239)."""
+        cfg = {
+            "include": {"input": ["nixpkgs", "*"]},
+            "exclude": {"input": ["self"], "follows": ["a.nixpkgs"]},
+        }
+        errors, warnings = flake_tidy.validate_config(cfg)
+        assert errors == []
 
     def test_validate_config_bad_include_type(self):
         """error when include.input is not list."""
@@ -124,6 +207,33 @@ class TestLoadConfigFile:
         path.write_text("{not json")
         with pytest.raises(flake_tidy.ConfigLoadError):
             flake_tidy.load_config(str(tmp_path), config_file=str(path))
+
+    def test_non_utf8_config_file_is_fatal(self, tmp_path):
+        path = tmp_path / "cfg.json"
+        path.write_bytes(b'{"max-depth": 3}' + b"\xff")
+        with pytest.raises(flake_tidy.ConfigLoadError, match="not valid UTF-8"):
+            flake_tidy.load_config(str(tmp_path), config_file=str(path))
+
+    def test_empty_config_file_is_fatal_even_with_env_set(self, tmp_path, monkeypatch):
+        """load_config(config_file='') rejects naming --config (#1233).
+
+        The empty explicit value must not fall through the falsy chain
+        to $FLAKE_TIDY_CONFIG: the env config is a different config
+        from the one the caller asked for.
+        """
+        path = tmp_path / "cfg.json"
+        path.write_text(json.dumps({"max-depth": 3}))
+        monkeypatch.setenv("FLAKE_TIDY_CONFIG", str(path))
+        with pytest.raises(flake_tidy.ConfigLoadError, match="--config"):
+            flake_tidy.load_config(str(tmp_path), config_file="")
+
+    def test_empty_config_file_is_fatal_without_env(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("FLAKE_TIDY_CONFIG", raising=False)
+        monkeypatch.setattr(
+            flake_tidy.subprocess, "run", _fake_run_failing
+        )
+        with pytest.raises(flake_tidy.ConfigLoadError, match="--config"):
+            flake_tidy.load_config(str(tmp_path), config_file="")
 
 
 class TestLoadConfigStrict:
@@ -225,6 +335,17 @@ class TestMergeCLI:
         # Dedup/flatten should remain unchanged
         assert result["include"]["dedup"] == ["*"]
 
+    def test_merge_cli_negative_max_depth_rejected(self, default_config):
+        """CLI --max-depth < 0 is rejected at merge time (#1224).
+
+        Pins the programmatic path (a hand-built Namespace bypasses the
+        parser type) to the same "max-depth must be >= 0" rejection the
+        config validator gives the config-file spelling.
+        """
+        args = self._make_args(max_depth=-1)
+        with pytest.raises(ValueError, match="max-depth must be >= 0"):
+            flake_tidy.merge_cli_into_config(default_config, args)
+
     def test_merge_cli_excludes_append(self, default_config):
         """CLI --exclude-input appends to config."""
         # Pre-seed an exclusion in config
@@ -234,3 +355,50 @@ class TestMergeCLI:
         assert "self" in result["exclude"]["input"]
         assert "nixpkgs-unstable" in result["exclude"]["input"]
         assert len(result["exclude"]["input"]) == 2
+
+
+class TestNonUtf8ConfigMain:
+    """A non-UTF-8 explicit config exits 2 naming the file, no traceback (#1251)."""
+
+    @pytest.mark.parametrize("extra_args", [["--check"], []], ids=["check", "non-check"])
+    def test_non_utf8_config_exit_2(self, tmp_path, monkeypatch, capsys, extra_args):
+        from unittest.mock import patch
+
+        (tmp_path / "flake.nix").write_text("{ inputs = {}; outputs = _: {}; }\n")
+        lock = {"nodes": {"root": {"inputs": {}}}, "root": "root", "version": 7}
+        (tmp_path / "flake.lock").write_text(json.dumps(lock))
+        cfg = tmp_path / "badcfg.json"
+        cfg.write_bytes(b'{"max-depth": 3}' + b"\xff")
+        argv = ["flake-tidy", *extra_args, "--config", str(cfg), "--flake-dir", str(tmp_path)]
+        monkeypatch.setattr(sys, "argv", argv)
+        with patch.object(flake_tidy, "run_nixfmt", return_value=None):
+            with pytest.raises(SystemExit) as excinfo:
+                flake_tidy.main()
+        out, err = capsys.readouterr()
+        assert excinfo.value.code == 2
+        assert "badcfg.json" in err
+        assert "Traceback" not in out + err
+
+
+class TestNonUtf8FlakeNixMain:
+    @pytest.mark.parametrize("extra_args", [["--check"], []], ids=["check", "non-check"])
+    def test_non_utf8_flake_nix_exit_2(self, tmp_path, monkeypatch, capsys, extra_args):
+        from unittest.mock import patch
+
+        (tmp_path / "flake.nix").write_bytes(b"{ inputs = {}; outputs = _: {}; }\n\xff")
+        lock = {"nodes": {"root": {"inputs": {}}}, "root": "root", "version": 7}
+        (tmp_path / "flake.lock").write_text(json.dumps(lock))
+        cfg = tmp_path / "cfg.json"
+        cfg.write_text("{}")
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["flake-tidy", *extra_args, "--config", str(cfg), "--flake-dir", str(tmp_path)],
+        )
+        with patch.object(flake_tidy, "run_nixfmt", return_value=None):
+            with pytest.raises(SystemExit) as excinfo:
+                flake_tidy.main()
+        out, err = capsys.readouterr()
+        assert excinfo.value.code == 2
+        assert "flake.nix" in err
+        assert "Traceback" not in out + err

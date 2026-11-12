@@ -4,12 +4,20 @@
 # and selectively reinstalls only the broken ones.
 set -uo pipefail
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-BLUE='\033[0;34m'
-BOLD='\033[1m'
-NC='\033[0m'
+# Colors only on a terminal, and never when NO_COLOR is set
+# (https://no-color.org) -- Palette (#1465). Piped or logged output stays
+# plain text: raw escapes corrupt log files and are noise to screen
+# readers. Same gate opencode-share already used for its tty half.
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+  RED='\033[0;31m'
+  GREEN='\033[0;32m'
+  YELLOW='\033[0;33m'
+  BLUE='\033[0;34m'
+  BOLD='\033[1m'
+  NC='\033[0m'
+else
+  RED='' GREEN='' YELLOW='' BLUE='' BOLD='' NC=''
+fi
 
 DRY_RUN=false
 QUIET=false
@@ -36,16 +44,23 @@ Examples:
   brew-repair -s 1password        # Fix everything except 1password
   brew-repair -q -n               # Quietly list only broken casks
 EOF
-  exit 0
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -n|--dry-run) DRY_RUN=true; shift ;;
     -q|--quiet) QUIET=true; shift ;;
-    -s|--skip) SKIP_LIST+=("$2"); shift 2 ;;
-    -h|--help) usage ;;
-    *) echo "Unknown option: $1"; usage ;;
+    -s|--skip)
+      # NOTE (#1220): an empty value (-s "" / --skip "") is not a cask
+      # name either; reject it with the same parse error.
+      if [[ $# -lt 2 || -z "${2:-}" || "$2" == -* ]]; then
+        echo "brew-repair: $1 requires a cask name" >&2
+        usage >&2
+        exit 2
+      fi
+      SKIP_LIST+=("$2"); shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "brew-repair: unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
 
@@ -60,8 +75,24 @@ is_skipped() {
 echo -e "${BOLD}${BLUE}brew-repair${NC} — scanning installed casks..."
 echo ""
 
-# Get all installed casks
-mapfile -t CASKS < <(brew list --cask 2>/dev/null)
+# Get all installed casks. Capture the output with its exit status
+# preserved (#949): the old process substitution hid a failed
+# `brew list` — its status was invisible and its stderr discarded —
+# so brew breakage looked exactly like an empty machine and the run
+# printed "No casks installed." with exit 0. Mirror the #926 handling
+# below: name the failing step on stderr, surface brew's own stderr,
+# and exit 1. A genuinely empty successful list keeps the path below.
+LISTFILE=$(mktemp)
+LISTERR=$(mktemp)
+trap 'rm -f "$LISTFILE" "$LISTERR"' EXIT
+
+if ! brew list --cask > "$LISTFILE" 2> "$LISTERR"; then
+  echo "brew-repair: error: 'brew list' failed — installed casks could not be enumerated" >&2
+  [[ -s "$LISTERR" ]] && sed 's/^/  /' "$LISTERR" >&2
+  exit 1
+fi
+
+mapfile -t CASKS < "$LISTFILE"
 
 if [[ ${#CASKS[@]} -eq 0 ]]; then
   echo "No casks installed."
@@ -75,18 +106,66 @@ echo ""
 # brew info may return different token names (e.g. docker→docker-desktop)
 # so we also track the original installed name→actual token mapping
 TMPFILE=$(mktemp)
-trap 'rm -f "$TMPFILE"' EXIT
+INFOFILE=$(mktemp)
+ERRFILE=$(mktemp)
+RENAMEFILE=$(mktemp)
+trap 'rm -f "$TMPFILE" "$INFOFILE" "$ERRFILE" "$RENAMEFILE" "$LISTFILE" "$LISTERR"' EXIT
 
-brew info --json=v2 --cask "${CASKS[@]}" 2>/dev/null | python3 -c "
-import json, sys
+# The healthy/broken verdict is only sound if this scan actually ran, so
+# neither step may fail silently (#926): a failed `brew info` or unparseable
+# output used to leave $TMPFILE empty, and the run still printed
+# "All cask apps are healthy!" with exit 0 after checking zero casks.
+if ! brew info --json=v2 --cask "${CASKS[@]}" > "$INFOFILE" 2> "$ERRFILE"; then
+  echo "brew-repair: error: 'brew info' failed — no casks could be verified" >&2
+  [[ -s "$ERRFILE" ]] && sed 's/^/  /' "$ERRFILE" >&2
+  exit 1
+fi
+
+if ! BREW_REPAIR_RENAMES="$RENAMEFILE" python3 -c "
+import json, os, sys
 data = json.load(sys.stdin)
-for c in data.get('casks', []):
+casks = data.get('casks', [])
+for c in casks:
     apps = []
     for a in c.get('artifacts', []):
         if isinstance(a, dict) and 'app' in a:
-            apps.extend(a['app'])
+            # An app artifact's list is [source, ..., {options}]: a
+            # 'target' option renames the installed bundle, so the
+            # target's basename is the app that exists on disk -- the
+            # source name does not (#1497). Without a target, every
+            # string element is an app to check. A non-string element
+            # is an options dict, never an app name: joining one
+            # crashed the scan (TypeError) on completely valid JSON.
+            elements = a['app'] if isinstance(a['app'], list) else [a['app']]
+            targets = [os.path.basename(e['target']) for e in elements
+                       if isinstance(e, dict) and isinstance(e.get('target'), str)]
+            if targets:
+                apps.extend(targets)
+            else:
+                apps.extend(e for e in elements if isinstance(e, str))
     print(c['token'] + '|' + '|'.join(apps))
-" > "$TMPFILE" 2>/dev/null || true
+# Rename evidence (#1552): a cask object's old_tokens names its
+# previous tokens, so record old|new pairs for the shell side. This
+# replaces the substring name-shape guess: docker->docker-desktop is
+# a real rename while 1password vs 1password-cli are unrelated casks,
+# and both pairs share the same substring/prefix shape.
+renames_path = os.environ.get('BREW_REPAIR_RENAMES')
+if renames_path:
+    with open(renames_path, 'w') as rf:
+        for c in casks:
+            for old in c.get('old_tokens') or []:
+                if isinstance(old, str):
+                    rf.write(old + '|' + c['token'] + '\n')
+" < "$INFOFILE" > "$TMPFILE" 2> "$ERRFILE"; then
+  echo "brew-repair: error: could not parse 'brew info' output as JSON — no casks could be verified" >&2
+  [[ -s "$ERRFILE" ]] && sed 's/^/  /' "$ERRFILE" >&2
+  exit 1
+fi
+
+if [[ ! -s "$TMPFILE" ]]; then
+  echo "brew-repair: error: 'brew info' returned no cask data for ${#CASKS[@]} installed cask(s) — scan failed, no casks could be verified" >&2
+  exit 1
+fi
 
 # Also build a map of original cask name → token returned by brew info
 # (handles renames like docker→docker-desktop, handbrake→handbrake-app, etc.)
@@ -94,6 +173,18 @@ declare -A TOKEN_TO_ORIGINAL
 for cask in "${CASKS[@]}"; do
   TOKEN_TO_ORIGINAL["$cask"]="$cask"
 done
+
+# Rename evidence from brew itself (#1552): map each old token to the
+# token that replaced it, and record the original (installed) name for
+# the returned token so broken-cask reporting can name both.
+declare -A RENAMED_TO_NEW
+if [[ -s "$RENAMEFILE" ]]; then
+  while IFS='|' read -r old_token new_token; do
+    [[ -z "$old_token" ]] && continue
+    RENAMED_TO_NEW["$old_token"]="$new_token"
+    TOKEN_TO_ORIGINAL["$new_token"]="$old_token"
+  done < "$RENAMEFILE"
+fi
 
 BROKEN=()
 BROKEN_ORIGINAL=()
@@ -149,29 +240,39 @@ while IFS='|' read -r cask _rest; do
   SEEN_TOKENS["$cask"]=1
 done < "$TMPFILE"
 
+UNCHECKED=0
 for cask in "${CASKS[@]}"; do
   if [[ -z "${SEEN_TOKENS[$cask]:-}" ]]; then
-    # This cask wasn't in JSON output — it's been renamed or removed
-    # Check if its renamed version was already seen
-    found=false
-    for token in "${!SEEN_TOKENS[@]}"; do
-      if [[ "$token" == *"$cask"* ]] || [[ "$cask" == *"$token"* ]]; then
-        found=true
-        break
-      fi
-    done
-    if [[ "$found" == false ]]; then
+    # This cask wasn't in JSON output — it may have been renamed or
+    # removed upstream. A rename excuse needs brew's own evidence: a
+    # returned cask listing this cask in old_tokens (#1552). A name
+    # shape proves nothing — docker→docker-desktop is a real rename
+    # while 1password vs 1password-cli are unrelated casks, and both
+    # pairs share the same substring/prefix shape — so the old
+    # substring match excused a cask that was never verified and
+    # folded it into the healthy verdict.
+    if [[ -n "${RENAMED_TO_NEW[$cask]:-}" ]]; then
+      [[ "$QUIET" == false ]] && echo -e "  ℹ️  $cask (renamed to ${RENAMED_TO_NEW[$cask]} — verified under its new token)"
+    elif ! is_skipped "$cask"; then
+      # Absent from a *successful* scan: not verified, so it counts as
+      # unchecked and must not fold into a "healthy" verdict (#926).
+      UNCHECKED=$((UNCHECKED + 1))
       echo -e "  ${YELLOW}⚠️${NC}  $cask (installed but unknown to brew — may be renamed/removed)"
     fi
   fi
 done
 
 echo ""
-echo -e "${BOLD}Summary:${NC} ${GREEN}${HEALTHY} healthy${NC}, ${RED}${#BROKEN[@]} broken${NC}, ${SKIPPED} skipped, ${FONT_OR_NOAPP} non-app (fonts/plugins/CLIs)"
+echo -e "${BOLD}Summary:${NC} ${GREEN}${HEALTHY} healthy${NC}, ${RED}${#BROKEN[@]} broken${NC}, ${SKIPPED} skipped, ${FONT_OR_NOAPP} non-app (fonts/plugins/CLIs), ${UNCHECKED} unchecked"
 
-if [[ ${#BROKEN[@]} -eq 0 ]]; then
+if [[ ${#BROKEN[@]} -eq 0 && $UNCHECKED -eq 0 ]]; then
   echo -e "\n${GREEN}${BOLD}All cask apps are healthy!${NC}"
   exit 0
+fi
+
+if [[ ${#BROKEN[@]} -eq 0 ]]; then
+  echo -e "\n${YELLOW}${BOLD}${UNCHECKED} cask(s) could not be verified (unknown to brew — may be renamed/removed); not declaring all healthy.${NC}"
+  exit 1
 fi
 
 echo ""
@@ -188,6 +289,10 @@ if [[ "$DRY_RUN" == true ]]; then
   done
   echo ""
   echo "Run without -n to fix these."
+  if [[ $UNCHECKED -gt 0 ]]; then
+    echo -e "\n${YELLOW}${BOLD}${UNCHECKED} cask(s) could not be verified (unknown to brew — may be renamed/removed); not declaring success.${NC}"
+    exit 1
+  fi
   exit 0
 fi
 
@@ -221,4 +326,13 @@ if [[ ${#FAILED_LIST[@]} -gt 0 ]]; then
   for cask in "${FAILED_LIST[@]}"; do
     echo "  brew reinstall --cask $cask"
   done
+fi
+
+if [[ $UNCHECKED -gt 0 ]]; then
+  echo ""
+  echo -e "${YELLOW}${BOLD}${UNCHECKED} cask(s) could not be verified (unknown to brew — may be renamed/removed); not declaring success.${NC}"
+fi
+
+if [[ $FAILED -gt 0 || $UNCHECKED -gt 0 ]]; then
+  exit 1
 fi

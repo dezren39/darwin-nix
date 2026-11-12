@@ -6,9 +6,51 @@
 
 set -euo pipefail
 
-# Get list of all Homebrew-installed apps
-mapfile -t BREW_APPS < <(brew list --cask 2>/dev/null | tr '[:upper:]' '[:lower:]')
-mapfile -t BREW_NAMES < <(brew list --cask 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr ' .' '-')
+usage() {
+    echo "Usage: search.sh"
+}
+
+# This script takes no arguments (#1158): any argument was silently
+# ignored and the full scan ran with exit 0. Reject the first argument
+# by name, with usage on stderr and exit 2, before any brew call --
+# the house argument contract. --help prints usage and exits 0.
+if [[ $# -gt 0 ]]; then
+    case "$1" in
+        -h|--help) usage; exit 0 ;;
+        *) echo "search: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+    esac
+fi
+
+# Get list of all Homebrew-installed apps. Capture `brew list --cask`
+# once, with its exit status checked (#957): the old process
+# substitutions hid a failed `brew list` — its status was invisible
+# and its stderr discarded by 2>/dev/null — so brew breakage (or a
+# missing brew) looked exactly like "no casks installed" and every
+# app was reported as not brew-installed, with exit 0. Name the
+# failing step on stderr, surface brew's own stderr, and exit 1.
+# A genuinely empty successful list keeps the normal path below.
+BREW_ERR=$(mktemp)
+UNMANAGED_APPS_FILE=$(mktemp)
+trap 'rm -f "$BREW_ERR" "$UNMANAGED_APPS_FILE"' EXIT
+
+if ! BREW_LIST=$(brew list --cask 2>"$BREW_ERR"); then
+    echo "search: error: 'brew list --cask' failed — installed casks could not be enumerated" >&2
+    if [[ -s "$BREW_ERR" ]]; then
+        sed 's/^/  /' "$BREW_ERR" >&2
+    fi
+    exit 1
+fi
+
+BREW_APPS=()
+BREW_NAMES=()
+if [[ -n "$BREW_LIST" ]]; then
+    # Read into arrays with Bash 3.2-compatible loops. `mapfile` was added
+    # in Bash 4, while macOS's system `/usr/bin/env bash` is still 3.2.
+    while IFS= read -r app; do
+        BREW_APPS+=("$app")
+        BREW_NAMES+=("$(printf '%s' "$app" | tr ' .' '-')")
+    done < <(printf '%s\n' "$BREW_LIST" | tr '[:upper:]' '[:lower:]')
+fi
 
 check_if_brew_installed() {
     local app_path="$1"
@@ -29,23 +71,29 @@ check_if_brew_installed() {
        [[ ! " ${BREW_NAMES[*]} " =~ " ${normalized_name} " ]]; then
         # echo "${app_path}"
         echo "${normalized_name}"
+        printf '%s\n' "$normalized_name" >> "$UNMANAGED_APPS_FILE"
 
-        # Try to find similar Homebrew packages
-        local similar
-        similar=$(brew search "$normalized_name" 2>/dev/null | grep -i "$normalized_name" || true)
-        if [ -n "$similar" ]; then
-            # echo "  Similar Homebrew packages found:"
-            # echo "$similar" | sed 's/^/    /'
-            true
-        fi
         # echo
     fi
 }
 
-echo "Checking /Applications..."
-find /Applications -maxdepth 1 -name "*.app" -print0 | while IFS= read -r -d '' app; do
-    check_if_brew_installed "$app"
-done
+# First leg scans /Applications; SEARCH_APPLICATIONS_DIR overrides the
+# directory for tests (#983) — the default behaviour is unchanged.
+# A missing first-leg directory is NOT fatal (#1255): it gets the same
+# treatment as the ~/Applications leg below — a plain "does not exist"
+# notice, then the remaining leg still runs and the script exits 0.
+# (Contrast #957 above: a failed `brew list` is fatal because without
+# it no comparison is possible at all; a missing scan directory only
+# empties one of the two scan sources.)
+APPLICATIONS_DIR="${SEARCH_APPLICATIONS_DIR:-/Applications}"
+echo "Checking $APPLICATIONS_DIR..."
+if [ -d "$APPLICATIONS_DIR" ]; then
+    find "$APPLICATIONS_DIR" -maxdepth 1 -name "*.app" -print0 | while IFS= read -r -d '' app; do
+        check_if_brew_installed "$app"
+    done
+else
+    echo "$APPLICATIONS_DIR directory does not exist"
+fi
 
 echo "Checking ~/Applications..."
 if [ -d ~/Applications ]; then
@@ -54,4 +102,8 @@ if [ -d ~/Applications ]; then
     done
 else
     echo "~/Applications directory does not exist"
+fi
+
+if [[ ! -s "$UNMANAGED_APPS_FILE" ]]; then
+    echo "No non-Homebrew apps found."
 fi

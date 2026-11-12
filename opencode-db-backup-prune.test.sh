@@ -1,0 +1,477 @@
+#!/usr/bin/env bash
+# Fixture test for opencode-db-backup-prune.sh (#659 retention).
+#
+# Builds a fixture backup tree — timestamp-named dirs plus entries the
+# pruner must never touch — and pins: dry-run lists exactly the
+# beyond-keep candidates and deletes nothing; --apply deletes exactly
+# the listed set; the newest backup is never listed even with
+# --keep 1; --max-age-days filters out recent candidates; non-timestamp
+# entries survive everything; --keep 0 is rejected.
+#
+# Run: ./opencode-db-backup-prune.test.sh
+# It is run by the flake check `opencode-db-backup-prune-tests`.
+set -u
+
+cd "$(dirname "$0")" || exit
+
+failures=0
+fail() { echo "FAIL: $1" >&2; failures=$((failures + 1)); }
+ok() { echo "ok: $1"; }
+
+WORK="$(mktemp -d)"
+cleanup() {
+  chmod -R u+rwx "$WORK" 2>/dev/null || true
+  rm -rf "$WORK"
+}
+trap cleanup EXIT
+PRUNE=./opencode-db-backup-prune.sh
+
+make_tree() {
+  local base="$1"
+  mkdir -p "$base"
+  local d
+  for d in 20260101T000000 20260201T000000 20260301T000000 20260401T000000 20260501T000000; do
+    mkdir -p "$base/$d"
+    echo fixture > "$base/$d/opencode.db"
+  done
+  mkdir -p "$base/not-a-backup"
+  echo keep > "$base/not-a-backup/file"
+  echo keep > "$base/loose-file.txt"
+}
+
+listing() { ls "$1" | sort | tr '\n' ' '; }
+
+# --- dry run, --keep 2: lists oldest 3, deletes nothing -------------------
+B="$WORK/dry"; make_tree "$B"
+out="$(bash "$PRUNE" --dir "$B" --keep 2 2>&1)"; rc=$?
+[ "$rc" -eq 0 ] || fail "dry run exited $rc: $out"
+n="$(printf '%s' "$out" | grep -c 'would delete:')"
+[ "$n" -eq 3 ] || fail "dry run listed $n candidates, expected 3: $out"
+for d in 20260101T000000 20260201T000000 20260301T000000; do
+  printf '%s' "$out" | grep -q "would delete: $B/$d\$" || fail "dry run did not list $d: $out"
+done
+printf '%s' "$out" | grep -q "20260501T000000" && fail "dry run listed the newest backup"
+[ "$(listing "$B")" = "20260101T000000 20260201T000000 20260301T000000 20260401T000000 20260501T000000 loose-file.txt not-a-backup " ] \
+  || fail "dry run changed the tree: $(listing "$B")"
+ok "dry run lists exactly the 3 beyond-keep backups and deletes nothing"
+
+# --- apply, --keep 2: deletes exactly the listed set ----------------------
+out="$(bash "$PRUNE" --dir "$B" --keep 2 --apply 2>&1)"; rc=$?
+[ "$rc" -eq 0 ] || fail "apply exited $rc: $out"
+[ "$(listing "$B")" = "20260401T000000 20260501T000000 loose-file.txt not-a-backup " ] \
+  || fail "apply left wrong tree: $(listing "$B")"
+ok "apply deletes exactly the listed set; non-timestamp entries survive"
+
+# --- apply with failing deletions: no false success (#1257) ----------------
+# An rm shim on PATH makes every deletion fail, regardless of the
+# privileges the suite runs with (a read-only fixture dir does not stop
+# root). The script must exit nonzero, print no 'deleted:' line, and
+# count 0 deletions — a failed retention run must not be
+# indistinguishable from a successful one (PR #1063 Codex P2).
+SHIM="$WORK/rm-shim"; mkdir -p "$SHIM"
+cat > "$SHIM/rm" <<'SHIM_EOF'
+#!/bin/sh
+echo "rm: cannot remove (shimmed failure)" >&2
+exit 1
+SHIM_EOF
+chmod +x "$SHIM/rm"
+B="$WORK/fail"; make_tree "$B"
+out="$(PATH="$SHIM:$PATH" bash "$PRUNE" --dir "$B" --keep 2 --apply 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] || fail "apply with failing deletions exited 0: $out"
+printf '%s' "$out" | grep -q 'deleted:' \
+  && fail "apply with failing deletions printed 'deleted:': $out"
+printf '%s' "$out" | grep -q "deleted 0 of 5 backup(s)" \
+  || fail "apply with failing deletions did not report 0 deletions: $out"
+printf '%s' "$out" | grep -q 'failed to delete:' \
+  || fail "apply with failing deletions named no failure: $out"
+[ "$(listing "$B")" = "20260101T000000 20260201T000000 20260301T000000 20260401T000000 20260501T000000 loose-file.txt not-a-backup " ] \
+  || fail "apply with failing deletions changed the tree: $(listing "$B")"
+ok "failed deletions exit nonzero, print no 'deleted:', and count 0"
+
+# --- impossible timestamps are not backups (#1261) ------------------------
+# A digit-shaped but impossible name (month 13, Feb 30, hour 24) must
+# never be counted, never occupy a --keep slot, and never be deleted.
+# Plain mode: with keep 2 over 5 valid backups the count stays 5 (not 8)
+# and exactly the oldest 3 valid backups are listed.
+B="$WORK/invalid"; make_tree "$B"
+for d in 20201301T000000 20260230T000000 20260101T240000; do
+  mkdir -p "$B/$d"; echo fixture > "$B/$d/opencode.db"
+done
+out="$(bash "$PRUNE" --dir "$B" --keep 2 2>&1)"; rc=$?
+[ "$rc" -eq 0 ] || fail "invalid-timestamp dry run exited $rc: $out"
+n="$(printf '%s' "$out" | grep -c 'would delete:')"
+[ "$n" -eq 3 ] || fail "invalid-timestamp dry run listed $n candidates, expected 3: $out"
+for d in 20201301T000000 20260230T000000 20260101T240000; do
+  printf '%s' "$out" | grep -q "$d" && fail "invalid-timestamp dry run mentioned $d: $out"
+done
+printf '%s' "$out" | grep -q "3 of 5 backup(s)" || fail "invalid timestamps counted as backups: $out"
+[ -d "$B/20201301T000000" ] && [ -d "$B/20260230T000000" ] && [ -d "$B/20260101T240000" ] \
+  || fail "invalid-timestamp dry run removed an invalid dir: $(listing "$B")"
+ok "impossible timestamps are not counted, kept-slot occupants, or listed"
+
+# --apply --max-age-days: all validation happens before any deletion, so
+# the run completes at exit 0, deletes exactly the old valid candidates,
+# and leaves every invalid dir untouched (no partial apply then exit 2).
+B="$WORK/invalid-apply"; mkdir -p "$B"
+for d in 20200101T000000 20200102T000000 20201301T000000 20260101T000000; do
+  mkdir -p "$B/$d"; echo fixture > "$B/$d/opencode.db"
+done
+out="$(bash "$PRUNE" --dir "$B" --keep 1 --max-age-days 30 --apply 2>&1)"; rc=$?
+[ "$rc" -eq 0 ] || fail "invalid-timestamp apply exited $rc: $out"
+[ "$(listing "$B")" = "20201301T000000 20260101T000000 " ] \
+  || fail "invalid-timestamp apply left wrong tree: $(listing "$B")"
+ok "--apply --max-age-days completes, deletes valid old backups, leaves the impossible-date dir"
+
+# --- timestamp-named symlinks are not backups (#1467) ---------------------
+# A symlink whose name is a backup timestamp and whose target is a
+# directory passes the glob + [ -d ] candidate test, but it is not a
+# timestamp-named directory: it must not be counted, must not occupy a
+# --keep slot, and must never be listed or deleted (the loose sweep's
+# [ -L ] exclusion is the precedent). Newest-named symlink, --keep 3
+# over 4 real backups: exactly the oldest real backup is listed, the
+# total counts real dirs only ("1 of 4"), and --apply keeps 3 real
+# backups while the symlink and its target survive.
+B="$WORK/symlink-newest"; mkdir -p "$B"
+for d in 20260101T000000 20260201T000000 20260301T000000 20260401T000000; do
+  mkdir -p "$B/$d"; echo fixture > "$B/$d/opencode.db"
+done
+TARGET="$WORK/symlink-target"; mkdir -p "$TARGET"; echo keep > "$TARGET/opencode.db"
+ln -s "$TARGET" "$B/20260501T000000"
+out="$(bash "$PRUNE" --dir "$B" --keep 3 2>&1)"; rc=$?
+[ "$rc" -eq 0 ] || fail "symlink dry run exited $rc: $out"
+n="$(printf '%s' "$out" | grep -c 'would delete:')"
+[ "$n" -eq 1 ] || fail "symlink dry run listed $n candidates, expected 1: $out"
+printf '%s' "$out" | grep -q "would delete: $B/20260101T000000\$" || fail "symlink dry run did not list the oldest real backup: $out"
+printf '%s' "$out" | grep -q "1 of 4 backup(s)" || fail "symlink counted in the total: $out"
+out="$(bash "$PRUNE" --dir "$B" --keep 3 --apply 2>&1)"; rc=$?
+[ "$rc" -eq 0 ] || fail "symlink apply exited $rc: $out"
+[ "$(listing "$B")" = "20260201T000000 20260301T000000 20260401T000000 20260501T000000 " ] \
+  || fail "symlink apply left wrong tree: $(listing "$B")"
+[ -L "$B/20260501T000000" ] || fail "symlink apply removed the symlink"
+[ "$(cat "$TARGET/opencode.db")" = "keep" ] || fail "symlink apply touched the symlink target"
+ok "timestamp-named symlink is not counted, occupies no --keep slot; symlink and target survive --apply"
+
+# Oldest-named symlink, --keep 1 --apply: the symlink sorts first but is
+# never a deletion candidate; only real backups beyond the newest are
+# deleted and the symlink itself survives.
+B="$WORK/symlink-oldest"; mkdir -p "$B"
+for d in 20260201T000000 20260301T000000 20260401T000000; do
+  mkdir -p "$B/$d"; echo fixture > "$B/$d/opencode.db"
+done
+ln -s "$TARGET" "$B/20250101T000000"
+out="$(bash "$PRUNE" --dir "$B" --keep 1 --apply 2>&1)"; rc=$?
+[ "$rc" -eq 0 ] || fail "oldest-symlink apply exited $rc: $out"
+[ "$(listing "$B")" = "20250101T000000 20260401T000000 " ] \
+  || fail "oldest-symlink apply left wrong tree: $(listing "$B")"
+[ -L "$B/20250101T000000" ] || fail "oldest-symlink apply deleted the symlink itself"
+ok "oldest-named symlink is never listed or deleted by --apply"
+
+# --- --keep 1: newest still never deleted ---------------------------------
+B="$WORK/one"; make_tree "$B"
+bash "$PRUNE" --dir "$B" --keep 1 --apply >/dev/null 2>&1
+[ "$(listing "$B")" = "20260501T000000 loose-file.txt not-a-backup " ] \
+  || fail "--keep 1 left wrong tree: $(listing "$B")"
+ok "--keep 1 keeps only the newest backup"
+
+# --- --max-age-days: recent candidates are filtered out -------------------
+B="$WORK/age"; make_tree "$B"
+recent="$(date +%Y%m%dT%H%M%S)"
+mkdir -p "$B/$recent"
+# keep 1 would list all but the newest (the recent dir); with
+# --max-age-days 30 the 2026 fixtures (all >30d old at any run date in
+# 2026+) are listed, and nothing newer than the cutoff can appear —
+# pin the invariant via a huge max age instead: nothing is old enough.
+out="$(bash "$PRUNE" --dir "$B" --keep 1 --max-age-days 36500 2>&1)"; rc=$?
+[ "$rc" -eq 0 ] || fail "--max-age-days 36500 exited $rc: $out"
+printf '%s' "$out" | grep -q 'would delete:' \
+  && fail "--max-age-days 36500 listed candidates: $out"
+printf '%s' "$out" | grep -q "dry run — 0 of 6 backup(s)" \
+  || fail "--max-age-days 36500 missing 0-of-6 summary: $out"
+ok "--max-age-days filters out candidates not old enough"
+
+# --- --max-age-days: old candidates ARE listed (positive case) ------------
+# Regression test for #1065: the case above can be satisfied by a run that
+# dies on the first candidate, so pin a positive listing, exit code 0, and
+# the summary line. The 2026 fixtures are all >30d old at any run date
+# after 2026-06, so --keep 1 --max-age-days 30 lists the oldest 4.
+B="$WORK/age-positive"; make_tree "$B"
+out="$(bash "$PRUNE" --dir "$B" --keep 1 --max-age-days 30 2>&1)"; rc=$?
+[ "$rc" -eq 0 ] || fail "--max-age-days 30 exited $rc: $out"
+n="$(printf '%s' "$out" | grep -c 'would delete:')"
+[ "$n" -eq 4 ] || fail "--max-age-days 30 listed $n candidates, expected 4: $out"
+for d in 20260101T000000 20260201T000000 20260301T000000 20260401T000000; do
+  printf '%s' "$out" | grep -q "would delete: $B/$d\$" || fail "--max-age-days 30 did not list $d: $out"
+done
+printf '%s' "$out" | grep -q "dry run — 4 of 5 backup(s)" \
+  || fail "--max-age-days 30 missing 4-of-5 summary: $out"
+ok "--max-age-days lists old candidates, exits 0, and reports the summary"
+
+# --- --max-age-days under a BSD-date shim: no GNU date -d ------------------
+# macOS date has no -d (it parses with -j -f); emulate it on any host by
+# rejecting -d and translating -j -f to the real (GNU) date. The prune
+# must still list the old candidates and exit 0 (#1065).
+SHIM="$WORK/bsd-shim"; mkdir -p "$SHIM"
+REAL_DATE="$(command -v date)"
+cat > "$SHIM/date" <<SHIM_EOF
+#!/bin/sh
+if [ "\$1" = "-j" ]; then
+  # date -j -f FORMAT INPUT +%s
+  input="\$4"
+  exec "$REAL_DATE" -d "\$input" +%s
+fi
+for a in "\$@"; do
+  [ "\$a" = "-d" ] && { echo "date: illegal option -- d" >&2; exit 1; }
+done
+exec "$REAL_DATE" "\$@"
+SHIM_EOF
+chmod +x "$SHIM/date"
+B="$WORK/age-bsd"; make_tree "$B"
+out="$(PATH="$SHIM:$PATH" bash "$PRUNE" --dir "$B" --keep 1 --max-age-days 30 2>&1)"; rc=$?
+[ "$rc" -eq 0 ] || fail "--max-age-days 30 under BSD date exited $rc: $out"
+n="$(printf '%s' "$out" | grep -c 'would delete:')"
+[ "$n" -eq 4 ] || fail "--max-age-days 30 under BSD date listed $n candidates, expected 4: $out"
+printf '%s' "$out" | grep -q "dry run — 4 of 5 backup(s)" \
+  || fail "--max-age-days 30 under BSD date missing 4-of-5 summary: $out"
+ok "--max-age-days works with BSD date (no GNU date -d)"
+
+# --- guards ---------------------------------------------------------------
+out="$(bash "$PRUNE" --dir "$WORK/none" --keep 0 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q -- "--keep" \
+  || fail "--keep 0 not rejected naming --keep: rc=$rc out=$out"
+ok "--keep 0 rejected (newest backup can never be deleted)"
+
+out="$(bash "$PRUNE" --dir "$WORK/does-not-exist" 2>&1)"; rc=$?
+[ "$rc" -eq 0 ] || fail "missing dir should be a no-op success, got rc=$rc: $out"
+ok "missing backup dir is a no-op success"
+
+# An existing path that is not a directory is an error, not the missing-dir
+# no-op. Use a regular file so this is portable across hosts.
+B="$WORK/not-a-directory"; echo fixture > "$B"
+out="$(bash "$PRUNE" --dir "$B" 2>&1)"; rc=$?
+[ "$rc" -eq 2 ] || fail "non-directory backup path exited $rc, expected 2: $out"
+printf '%s' "$out" | grep -q "backup path is not a directory: $B" \
+  || fail "non-directory path was not named on stderr: $out"
+ok "existing non-directory backup path is rejected"
+
+# An unreadable backup directory must fail before either dry-run listing or
+# deletion. chmod 000 exercises the real permission case for unprivileged
+# runs; the ls shim makes the same failure deterministic when tests run as
+# root (which can bypass mode bits).
+B="$WORK/unreadable"; make_tree "$B"; chmod 000 "$B"
+LS_SHIM="$WORK/ls-shim"; mkdir -p "$LS_SHIM"
+REAL_LS="$(command -v ls)"
+cat > "$LS_SHIM/ls" <<'LS_SHIM_EOF'
+#!/bin/sh
+if [ "${1:-}" = "-A" ] && [ "${2:-}" = "$UNREADABLE_DIR" ]; then
+  echo "ls: simulated permission denied" >&2
+  exit 1
+fi
+exec "$REAL_LS" "$@"
+LS_SHIM_EOF
+chmod +x "$LS_SHIM/ls"
+for mode in dry-run apply; do
+  if [ "$mode" = apply ]; then
+    out="$(UNREADABLE_DIR="$B" REAL_LS="$REAL_LS" PATH="$LS_SHIM:$PATH" bash "$PRUNE" --dir "$B" --keep 1 --apply 2>&1)"; rc=$?
+  else
+    out="$(UNREADABLE_DIR="$B" REAL_LS="$REAL_LS" PATH="$LS_SHIM:$PATH" bash "$PRUNE" --dir "$B" --keep 1 --dry-run 2>&1)"; rc=$?
+  fi
+  [ "$rc" -eq 2 ] || fail "unreadable dir $mode exited $rc, expected 2: $out"
+  printf '%s' "$out" | grep -q "cannot enumerate backup dir: $B" \
+    || fail "unreadable dir $mode was not named: $out"
+  if printf '%s' "$out" | grep -Eq '0 backup\(s\)|would delete:|deleted:'; then
+    fail "unreadable dir $mode reported a successful prune/listing: $out"
+  fi
+done
+chmod u+rwx "$B"
+[ "$(listing "$B")" = "20260101T000000 20260201T000000 20260301T000000 20260401T000000 20260501T000000 loose-file.txt not-a-backup " ] \
+  || fail "unreadable-dir checks changed the tree: $(listing "$B")"
+ok "unreadable backup dir fails in dry-run and apply without changing backups"
+
+out="$(bash "$PRUNE" --keep --apply 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q -- "--keep" \
+  || fail "flag-shaped --keep value not rejected naming --keep: rc=$rc out=$out"
+ok "flag-shaped values rejected naming the option (#930 pattern)"
+
+# --- numeric validation: leading zeros and range backstops (#1087) -------
+# --keep 08 with more backups than the keep count reaches the arithmetic
+# path that used to crash on the octal-invalid literal: 10 dirs, keep 08
+# (decimal 8) lists exactly the oldest 2, exits 0, no raw bash errors.
+B="$WORK/zeros"; mkdir -p "$B"
+for d in 20260101T000000 20260102T000000 20260103T000000 20260104T000000 20260105T000000 20260106T000000 20260107T000000 20260108T000000 20260109T000000 20260110T000000; do
+  mkdir -p "$B/$d"; echo fixture > "$B/$d/opencode.db"
+done
+out="$(bash "$PRUNE" --dir "$B" --keep 08 2>&1)"; rc=$?
+[ "$rc" -eq 0 ] || fail "--keep 08 exited $rc: $out"
+n="$(printf '%s' "$out" | grep -c 'would delete:')"
+[ "$n" -eq 2 ] || fail "--keep 08 listed $n candidates, expected 2: $out"
+printf '%s' "$out" | grep -q 'value too great for base' && fail "--keep 08 leaked a raw octal error: $out"
+printf '%s' "$out" | grep -q 'kept newest 8' || fail "--keep 08 summary does not say kept newest 8: $out"
+ok "--keep 08 behaves as decimal 8 on the arithmetic path"
+
+# --keep 010 is decimal 10, not octal 8: with 10 dirs nothing is pruned.
+out="$(bash "$PRUNE" --dir "$B" --keep 010 2>&1)"; rc=$?
+[ "$rc" -eq 0 ] || fail "--keep 010 exited $rc: $out"
+printf '%s' "$out" | grep -q 'nothing to prune' || fail "--keep 010 did not behave as decimal 10: $out"
+ok "--keep 010 behaves as decimal 10, not octal 8"
+
+# Oversized --keep: one clear parse-time rejection naming the option and
+# the value, exit 2, no raw integer-expression leak, no misleading reason.
+out="$(bash "$PRUNE" --dir "$B" --keep 99999999999999999999999 2>&1)"; rc=$?
+[ "$rc" -eq 2 ] || fail "oversized --keep exited $rc, expected 2: $out"
+printf '%s' "$out" | grep -q -- '--keep' || fail "oversized --keep rejection does not name --keep: $out"
+printf '%s' "$out" | grep -q '99999999999999999999999' || fail "oversized --keep rejection does not name the value: $out"
+printf '%s' "$out" | grep -q 'integer expression expected' && fail "oversized --keep leaked a raw test error: $out"
+printf '%s' "$out" | grep -q 'at least 1' && fail "oversized --keep died with the misleading at-least-1 reason: $out"
+ok "oversized --keep rejected at parse time naming option and value"
+
+# Oversized --max-age-days: same parse-time rejection; it must never reach
+# the per-candidate test, which used to error per candidate and exit 0
+# with age pruning silently disabled.
+out="$(bash "$PRUNE" --dir "$B" --keep 2 --max-age-days 999999999999999999999 2>&1)"; rc=$?
+[ "$rc" -eq 2 ] || fail "oversized --max-age-days exited $rc, expected 2: $out"
+printf '%s' "$out" | grep -q -- '--max-age-days' || fail "oversized --max-age-days rejection does not name --max-age-days: $out"
+printf '%s' "$out" | grep -q 'integer expression expected' && fail "oversized --max-age-days leaked a raw test error: $out"
+ok "oversized --max-age-days rejected at parse time (no silent exit 0)"
+
+# --- repeated options and --apply/--dry-run conflict (#1125) --------------
+# Repeats must be rejected at parse time (exit 2, naming the option and
+# the only-once rule), before any listing or deletion.
+for opt in --dir --keep --max-age-days; do
+  case "$opt" in
+    --dir) args="--dir $B --dir $B" ;;
+    --keep) args="--dir $B --keep 2 --keep 1" ;;
+    --max-age-days) args="--dir $B --keep 2 --max-age-days 1 --max-age-days 2" ;;
+  esac
+  out="$(bash "$PRUNE" $args 2>&1)"; rc=$?
+  [ "$rc" -eq 2 ] || fail "repeated $opt exited $rc, expected 2: $out"
+  printf '%s' "$out" | grep -q -- "$opt may be given only once" \
+    || fail "repeated $opt rejection does not name the only-once rule: $out"
+done
+ok "repeated --dir/--keep/--max-age-days rejected at parse time naming the option"
+
+# Both orders of --apply + --dry-run are a conflict, rejected at parse
+# time with the tree untouched (in particular --dry-run --apply must
+# not delete anything).
+for pair in "--dry-run --apply" "--apply --dry-run"; do
+  B="$WORK/conflict"; rm -rf "$B"; make_tree "$B"
+  out="$(bash "$PRUNE" --dir "$B" --keep 1 $pair 2>&1)"; rc=$?
+  [ "$rc" -eq 2 ] || fail "$pair exited $rc, expected 2: $out"
+  printf '%s' "$out" | grep -q -- "--apply and --dry-run may not be combined" \
+    || fail "$pair rejection does not name the conflict: $out"
+  [ "$(listing "$B")" = "20260101T000000 20260201T000000 20260301T000000 20260401T000000 20260501T000000 loose-file.txt not-a-backup " ] \
+    || fail "$pair changed the tree: $(listing "$B")"
+done
+ok "--apply with --dry-run rejected as a conflict in either order, tree untouched"
+
+# --- loose ad-hoc DB copies beside the database (#659 follow-up) ----------
+# `cp opencode.db opencode.db.bak-<tag>` is outside the timestamp-dir sweep.
+# Pin: only opencode.db.bak-* regular files are candidates, retention is the
+# newest --keep by mtime, the database itself and any other .bak name are
+# never listed, --max-age-days also applies, and dry run deletes nothing.
+LOOSE="$WORK/loose"; rm -rf "$LOOSE"; mkdir -p "$LOOSE"
+echo db > "$LOOSE/opencode.db"
+for n in a b c; do echo copy > "$LOOSE/opencode.db.bak-$n"; done
+echo other > "$LOOSE/other.bak-a"
+echo dir > "$LOOSE/opencode.db.bak-dir-marker"; rm -f "$LOOSE/opencode.db.bak-dir-marker"
+mkdir -p "$LOOSE/opencode.db.bak-as-directory"
+touch -t 202601010000 "$LOOSE/opencode.db.bak-a"
+touch -t 202602010000 "$LOOSE/opencode.db.bak-b"
+touch -t 202603010000 "$LOOSE/opencode.db.bak-c"
+
+out="$(bash "$PRUNE" --dir "$WORK/no-such-dir" --db-dir "$LOOSE" --keep 2 2>&1)"; rc=$?
+[ "$rc" -eq 0 ] || fail "loose dry run exited $rc: $out"
+printf '%s' "$out" | grep -q "would delete loose: $LOOSE/opencode.db.bak-a\$" \
+  || fail "loose dry run did not list the oldest copy: $out"
+printf '%s' "$out" | grep -q "opencode.db.bak-b" && fail "loose dry run listed the second-newest copy: $out"
+printf '%s' "$out" | grep -q "would delete loose: $LOOSE/opencode\.db\$" && fail "loose dry run listed the database itself: $out"
+printf '%s' "$out" | grep -q "other.bak-a" && fail "loose dry run listed an unrelated .bak name: $out"
+printf '%s' "$out" | grep -q "opencode.db.bak-as-directory" && fail "loose dry run listed a directory: $out"
+[ -f "$LOOSE/opencode.db.bak-a" ] || fail "loose dry run deleted a copy"
+ok "loose dry run lists only the beyond-keep opencode.db.bak-* files, deletes nothing"
+
+out="$(bash "$PRUNE" --dir "$WORK/no-such-dir" --db-dir "$LOOSE" --keep 2 --apply 2>&1)"; rc=$?
+[ "$rc" -eq 0 ] || fail "loose apply exited $rc: $out"
+[ -f "$LOOSE/opencode.db.bak-b" ] && [ -f "$LOOSE/opencode.db.bak-c" ] \
+  || fail "loose apply deleted a copy inside the keep window"
+[ -f "$LOOSE/opencode.db.bak-a" ] && fail "loose apply left the beyond-keep copy"
+[ -f "$LOOSE/opencode.db" ] || fail "loose apply deleted the database"
+[ -f "$LOOSE/other.bak-a" ] || fail "loose apply deleted an unrelated .bak name"
+[ -d "$LOOSE/opencode.db.bak-as-directory" ] || fail "loose apply removed a directory"
+ok "loose apply deletes exactly the beyond-keep copies and nothing else"
+
+# --max-age-days applies to loose copies too: a copy inside the keep
+# window is kept when recent, and skipped when older than the limit.
+out="$(bash "$PRUNE" --dir "$WORK/no-such-dir" --db-dir "$LOOSE" --keep 1 --max-age-days 30 2>&1)"; rc=$?
+[ "$rc" -eq 0 ] || fail "loose --max-age-days exited $rc: $out"
+printf '%s' "$out" | grep -q "would delete loose: $LOOSE/opencode.db.bak-b\$" \
+  || fail "loose --max-age-days did not list the old beyond-keep copy: $out"
+# --db-dir is a repeatable-flag guard like the others.
+out="$(bash "$PRUNE" --dir "$WORK/no-such-dir" --db-dir "$LOOSE" --db-dir "$LOOSE" 2>&1)"; rc=$?
+[ "$rc" -eq 2 ] || fail "repeated --db-dir exited $rc, expected 2: $out"
+printf '%s' "$out" | grep -q -- "--db-dir may be given only once" \
+  || fail "repeated --db-dir rejection does not name the only-once rule: $out"
+ok "loose copies respect --max-age-days and --db-dir rejects repeats"
+
+# Without --db-dir nothing outside the backup dir is touched: the real
+# database directory is never swept by an existing invocation.
+out="$(bash "$PRUNE" --dir "$WORK/no-such-dir" 2>&1)"; rc=$?
+[ "$rc" -eq 0 ] || fail "no-option run exited $rc: $out"
+printf '%s' "$out" | grep -q "loose" && fail "loose sweep ran without --db-dir: $out"
+ok "loose sweep is opt-in; --dir-only invocations are unchanged"
+
+# --- loose failure must not skip the dir sweep (#1426) --------------------
+# A selective rm shim fails only loose (.bak-*) deletions and passes dir
+# deletions through to the real rm. The combined --apply run must still
+# run the timestamp-dir sweep to completion, report the loose failure,
+# and exit 1; the dir sweep's early exit-0 paths (missing backup dir,
+# nothing to prune) must likewise not mask a loose failure as success.
+LOOSE_FAIL_SHIM="$WORK/loose-fail-shim"; mkdir -p "$LOOSE_FAIL_SHIM"
+REAL_RM="$(command -v rm)"
+cat > "$LOOSE_FAIL_SHIM/rm" <<SHIM_EOF
+#!/bin/sh
+for a in "\$@"; do
+  case "\$a" in
+    *opencode.db.bak-*) echo "rm: cannot remove loose (shimmed failure)" >&2; exit 1 ;;
+  esac
+done
+exec "$REAL_RM" "\$@"
+SHIM_EOF
+chmod +x "$LOOSE_FAIL_SHIM/rm"
+make_loose3() {
+  local d="$1"; mkdir -p "$d"; echo db > "$d/opencode.db"
+  local n
+  for n in a b c; do echo copy > "$d/opencode.db.bak-$n"; done
+  touch -t 202601010000 "$d/opencode.db.bak-a"
+  touch -t 202602010000 "$d/opencode.db.bak-b"
+  touch -t 202603010000 "$d/opencode.db.bak-c"
+}
+L2="$WORK/loose-combined"; make_loose3 "$L2"
+B="$WORK/combined"; make_tree "$B"
+out="$(PATH="$LOOSE_FAIL_SHIM:$PATH" bash "$PRUNE" --dir "$B" --db-dir "$L2" --keep 2 --apply 2>&1)"; rc=$?
+[ "$rc" -eq 1 ] || fail "combined loose-failure run exited $rc, expected 1: $out"
+printf '%s' "$out" | grep -q "loose deletion(s) failed" \
+  || fail "combined run did not report the loose failure: $out"
+printf '%s' "$out" | grep -q "deleted: $B/20260101T000000" \
+  || fail "combined run did not run the dir sweep: $out"
+[ "$(listing "$B")" = "20260401T000000 20260501T000000 loose-file.txt not-a-backup " ] \
+  || fail "combined run left wrong backup tree: $(listing "$B")"
+[ -f "$L2/opencode.db.bak-a" ] || fail "combined run deleted the loose copy despite the shim"
+ok "loose failure does not skip the dir sweep; combined run exits 1"
+
+out="$(PATH="$LOOSE_FAIL_SHIM:$PATH" bash "$PRUNE" --dir "$WORK/no-such-dir-1426" --db-dir "$L2" --keep 2 --apply 2>&1)"; rc=$?
+[ "$rc" -eq 1 ] || fail "loose failure with missing backup dir exited $rc, expected 1: $out"
+ok "loose failure is not masked by the missing-backup-dir exit-0 path"
+
+B="$WORK/combined-nothing"; mkdir -p "$B"
+for d in 20260101T000000 20260201T000000; do mkdir -p "$B/$d"; echo fixture > "$B/$d/opencode.db"; done
+out="$(PATH="$LOOSE_FAIL_SHIM:$PATH" bash "$PRUNE" --dir "$B" --db-dir "$L2" --keep 2 --apply 2>&1)"; rc=$?
+[ "$rc" -eq 1 ] || fail "loose failure with nothing to prune exited $rc, expected 1: $out"
+printf '%s' "$out" | grep -q "nothing to prune" \
+  || fail "nothing-to-prune run did not report nothing to prune: $out"
+ok "loose failure is not masked by the nothing-to-prune exit-0 path"
+
+if [ "$failures" -gt 0 ]; then
+  echo "opencode-db-backup-prune.test: $failures failure(s)" >&2
+  exit 1
+fi
+echo "opencode-db-backup-prune.test: all checks passed"

@@ -1,0 +1,115 @@
+name: buffer-backup lock sync
+
+# Lock-sync gate for pkgs/buffer-backup (#998, after #781).
+#
+# This package carries two lockfiles for one package.json: Renovate
+# updates package-lock.json (npm) only, while the shipped nix build
+# installs from bun.lock only (flake.nix: `bun install
+# --frozen-lockfile`). The lock-sync check existed in the package's
+# sub-flake but no workflow ran it, so PR #980 bumped @types/node to
+# ^26 in package.json + package-lock.json, merged green, and left
+# bun.lock resolving @types/node 24.19.2 — the npm and bun/nix paths
+# silently compiled against different type definitions, the exact
+# drift #781 was filed to stop.
+#
+# This workflow runs the check automatically on a nightly schedule
+# (plus workflow_dispatch), so a lockfile-only change that desyncs
+# the locks fails visibly on the next nightly run instead of
+# accumulating silently until a human remembers to dispatch it —
+# PR #1479 removed its push trigger and it never had a schedule,
+# leaving it dispatch-only (#1481). Per Drew's 2026-11-04 ruling
+# CI triggers are schedule, dispatch, workflow_call and placement
+# only, so no push/pull_request trigger is restored. The check is
+# a plain python3 script — no nix or bun install needed — so the
+# gate stays fast.
+
+# The bun-pin-sync job below (#1091) reuses this workflow's triggers:
+# the bun version is pinned twice — bun-version in
+# buffer-backup-renovate-bun-sync.yml and version in
+# pkgs/bun-bin/hashes.json — and Renovate bumps the workflow pin
+# alone, so the pins split by construction (they already did once,
+# #1089). The job compares the two pins and fails naming both when
+# they disagree.
+
+"on":
+  schedule:
+    # Nightly gate run (#1481), offset from the other nightly
+    # workflows: mcpx-nixbuild 23 6, flake-packages-build 47 6,
+    # flake-checks-build 17 7 — this light check runs after all
+    # three, at 08:07 UTC.
+    - cron: "7 8 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Same pattern as mcpx-nixbuild: every run (nightly schedule or
+  # manual dispatch) is keyed by run_id, so a later run can never
+  # cancel — or displace a pending — run for an earlier one: every
+  # scheduled tree gets its own completed check.
+  group: ${{ github.workflow }}-${{ github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  lock-sync:
+    name: lock-sync check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check bun.lock and package-lock.json agree
+        run: python3 pkgs/buffer-backup/check-lock-sync.py
+
+  # #1013: cleanup-count.test.mjs -- the #1002 regression suite for
+  # cleanupCount one-pass convergence -- was run by nothing, so an
+  # extension.ts change could silently break the #1002 post-condition
+  # and merge green. This job runs the real suite on every
+  # scheduled or dispatched run of this workflow. The suite uses
+  # only the node standard library and
+  # reads src/extension.ts relative to its own location, so a plain
+  # node run suffices; the same suite is also wired as the
+  # cleanup-count check in pkgs/buffer-backup/flake.nix.
+  cleanup-count:
+    name: cleanup-count test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run cleanup-count regression suite (#1002)
+        run: node pkgs/buffer-backup/cleanup-count.test.mjs
+
+  # #1184: check-lock-sync.test.py -- the #1141/#1159 invocation-probe
+  # suite for check-lock-sync.py's exit-2 (bad invocation / malformed
+  # input) vs exit-1 (lockfiles disagree) contract -- was run by
+  # nothing: its only wiring was checks.check-lock-sync-args in the
+  # buffer-backup sub-flake, which no workflow builds. This job runs
+  # the real suite on every scheduled or dispatched run of this
+  # workflow, mirroring the cleanup-count
+  # job (#1013). The suite is plain python3 -- no nix or bun needed.
+  check-lock-sync-args:
+    name: check-lock-sync args test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run check-lock-sync invocation-probe suite (#1141/#1159)
+        run: python3 pkgs/buffer-backup/check-lock-sync.test.py
+
+  # #1091: the two bun pins (workflow bun-version vs
+  # pkgs/bun-bin/hashes.json version) were kept in step by a comment
+  # only. This job runs the plain-python comparison on every
+  # scheduled or dispatched run of this workflow, so a pin split
+  # introduced by a Renovate bump is caught by the next nightly run.
+  bun-pin-sync:
+    name: bun pin-sync check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check workflow bun-version and pkgs/bun-bin agree
+        run: python3 pkgs/bun-bin/check-pin-sync.py

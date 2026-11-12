@@ -2,6 +2,23 @@
 # Install the launchd agent for auto-patching VSCode Insiders
 # Usage: bash ~/nix/install-vscode-patch-agent.sh
 
+usage() {
+    echo "Usage: bash ~/nix/install-vscode-patch-agent.sh"
+}
+
+# This script takes no arguments (#1177): any argument was silently
+# ignored and the full install (chmod, plist write, launchctl load)
+# ran with exit 0. Reject the first argument by name, with usage on
+# stderr and exit 2, before any install step -- the house argument
+# contract (#1167 / #1145 rules 1 and 8). --help prints usage and
+# exits 0 with no side effects.
+if [[ $# -gt 0 ]]; then
+    case "$1" in
+        -h|--help) usage; exit 0 ;;
+        *) echo "install-vscode-patch-agent: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+    esac
+fi
+
 PLIST_PATH="$HOME/Library/LaunchAgents/com.drewry.patch-vscode-insiders.plist"
 PATCH_SCRIPT="$HOME/nix/patch-vscode-insiders.sh"
 
@@ -15,8 +32,20 @@ chmod +x "$PATCH_SCRIPT"
 # Unload existing agent if present
 launchctl unload "$PLIST_PATH" 2>/dev/null
 
-# Write the plist
-cat > "$PLIST_PATH" << 'EOF'
+# Create the LaunchAgents directory when it is missing (a fresh account
+# may not have one yet); without this the write below fails -- and until
+# #945 the failure was invisible, because the script still printed the
+# success banner and exited 0.
+if ! mkdir -p "$(dirname "$PLIST_PATH")"; then
+  echo "ERROR: Could not create LaunchAgents directory $(dirname "$PLIST_PATH")" >&2
+  exit 1
+fi
+
+# Write the plist. The heredoc is unquoted so $PATCH_SCRIPT expands:
+# the plist must name the exact script existence-checked and chmod'd
+# above - a hardcoded absolute path here once pointed the agent at
+# a different user's home regardless of $HOME (#1366).
+if ! cat > "$PLIST_PATH" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -26,7 +55,7 @@ cat > "$PLIST_PATH" << 'EOF'
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>/Users/drewry.pope/nix/patch-vscode-insiders.sh</string>
+        <string>$PATCH_SCRIPT</string>
     </array>
     <key>WatchPaths</key>
     <array>
@@ -42,9 +71,16 @@ cat > "$PLIST_PATH" << 'EOF'
 </dict>
 </plist>
 EOF
+then
+  echo "ERROR: Could not write plist to $PLIST_PATH" >&2
+  exit 1
+fi
 
-# Load the agent
-launchctl load "$PLIST_PATH"
+# Load the agent; a failed load must not be reported as success (#945).
+if ! launchctl load "$PLIST_PATH"; then
+  echo "ERROR: launchctl load failed for $PLIST_PATH" >&2
+  exit 1
+fi
 
 echo "✓ Installed and loaded com.drewry.patch-vscode-insiders"
 echo "  Patch script: $PATCH_SCRIPT"

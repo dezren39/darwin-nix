@@ -3,7 +3,7 @@
 // Uses only fake data. It never touches opencode.db and never spawns the CLI.
 
 import assert from "node:assert/strict"
-import { mkdir, mkdtemp, rm } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import plugin, { buildTool, describeSession, resolveSession } from "./warp-import.js"
@@ -57,6 +57,20 @@ await test("ambiguous title returns every candidate and does not guess", () => {
     r.candidates.map((s) => s.id),
     ["ses_aaa", "ses_ccc"],
   )
+})
+
+await test("ambiguous title over the cap keeps the true total (#1604)", () => {
+  const many = Array.from({ length: 15 }, (_, i) => ({
+    id: `ses_m${String(i).padStart(2, "0")}`,
+    title: `Warp dup ${i}`,
+    updated: 1_700_000_000_000 + i * 1000,
+    directory: "/repo",
+  }))
+  const r = resolveSession(many, "warp dup")
+  assert.equal(r.status, "ambiguous")
+  assert.equal(r.total, 15)
+  assert.equal(r.candidates.length, 10)
+  assert.equal(r.candidates[0].id, "ses_m14", "candidates stay most-recent-first")
 })
 
 await test("no match returns recent candidates + a reason", () => {
@@ -151,6 +165,21 @@ await test("ambiguous selector short-circuits before any side effect", async () 
   assert.equal(calls.length, 0, "must not create a workspace or select a session")
 })
 
+await test("ambiguous selector over the cap reports the total and the truncation (#1604)", async () => {
+  const many = Array.from({ length: 15 }, (_, i) => ({
+    id: `ses_m${String(i).padStart(2, "0")}`,
+    title: `Warp dup ${i}`,
+    updated: 1_700_000_000_000 + i * 1000,
+    directory: "/repo",
+  }))
+  const { env, calls } = makeEnv({ sessions: many })
+  const out = await buildTool(env).execute({ session: "warp dup" }, ctx)
+  assert.match(out, /matches 15 sessions \(showing the 10 most recent\)/)
+  assert.match(out, /truncated/)
+  assert.equal((out.match(/  - /g) || []).length, 10, "exactly the capped candidate list is shown")
+  assert.equal(calls.length, 0, "must not create a workspace or select a session")
+})
+
 await test("denied permission aborts with no side effects", async () => {
   const { env, calls } = makeEnv()
   const denied = { ...ctx, ask: async () => { throw new Error("denied by user") } }
@@ -168,7 +197,7 @@ await test("FALLBACK: warp API throwing degrades to export+import and says so", 
   })
 
   // Stub the CLI so nothing is actually exported or imported.
-  process.env.OPENCODE_BIN = "/usr/bin/true"
+  process.env.OPENCODE_BIN = "true"
   const out = await buildTool(env).execute({ session: "ses_aaa" }, ctx)
   delete process.env.OPENCODE_BIN
 
@@ -185,7 +214,7 @@ await test("FALLBACK: workspace returning no directory is treated as a failure",
   const { env } = makeEnv({
     onPost: ({ url }) => (url === "/experimental/workspace" ? { data: { id: "w1" } } : { data: undefined }),
   })
-  process.env.OPENCODE_BIN = "/usr/bin/true"
+  process.env.OPENCODE_BIN = "true"
   const out = await buildTool(env).execute({ session: "ses_aaa" }, ctx)
   delete process.env.OPENCODE_BIN
   assert.match(out, /FALLBACK/)
@@ -199,7 +228,7 @@ await test("happy path reports workspace, move warning and warp warning", async 
         ? { data: { id: "ws_1", directory: WT, branch: "feat/x" } }
         : { data: undefined },
   })
-  process.env.OPENCODE_BIN = "/usr/bin/true"
+  process.env.OPENCODE_BIN = "true"
   const out = await buildTool(env).execute({ session: "ses_aaa", branch: "feat/x" }, ctx)
   delete process.env.OPENCODE_BIN
 
@@ -217,7 +246,7 @@ await test("happy path reports workspace, move warning and warp warning", async 
 
 await test("use_current_directory skips the workspace call entirely", async () => {
   const { env, calls } = makeEnv()
-  process.env.OPENCODE_BIN = "/usr/bin/true"
+  process.env.OPENCODE_BIN = "true"
   const out = await buildTool(env).execute({ session: "ses_aaa", use_current_directory: true }, ctx)
   delete process.env.OPENCODE_BIN
   assert.ok(!calls.some((c) => c.url === "/experimental/workspace"))
@@ -229,7 +258,7 @@ await test("CLI failure is reported, not thrown, and does not select a session",
     onPost: ({ url }) =>
       url === "/experimental/workspace" ? { data: { id: "ws_1", directory: WT } } : { data: undefined },
   })
-  process.env.OPENCODE_BIN = "/usr/bin/false"
+  process.env.OPENCODE_BIN = "false"
   const out = await buildTool(env).execute({ session: "ses_aaa" }, ctx)
   delete process.env.OPENCODE_BIN
   assert.match(out, /failed while moving the session/)
@@ -252,7 +281,7 @@ await test("TUI select failure is non-fatal and reported", async () => {
       return { error: { data: { message: "no tui attached" } } }
     },
   })
-  process.env.OPENCODE_BIN = "/usr/bin/true"
+  process.env.OPENCODE_BIN = "true"
   const out = await buildTool(env).execute({ session: "ses_aaa" }, ctx)
   delete process.env.OPENCODE_BIN
   assert.match(out, /Moved session ses_aaa/)
@@ -275,7 +304,7 @@ await test("no low-level client falls back to serverUrl fetch, and its failure d
     directory: CWD,
     worktree: CWD,
   }
-  process.env.OPENCODE_BIN = "/usr/bin/true"
+  process.env.OPENCODE_BIN = "true"
   const out = await buildTool(env).execute({ session: "ses_aaa" }, ctx)
   delete process.env.OPENCODE_BIN
   assert.match(out, /FALLBACK: workspace creation failed/)
@@ -285,11 +314,66 @@ await test("no low-level client falls back to serverUrl fetch, and its failure d
 
 await test("no client and no serverUrl still degrades cleanly", async () => {
   const env = { client: { session: { list: async () => ({ data: SESSIONS }) } }, directory: CWD, worktree: CWD }
-  process.env.OPENCODE_BIN = "/usr/bin/true"
+  process.env.OPENCODE_BIN = "true"
   const out = await buildTool(env).execute({ session: "ses_aaa" }, ctx)
   delete process.env.OPENCODE_BIN
   assert.match(out, /FALLBACK/)
   assert.match(out, /no SDK client and no serverUrl available/)
+})
+
+await test("sanitize is declared in the args schema with a pass-false-normally instruction (#1754)", () => {
+  const { env } = makeEnv()
+  const tool = buildTool(env)
+  assert.deepEqual(Object.keys(tool.args), ["session", "branch", "use_current_directory", "sanitize"])
+  assert.equal(tool.args.sanitize.type, "boolean")
+  assert.match(tool.args.sanitize.description, /Pass false normally/)
+  // The existing three args are unchanged.
+  assert.equal(tool.args.session.type, "string")
+  assert.deepEqual(tool.args.branch.type, ["string", "null"])
+  assert.equal(tool.args.use_current_directory.type, "boolean")
+})
+
+// OPENCODE_BIN stub that records every argv line, so the export argv is
+// observable without spawning a real CLI.
+let stubSeq = 0
+async function argvStub() {
+  stubSeq++
+  const log = join(ROOT, `argv-${stubSeq}.log`)
+  const stub = join(ROOT, `opencode-stub-${stubSeq}.sh`)
+  await writeFile(stub, `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(log)}\n`)
+  await chmod(stub, 0o755)
+  return { stub, log }
+}
+
+await test("sanitize:true exports with --sanitize and says so (#1754)", async () => {
+  const { stub, log } = await argvStub()
+  const { env } = makeEnv()
+  process.env.OPENCODE_BIN = stub
+  let out
+  try {
+    out = await buildTool(env).execute({ session: "ses_aaa", use_current_directory: true, sanitize: true }, ctx)
+  } finally {
+    delete process.env.OPENCODE_BIN
+  }
+  const lines = (await readFile(log, "utf8")).trim().split("\n")
+  assert.ok(lines.includes("export ses_aaa --sanitize"), `export argv missing --sanitize: ${lines.join(" | ")}`)
+  assert.match(out, /Sanitized: exported with --sanitize/)
+})
+
+await test("sanitize omitted exports exactly as today with no sanitize note (#1754)", async () => {
+  const { stub, log } = await argvStub()
+  const { env } = makeEnv()
+  process.env.OPENCODE_BIN = stub
+  let out
+  try {
+    out = await buildTool(env).execute({ session: "ses_aaa", use_current_directory: true }, ctx)
+  } finally {
+    delete process.env.OPENCODE_BIN
+  }
+  const lines = (await readFile(log, "utf8")).trim().split("\n")
+  assert.ok(lines.includes("export ses_aaa"), `unexpected export argv: ${lines.join(" | ")}`)
+  assert.ok(!lines.some((l) => l.includes("--sanitize")), `--sanitize leaked without the arg: ${lines.join(" | ")}`)
+  assert.ok(!out.includes("Sanitized:"), "result claims a sanitize that did not happen")
 })
 
 await test("the plugin leaves no temp files behind", async () => {

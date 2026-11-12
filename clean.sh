@@ -15,13 +15,29 @@
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Sourced up front (not at first use further down) because the argument
+# parser below uses lib/common.sh's guard helpers (arg_die and friends).
+# shellcheck source=lib/common.sh
+. "$SELF_DIR/lib/common.sh"
+ARG_PROGRAM="clean.sh"
+outcome_init "$ARG_PROGRAM"
+
 # ---------------------------------------------------------------------------
 # Flags. Vocabulary matches git-maintain-repos and spotlight-exclude-artifacts.
 # ---------------------------------------------------------------------------
 SCOPE="auto"          # auto | system | no-system
 AUTO_SET=0
 SCOPE_SET=0
+SYSTEM_SET=0
+NO_SYSTEM_SET=0
+DEPTH_SET=0
+DOCKER_AGE_SET=0
+FOLLOW_YES_SET=0
+FOLLOW_NO_SET=0
+RECURSIVE_YES_SET=0
+RECURSIVE_NO_SET=0
 TARGET_PATH=""
+TARGET_SET=0
 DEPTH_LIMIT=""
 RECURSIVE_SET=0
 FOLLOW=""
@@ -31,6 +47,8 @@ MAINT_DEPTH="--deep"
 REPO_FLAGS_USED=""
 USE_SUDO=""          # empty = decide from --dry-run
 CLEAN_TMPDIR="${CLEAN_TMPDIR:-0}"   # opt-in: wipe /private/var/folders
+VAR_FOLDERS_ROOT="${VAR_FOLDERS_ROOT:-/private/var/folders}" # var-folders root for the --tmpdir sweep AND the opencode scratch tidy/discovery roots below (env seam so tests can point it at a fixture, #1346)
+TIDY_MOVE_FAILURES=0   # incremented by tidy_file_to_bucket/tidy_dir_to_bucket when an archive move fails (#1337)
 EXPIRE_REFLOG="${EXPIRE_REFLOG:-0}" # opt-in: force reflog expiry during maintenance
 DOCKER_AGE_DAYS="${DOCKER_AGE_DAYS:-}"  # set = age-scoped docker prune, VM preserved
 PRUNE_UNKNOWN_SCRATCH="${PRUNE_UNKNOWN_SCRATCH:-0}" # opt-in: delete, not just flag, the name-blind catch-all
@@ -41,6 +59,13 @@ UNKNOWN_SCRATCH_STALE_DAYS="${UNKNOWN_SCRATCH_STALE_DAYS:-7}"
 # or without --prune-unknown-scratch) without paying for docker/brew/git
 # maintenance/etc. first.
 ONLY_UNKNOWN_SCRATCH="${ONLY_UNKNOWN_SCRATCH:-0}"
+# --only-tmpdir: skip everything else in the script and just run the
+# /private/var/folders sweep (run_tmpdir_sweep below), then exit with
+# its result. The isolated form of --tmpdir, for trying the sweep (or
+# driving it from tests) without paying for HALF 1's docker/brew/git
+# maintenance first -- a plain `--system --tmpdir` test run would do
+# real host cleanup outside any fixture before reaching the sweep.
+ONLY_TMPDIR="${ONLY_TMPDIR:-0}"
 # Collects every name-blind catch-all hit (flagged or, with
 # --prune-unknown-scratch, deleted) for the report printed at the very end.
 # A plain array, not a file: this runs once per invocation, in one process,
@@ -124,8 +149,16 @@ OPT-IN DESTRUCTION (both off by default; measured as not worth their risk)
                     no sudo prompt (nothing it touches is root-owned),
                     combine with --dry-run or --prune-unknown-scratch the
                     same as a full run.
+  --only-tmpdir     Run JUST the /private/var/folders sweep above, then
+                    exit with its result (non-zero when the sweep reports
+                    deletion failures) -- everything else in this script
+                    is skipped. The isolated form of --tmpdir: no HALF 1
+                    system cleanup runs first, so it is safe to point at
+                    a fixture (see VAR_FOLDERS_ROOT) from tests.
 
 TUNABLES (environment)
+  (validated at startup: a non-integer value — or 0 where 0 is not
+  meaningful — is rejected with exit 2 before anything runs)
   ARTIFACT_STALE_DAYS       default 1   repo/worktree idle period before artifacts
                                         are removed (paired with a clean-tree check)
   HOME_ARTIFACT_STALE_DAYS  default 7   same, for artifact dirs directly in ~, where
@@ -188,41 +221,125 @@ TUNABLES (environment)
 EOF
 }
 
+# The parser below consumes "$@" (shift in the loop), so capture the
+# original arguments first: the privilege block re-executes "$0" with
+# these, so the root run re-parses the user's full CLI intent (#1313).
+# Mirroring every parser-set variable into the carried env instead
+# silently lost each flag nobody had mirrored yet.
+ORIGINAL_ARGS=("$@")
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --auto)           AUTO_SET=1 ;;
-    --system)         SCOPE="system"; SCOPE_SET=1 ;;
-    --no-system)      SCOPE="no-system"; SCOPE_SET=1 ;;
-    --path)           TARGET_PATH="${2:-}"; REPO_FLAGS_USED="$REPO_FLAGS_USED --path"; shift ;;
-    --recursive|--walk) REPO_FLAGS_USED="$REPO_FLAGS_USED --recursive"; DEPTH_LIMIT=""; RECURSIVE_SET=1 ;;
-    --no-recursive|--no-walk) DEPTH_LIMIT=1; RECURSIVE_SET=1 ;;
-    --depth)          DEPTH_LIMIT="${2:-1}"; RECURSIVE_SET=1; REPO_FLAGS_USED="$REPO_FLAGS_USED --depth"; shift ;;
-    --follow)         FOLLOW=1; REPO_FLAGS_USED="$REPO_FLAGS_USED --follow" ;;
-    --no-follow)      FOLLOW=0; REPO_FLAGS_USED="$REPO_FLAGS_USED --no-follow" ;;
+    --system)         { arg_conflict --system --no-system "$NO_SYSTEM_SET"; SCOPE="system"; SCOPE_SET=1; SYSTEM_SET=1; } ;;
+    --no-system)      { arg_conflict --system --no-system "$SYSTEM_SET"; SCOPE="no-system"; SCOPE_SET=1; NO_SYSTEM_SET=1; } ;;
+    --path)           { arg_require_value "$1" "${2:-}"; [ "$TARGET_SET" -eq 0 ] || arg_die "unexpected argument: $1 (target already set to $TARGET_PATH)"; TARGET_PATH="$2"; TARGET_SET=1; arg_used REPO_FLAGS_USED --path; shift; } ;;
+    --recursive|--walk) { arg_conflict --recursive --no-recursive "$RECURSIVE_NO_SET"; arg_conflict --depth --recursive "$DEPTH_SET"; arg_used REPO_FLAGS_USED --recursive; DEPTH_LIMIT=""; RECURSIVE_SET=1; RECURSIVE_YES_SET=1; } ;;
+    --no-recursive|--no-walk) { arg_conflict --recursive --no-recursive "$RECURSIVE_YES_SET"; arg_conflict --depth --no-recursive "$DEPTH_SET"; DEPTH_LIMIT=1; RECURSIVE_SET=1; RECURSIVE_NO_SET=1; arg_used REPO_FLAGS_USED --no-recursive; } ;;
+    --depth)          { arg_require_value "$1" "${2:-}"; arg_conflict --depth --recursive "$RECURSIVE_YES_SET"; arg_conflict --depth --no-recursive "$RECURSIVE_NO_SET"; arg_once "$1" DEPTH_SET; DEPTH_LIMIT="$2"; RECURSIVE_SET=1; arg_used REPO_FLAGS_USED --depth; shift; } ;;
+    --follow)         { arg_conflict --follow --no-follow "$FOLLOW_NO_SET"; FOLLOW=1; FOLLOW_YES_SET=1; arg_used REPO_FLAGS_USED --follow; } ;;
+    --no-follow)      { arg_conflict --follow --no-follow "$FOLLOW_YES_SET"; FOLLOW=0; FOLLOW_NO_SET=1; arg_used REPO_FLAGS_USED --no-follow; } ;;
     --sudo)           USE_SUDO=1 ;;
     --tmpdir)         CLEAN_TMPDIR=1 ;;
-    --expire-reflog)  EXPIRE_REFLOG=1 ;;
-    --docker-age)     DOCKER_AGE_DAYS="${2:-30}"; shift ;;
+    --expire-reflog)  { EXPIRE_REFLOG=1; arg_used REPO_FLAGS_USED --expire-reflog; } ;;
+    --docker-age)     { arg_require_value "$1" "${2:-}"; arg_once "$1" DOCKER_AGE_SET; DOCKER_AGE_DAYS="$2"; shift; } ;;
     --opencode-root-scratch) CLEAN_OPENCODE_ROOT=1 ;;
     --prune-unknown-scratch) PRUNE_UNKNOWN_SCRATCH=1 ;;
     --only-unknown-scratch) ONLY_UNKNOWN_SCRATCH=1 ;;
+    --only-tmpdir)    ONLY_TMPDIR=1 ;;
     --no-sudo)        USE_SUDO=0 ;;
-    --no-git-maintenance|--no-maintenance|--no-git) DO_MAINTENANCE=0 ;;
-    --quick)          MAINT_DEPTH="--quick" ;;
+    --no-git-maintenance|--no-maintenance|--no-git) { DO_MAINTENANCE=0; arg_used REPO_FLAGS_USED "$1"; } ;;
+    --quick)          { MAINT_DEPTH="--quick"; arg_used REPO_FLAGS_USED --quick; } ;;
     --dry-run)        DRY_RUN=1 ;;
     -h|--help)        usage; exit 0 ;;
     -*)               echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
-    *)                TARGET_PATH="$1" ;;
+    *)                { [ -n "$1" ] || arg_die "empty positional argument (target must not be empty)"; [ "$TARGET_SET" -eq 0 ] || arg_die "unexpected argument: $1 (target already set to $TARGET_PATH)"; TARGET_PATH="$1"; TARGET_SET=1; } ;;
   esac
   shift
 done
 
-# --system touches no repositories, so repository-scoped flags are meaningless
-# alongside it. Erroring beats silently ignoring them.
-if [ "$SCOPE" = "system" ] && [ -n "$REPO_FLAGS_USED" ]; then
-  echo "clean.sh: --system conflicts with repository-scoped flags:$REPO_FLAGS_USED" >&2
-  echo "          (--system does caches/logs only and opens no repository)" >&2
+# --depth is forwarded verbatim to find -maxdepth (via git-discover-repos),
+# where a non-numeric value fails mid-walk and 0 silently means "the path
+# itself only". Judge it whole, at parse time, with the shared arg_decimal
+# helper (lib/common.sh), like opencode-db-prune.sh judges
+# --protect-days/--batch (#830); the INT_MAX range backstop is #858's.
+# Empty means unbounded (--recursive). This judge is the same in all four
+# discovery-vocabulary scripts.
+if [ -n "$DEPTH_LIMIT" ]; then
+  arg_decimal DEPTH_LIMIT --depth "$DEPTH_LIMIT" positive
+fi
+
+# --no-recursive (a depth-1 walk) + --follow is the combination
+# git-discover-repos rejects at exit 2; an explicit --depth 1 with
+# --follow is the same combination in discover's vocabulary. Judge it
+# here, at parse time (#1276, mirroring #1268 in git-maintain-repos /
+# spotlight-exclude-artifacts): forwarding it used to be invisible
+# because the discovery pass discarded discover's stderr, so the run
+# reported "0 repos" and exited 0 while the caches half ran.
+if [ "$DEPTH_LIMIT" = "1" ] && [ "$FOLLOW" = "1" ]; then
+  echo "clean.sh: --no-recursive conflicts with --follow" >&2
+  echo "          (git-discover-repos rejects a depth-1 walk that follows symlinks; use --depth N with N>1 for a bounded walk plus following)" >&2
   exit 2
+fi
+
+# --docker-age is used only in bash arithmetic ($((DOCKER_AGE_DAYS * 24)) and
+# the volume cutoff), where a bare word silently evaluates to 0 -- so
+# `--docker-age abc` used to collapse the age filter to until=0h and prune
+# EVERYTHING, and junk like 10junk/1.5 aborted mid-run with a raw arithmetic
+# error (#829). Judge it whole, at parse time, with arg_decimal (which also
+# normalises the judged form, #881, and caps at INT_MAX so the * 86400 use
+# sites cannot wrap, #862). Covers the DOCKER_AGE_DAYS env var too.
+if [ -n "$DOCKER_AGE_DAYS" ]; then
+  arg_decimal DOCKER_AGE_DAYS --docker-age "$DOCKER_AGE_DAYS" positive
+fi
+
+# The numeric env tunables (see TUNABLES in usage) gate deletion — age,
+# idle and size floors — and reach three kinds of use site, each of which
+# fails differently on a junk value (#837): bash arithmetic silently
+# evaluates a bare word to 0 (the age gate vanishes), a find -mtime/-mmin
+# argument errors while the idle checks discard stderr and read the empty
+# result as "nothing modified recently" (the idle gate inverts), and an
+# integer test errors into the wrong branch. #829 judged DOCKER_AGE_DAYS
+# alone; judge every remaining tunable the same way, here at parse time,
+# before any sweep runs and before the sudo re-exec below forwards the
+# values via --preserve-env. Most must be positive; 0 is meaningful for
+# LOG_STALE_DAYS (documented "0 = drop all logs") and for the NIX_KEEP_*
+# pair (NIX_KEEP_DAYS=0 is the documented scorched-earth nix GC mode, and
+# NIX_KEEP_GENS=0 means the current generation alone satisfies the keep
+# floor), so those are judged non-negative (#871). Unset or empty is fine
+# and skips the check: the later
+# ${VAR:-default} assignments supply a known-good literal, and an empty
+# env value takes that default the same way.
+_clean_positive_vars="ARTIFACT_STALE_DAYS HOME_ARTIFACT_STALE_DAYS CACHE_STALE_DAYS COLIMA_STOPPED_STALE_DAYS OPENCODE_TMP_STALE_DAYS OPENCODE_WORKTREE_STALE_DAYS OPENCODE_ROOT_STALE_DAYS OPENCODE_TIDY_PROTECT_DAYS OPENCODE_TIDY_LARGE_MB SHORT_SCRATCH_STALE_HOURS PG_SCRATCH_STALE_HOURS ACTIVE_ARTIFACT_STALE_HOURS PYTEST_KEEP_HOURS UNKNOWN_SCRATCH_MIN_MB UNKNOWN_SCRATCH_STALE_DAYS"
+for _v in $_clean_positive_vars; do
+  _val="${!_v:-}"
+  [ -n "$_val" ] || continue
+  # arg_decimal judges digits/range (INT_MAX backstop, #862) and writes
+  # back the normalised decimal (#881), naming the variable.
+  arg_decimal "$_v" "$_v" "$_val" positive
+done
+unset _clean_positive_vars _v _val
+# Non-negative tunables: 0 is a documented, meaningful value for each of
+# these (see the header comment above), so they are judged like the
+# positive tunables but without the -gt 0 test (#871).
+_clean_nonnegative_vars="LOG_STALE_DAYS NIX_KEEP_DAYS NIX_KEEP_GENS"
+for _v in $_clean_nonnegative_vars; do
+  _val="${!_v:-}"
+  [ -n "$_val" ] || continue
+  # Same judge as the positive tunables, without the > 0 test (#871);
+  # normalisation keeps the blessed NIX_KEEP_DAYS=000 scorched-earth
+  # form: it becomes 0 and still selects that branch.
+  arg_decimal "$_v" "$_v" "$_val" non-negative
+done
+unset _clean_nonnegative_vars _v _val
+
+# --system touches no repositories, so repository-scoped flags are meaningless
+# alongside it. Erroring beats silently ignoring them. The accumulator
+# and the judge are the shared mode-effectiveness mechanism in
+# lib/common.sh (design #1722, #1723); the parser arms above declare
+# class membership with arg_used.
+if [ "$SCOPE" = "system" ]; then
+  arg_refuse_in_mode --system repository-scoped "$REPO_FLAGS_USED" "--system does caches/logs only and opens no repository"
 fi
 
 # --dry-run writes nothing, so it should not demand a password. --sudo forces
@@ -252,9 +369,20 @@ esac
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-C_WARN=$'\033[1;33m'; C_INFO=$'\033[0;36m'; C_OFF=$'\033[0m'
-warn() { printf '%s⚠️  %s%s\n' "$C_WARN" "$*" "$C_OFF" >&2; }
-info() { printf '%sℹ️  %s%s\n' "$C_INFO" "$*" "$C_OFF"; }
+# Gate each color by the stream its helper writes to: warn is stderr, info is
+# stdout. NO_COLOR disables both (https://no-color.org) -- Palette (#1465).
+set_output_colors() {
+  C_WARN=''; C_WARN_OFF=''; C_INFO=''; C_INFO_OFF=''
+  if [[ -z "${NO_COLOR:-}" && -t 2 ]]; then
+    C_WARN=$'\033[1;33m'; C_WARN_OFF=$'\033[0m'
+  fi
+  if [[ -z "${NO_COLOR:-}" && -t 1 ]]; then
+    C_INFO=$'\033[0;36m'; C_INFO_OFF=$'\033[0m'
+  fi
+}
+set_output_colors
+warn() { printf '%s⚠️  %s%s\n' "$C_WARN" "$*" "$C_WARN_OFF" >&2; }
+info() { printf '%sℹ️  %s%s\n' "$C_INFO" "$*" "$C_INFO_OFF"; }
 
 get_free_bytes() { df -k / | awk 'NR==2 {print $4 * 1024}'; }
 
@@ -276,8 +404,6 @@ brew_cleanup() {
   if [ -z "$b" ]; then info "brew not installed, skipping"; return 0; fi
   echo "🍺 brew cleanup ($b, prefix $("$b" --prefix 2>/dev/null))"
   "$b" cleanup --prune=all || warn "brew cleanup failed"
-  # Casks whose app bundle is gone leave Caskroom metadata and broken symlinks.
-  "$b" cleanup --prune=all --quiet 2>/dev/null || true
 }
 
 human_size() {
@@ -285,6 +411,30 @@ human_size() {
   if (( bytes >= 1073741824 )); then printf "%.2f GB" "$(echo "scale=2; $bytes / 1073741824" | bc)"
   elif (( bytes >= 1048576 )); then printf "%.2f MB" "$(echo "scale=2; $bytes / 1048576" | bc)"
   else printf "%d KB" "$(( bytes / 1024 ))"; fi
+}
+
+# Portable stat helpers (#1068). clean.sh targets macOS, where stat is
+# BSD: GNU-only `stat -c` fails there ("illegal option -- c"), and with
+# 2>/dev/null on the call the failure silently emptied the value. Try the
+# BSD form first and validate its shape -- GNU stat also accepts -f but
+# with file-system semantics, so an unvalidated BSD attempt can return
+# plausible-looking garbage there -- then fall back to GNU.
+stat_mtime_epoch() { # <path> -> mtime as epoch seconds (empty on failure)
+  local _v
+  _v="$(stat -f '%m' "$1" 2>/dev/null)" && case "$_v" in ''|*[!0-9]*) ;; *) printf '%s' "$_v"; return 0 ;; esac
+  stat -c '%Y' "$1" 2>/dev/null # GNU fallback (BSD form above is primary)
+}
+stat_birth_time() { # <path> -> birth time "YYYY-MM-DD HH:MM:SS" (empty if unknown)
+  local _v
+  _v="$(stat -f '%SB' -t '%Y-%m-%d %H:%M:%S' "$1" 2>/dev/null)" && case "$_v" in [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' '[0-9][0-9]:[0-9][0-9]:[0-9][0-9]) printf '%s' "$_v"; return 0 ;; esac
+  _v="$(stat -c '%w' "$1" 2>/dev/null)"; [ "$_v" = "-" ] && _v=""
+  printf '%s' "${_v%%.*}"
+}
+stat_mtime_time() { # <path> -> mtime as "YYYY-MM-DD HH:MM:SS" (empty on failure)
+  local _v
+  _v="$(stat -f '%Sm' -t '%Y-%m-%d %H:%M:%S' "$1" 2>/dev/null)" && case "$_v" in [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' '[0-9][0-9]:[0-9][0-9]:[0-9][0-9]) printf '%s' "$_v"; return 0 ;; esac
+  _v="$(stat -c '%y' "$1" 2>/dev/null)"
+  printf '%s' "${_v%%.*}"
 }
 
 # Every destructive action funnels through these so --dry-run is honoured
@@ -316,7 +466,18 @@ if [ "$EUID" -ne 0 ]; then
     info "no-sudo: staying unprivileged; root-owned paths will be skipped"
     export CALLER_USER_HOME="$(realpath ~)"
   else
-    if [ "$DO_CACHES" = "1" ]; then brew_cleanup; fi
+    # --sudo --dry-run is a no-op (see the message printed above): never
+    # re-exec, and never run the pre-sudo brew cleanup below -- both
+    # write. Exit before either happens (#1313).
+    if [ "$DRY_RUN" = "1" ]; then
+      info "sudo dry-run: staying unprivileged; no re-exec, nothing is written"
+      exit 0
+    fi
+    # --only-tmpdir is an isolated mode: skip the unrelated pre-sudo brew
+    # maintenance, and carry ONLY_TMPDIR through the re-exec below (the
+    # original arguments are re-passed there, and the env seam also
+    # carries the env-set form the privileged invocation must learn).
+    if [ "$DO_CACHES" = "1" ] && [ "$ONLY_TMPDIR" != "1" ]; then brew_cleanup; fi
     CALLER_USER_HOME="$(realpath ~)" DISK_FREE_START="$DISK_FREE_START" \
       ARTIFACT_STALE_DAYS="${ARTIFACT_STALE_DAYS:-1}" LOG_STALE_DAYS="${LOG_STALE_DAYS:-0}" \
       CACHE_STALE_DAYS="${CACHE_STALE_DAYS:-3}" \
@@ -327,18 +488,35 @@ if [ "$EUID" -ne 0 ]; then
       OPENCODE_ROOT_STALE_DAYS="${OPENCODE_ROOT_STALE_DAYS:-7}" \
       OPENCODE_TIDY_PROTECT_DAYS="${OPENCODE_TIDY_PROTECT_DAYS:-1}" \
       OPENCODE_TIDY_LARGE_MB="${OPENCODE_TIDY_LARGE_MB:-200}" \
-      CLEAN_TMPDIR="$CLEAN_TMPDIR" EXPIRE_REFLOG="$EXPIRE_REFLOG" DOCKER_AGE_DAYS="$DOCKER_AGE_DAYS" \
-      CLEAN_OPENCODE_ROOT="$CLEAN_OPENCODE_ROOT" \
-      sudo --preserve-env=CALLER_USER_HOME,DISK_FREE_START,ARTIFACT_STALE_DAYS,LOG_STALE_DAYS,CACHE_STALE_DAYS,HOME_ARTIFACT_STALE_DAYS,COLIMA_STOPPED_STALE_DAYS,OPENCODE_TMP_STALE_DAYS,OPENCODE_WORKTREE_STALE_DAYS,OPENCODE_ROOT_STALE_DAYS,OPENCODE_TIDY_PROTECT_DAYS,OPENCODE_TIDY_LARGE_MB,CLEAN_TMPDIR,EXPIRE_REFLOG,DOCKER_AGE_DAYS,CLEAN_OPENCODE_ROOT \
-        "$0" "$@"
+      NIX_KEEP_DAYS="${NIX_KEEP_DAYS:-7}" NIX_KEEP_GENS="${NIX_KEEP_GENS:-5}" \
+      SHORT_SCRATCH_STALE_HOURS="${SHORT_SCRATCH_STALE_HOURS:-8}" \
+      PG_SCRATCH_STALE_HOURS="${PG_SCRATCH_STALE_HOURS:-8}" \
+      ACTIVE_ARTIFACT_STALE_HOURS="${ACTIVE_ARTIFACT_STALE_HOURS:-8}" \
+      PYTEST_KEEP_HOURS="${PYTEST_KEEP_HOURS:-4}" \
+      UNKNOWN_SCRATCH_MIN_MB="$UNKNOWN_SCRATCH_MIN_MB" \
+      UNKNOWN_SCRATCH_STALE_DAYS="$UNKNOWN_SCRATCH_STALE_DAYS" \
+      VSCODE_PRUNE_HEAVY="${VSCODE_PRUNE_HEAVY:-0}" \
+      CLEAN_TMPDIR="$CLEAN_TMPDIR" EXPIRE_REFLOG="$EXPIRE_REFLOG" DOCKER_AGE_DAYS="$DOCKER_AGE_DAYS" ONLY_TMPDIR="$ONLY_TMPDIR" PRUNE_UNKNOWN_SCRATCH="$PRUNE_UNKNOWN_SCRATCH" ONLY_UNKNOWN_SCRATCH="$ONLY_UNKNOWN_SCRATCH" \
+      CLEAN_OPENCODE_ROOT="$CLEAN_OPENCODE_ROOT" VAR_FOLDERS_ROOT="$VAR_FOLDERS_ROOT" \
+      sudo --preserve-env=CALLER_USER_HOME,DISK_FREE_START,ARTIFACT_STALE_DAYS,LOG_STALE_DAYS,CACHE_STALE_DAYS,HOME_ARTIFACT_STALE_DAYS,COLIMA_STOPPED_STALE_DAYS,OPENCODE_TMP_STALE_DAYS,OPENCODE_WORKTREE_STALE_DAYS,OPENCODE_ROOT_STALE_DAYS,OPENCODE_TIDY_PROTECT_DAYS,OPENCODE_TIDY_LARGE_MB,CLEAN_TMPDIR,EXPIRE_REFLOG,DOCKER_AGE_DAYS,CLEAN_OPENCODE_ROOT,VAR_FOLDERS_ROOT,ONLY_TMPDIR,PRUNE_UNKNOWN_SCRATCH,ONLY_UNKNOWN_SCRATCH,NIX_KEEP_DAYS,NIX_KEEP_GENS,SHORT_SCRATCH_STALE_HOURS,PG_SCRATCH_STALE_HOURS,ACTIVE_ARTIFACT_STALE_HOURS,PYTEST_KEEP_HOURS,UNKNOWN_SCRATCH_MIN_MB,UNKNOWN_SCRATCH_STALE_DAYS,VSCODE_PRUNE_HEAVY \
+        "$0" "${ORIGINAL_ARGS[@]}"
     exit $?
   fi
 fi
 
 ROOT_HOME="$(realpath ~)"
 if [ -z "${CALLER_USER_HOME:-}" ]; then
-  if [ -n "${SUDO_USER:-}" ]; then CALLER_USER_HOME="$(eval echo "~$SUDO_USER")"
-  else CALLER_USER_HOME="$ROOT_HOME"; fi
+  # The tilde expansion goes through eval, so only evaluate a SUDO_USER that
+  # is a plain username (#875, same gate as git-discover-repos --user);
+  # anything else is treated as unset and falls back to ROOT_HOME.
+  _sudo_user_ok=0
+  case "${SUDO_USER:-}" in
+    -*|'~'*|*[!A-Za-z0-9._-]*) ;;
+    ?*) _sudo_user_ok=1 ;;
+  esac
+  if [ "$_sudo_user_ok" = "1" ]; then CALLER_USER_HOME="$(eval echo "~$SUDO_USER")"
+  else CALLER_USER_HOME="$ROOT_HOME"; SUDO_USER=""; fi
+  unset _sudo_user_ok
 fi
 CALLER_USER="${SUDO_USER:-$(basename "$CALLER_USER_HOME")}"
 
@@ -367,8 +545,6 @@ LOG_STALE_DAYS="${LOG_STALE_DAYS:-0}"
 # is sound even without a live daemon to ask.
 COLIMA_STOPPED_STALE_DAYS="${COLIMA_STOPPED_STALE_DAYS:-10}"
 
-# shellcheck source=lib/common.sh
-. "$SELF_DIR/lib/common.sh"
 build_name_expr CACHE_EXPR "${CACHE_NAMES[@]}"
 build_name_expr RISK_EXPR  "${RISKY_NAMES[@]}"
 build_name_expr TRASH_EXPR "${TRASH_NAMES[@]}"
@@ -434,8 +610,8 @@ sweep_unknown_large_scratch() {
     [ "$size_mb" -ge "$UNKNOWN_SCRATCH_MIN_MB" ] || continue
     [ -n "$(find "$entry" -maxdepth 0 -mmin "-${age_cutoff_min}" -print 2>/dev/null)" ] && continue  # too fresh
     [ -n "$(lsof +D "$entry" 2>/dev/null | head -1)" ] && continue  # something has it open
-    created="$(stat -c '%w' "$entry" 2>/dev/null)"; created="${created%%.*}"
-    modified="$(stat -c '%y' "$entry" 2>/dev/null)"; modified="${modified%%.*}"
+    created="$(stat_birth_time "$entry")"
+    modified="$(stat_mtime_time "$entry")"
     if [ "$PRUNE_UNKNOWN_SCRATCH" = "1" ]; then
       status="deleted"
       if [ "$DRY_RUN" = "1" ]; then echo "  would remove (unknown, ${size_mb} MB, >${UNKNOWN_SCRATCH_STALE_DAYS}d): ${entry/#$CALLER_USER_HOME/\~}"; status="would delete"
@@ -462,6 +638,24 @@ print_unknown_scratch_report() {
   done
 }
 
+# The --tmpdir sweep itself, shared by HALF 1 and --only-tmpdir: the
+# sweep lives in var-folders-clean.sh so its test
+# (var-folders-clean.test.sh, run by the flake check) exercises the
+# shipped logic instead of a pasted copy (#557). The helper exits 1
+# naming any deletions that failed (#1262); that signal must not die at
+# this, its only, call site (#1270): warn now and record the failure.
+# --only-tmpdir exits immediately; a full run exits after the remaining sweeps
+# and final report.
+run_tmpdir_sweep() {
+  local _tmpdir_status=0
+  bash "$SELF_DIR/var-folders-clean.sh" "$VAR_FOLDERS_ROOT" || _tmpdir_status=$?
+  if [ "$_tmpdir_status" -ne 0 ]; then
+    warn "/private/var/folders sweep failed: var-folders-clean.sh could not delete everything (see above)"
+    outcome_fail "var-folders-sweep" "var-folders-clean.sh" "$VAR_FOLDERS_ROOT" \
+      "$_tmpdir_status" "could not delete everything (see above)"
+  fi
+}
+
 if [ "$ONLY_UNKNOWN_SCRATCH" = "1" ]; then
   echo "🗒️  --only-unknown-scratch: running just the name-blind catch-all"
   sweep_unknown_large_scratch "$CALLER_USER_HOME/.local/share/opencode/tmp"
@@ -475,6 +669,16 @@ if [ "$ONLY_UNKNOWN_SCRATCH" = "1" ]; then
     print_unknown_scratch_report
   fi
   exit 0
+fi
+
+if [ "$ONLY_TMPDIR" = "1" ]; then
+  echo "🧻 --only-tmpdir: running just the /private/var/folders sweep"
+  if [ "$DRY_RUN" = "1" ]; then
+    echo "  would clear /private/var/folders (keeping zz)"
+    exit 0
+  fi
+  run_tmpdir_sweep
+  outcome_finish
 fi
 
 #############################################################################
@@ -927,7 +1131,10 @@ nix_keep_window() {
   printf '%s' "$days"
 }
 
-if [ "$NIX_KEEP_DAYS" = "0" ]; then
+# Arithmetic -eq, not a string test: a zero written with leading zeros
+# (000) also selects scorched-earth; as days=0 in nix_keep_window it would
+# double 0 forever and never widen (#871).
+if [ "$NIX_KEEP_DAYS" -eq 0 ]; then
   echo "🧊 nix store garbage collection (deleting ALL old generations)"
   run nix-collect-garbage -d || warn "nix-collect-garbage failed"
 else
@@ -978,8 +1185,16 @@ for _ptbase in "$CALLER_USER_HOME/.local/share/opencode/tmp" "${TMPDIR:-/tmp}" /
   for _ptdir in "$_ptbase"/pytest-of-*; do
     [ -d "$_ptdir" ] || continue
     # Newest real run (ignore the pytest-current symlink) is always preserved.
-    _newest="$(find "$_ptdir" -maxdepth 1 -mindepth 1 -type d -name 'pytest-*' \
-                 -exec stat -c '%Y %n' {} \; 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)"
+    # Computed with the portable stat helper (#1068): the old GNU-only
+    # `stat -c` pipeline silently yielded "" on macOS, disabling this guard.
+    _newest=""; _newest_mtime=-1
+    for _cand in "$_ptdir"/pytest-*; do
+      [ -d "$_cand" ] && [ ! -L "$_cand" ] || continue
+      _cand_mtime="$(stat_mtime_epoch "$_cand")"
+      case "$_cand_mtime" in ''|*[!0-9]*) continue ;; esac
+      if [ "$_cand_mtime" -gt "$_newest_mtime" ]; then _newest="$_cand"; _newest_mtime="$_cand_mtime"; fi
+    done
+    unset _cand _cand_mtime _newest_mtime
     while IFS= read -r _run; do
       [ -n "$_run" ] || continue
       [ "$_run" = "$_newest" ] && continue
@@ -1143,11 +1358,10 @@ if [ "$CLEAN_TMPDIR" != "1" ]; then
 elif [ "$DRY_RUN" = "1" ]; then
   echo "  would clear /private/var/folders (keeping zz)"
 else
-  folders=/private/var/folders
-  for i in "$folders"/*; do
-    [ "$(basename "$i")" != "zz" ] && rm -rf "$i" 2>/dev/null
-  done
-  rm -rf "$folders/zz/"* 2>/dev/null
+  # Shared with --only-tmpdir (see run_tmpdir_sweep above): a failure
+  # here is remembered and the run exits non-zero at the very end,
+  # once the remaining sweeps and the final report have run (#1270).
+  run_tmpdir_sweep
 fi
 
 del "$CALLER_USER_HOME/.Trash/"* "$ROOT_HOME/.Trash/"*
@@ -1160,7 +1374,20 @@ fi  # DO_CACHES
 if [ "$DO_REPOS" = "1" ]; then
 
 DARGS=()
-if [ -n "$TARGET_PATH" ]; then DARGS+=(--path "$TARGET_PATH"); else DARGS+=(--auto --user "$CALLER_USER"); fi
+if [ -n "$TARGET_PATH" ]; then
+  DARGS+=(--path "$TARGET_PATH")
+elif [ "$(realpath ~)" = "$CALLER_USER_HOME" ]; then
+  # This process's HOME already IS the caller's home, so let
+  # git-discover-repos use $HOME (its default when no --user is
+  # passed). Passing --user here would resolve the account's passwd home instead,
+  # bypassing an overridden HOME -- a test fixture HOME named after a
+  # real user would then scan (and clean) that user's REAL home
+  # (Codex P1 on PR #1342).
+  DARGS+=(--auto)
+else
+  # Root after the sudo re-exec: HOME is root's, so name the caller.
+  DARGS+=(--auto --user "$CALLER_USER")
+fi
 [ -n "$DEPTH_LIMIT" ] && DARGS+=(--depth "$DEPTH_LIMIT")
 [ -n "$FOLLOW" ] && { [ "$FOLLOW" = "1" ] && DARGS+=(--follow) || DARGS+=(--no-follow); }
 
@@ -1174,13 +1401,25 @@ fi
 DISCOVERY_FILE="$(mktemp)"
 REPOS_ONLY_FILE="$(mktemp)"
 OWNERS_FILE="$(mktemp)"
-trap 'rm -f "$DISCOVERY_FILE" "$REPOS_ONLY_FILE" "$OWNERS_FILE"' EXIT
+DISCOVER_ERR="$(mktemp)"
+trap 'rm -f "$DISCOVERY_FILE" "$REPOS_ONLY_FILE" "$OWNERS_FILE" "$DISCOVER_ERR"' EXIT
 
 # ONE discovery pass feeds everything below: .trash removal, artifact pruning,
 # Spotlight markers and the maintenance repo list.
+#
+# Discovery failure must be loud (#1276, mirroring #1268): the old call
+# discarded discover's stderr and only warned, so a git-discover-repos
+# failure looked exactly like an empty tree -- "0 repos" at exit 0 while
+# the caches half had already run. Capture stderr, surface it, and fail
+# the run with discover's exit code.
 echo "🔎 discovering repositories and artifacts"
-"$SELF_DIR/git-discover-repos" "${DARGS[@]}" --find all --status > "$DISCOVERY_FILE" 2>/dev/null \
-  || warn "discovery failed"
+"$SELF_DIR/git-discover-repos" "${DARGS[@]}" --find all --status > "$DISCOVERY_FILE" 2>"$DISCOVER_ERR"
+discover_rc=$?
+if [ "$discover_rc" -ne 0 ]; then
+  echo "clean.sh: git-discover-repos failed with exit $discover_rc" >&2
+  [ -s "$DISCOVER_ERR" ] && cat "$DISCOVER_ERR" >&2
+  exit "$discover_rc"
+fi
 awk -F'\t' '$1=="repo"{print $2}' "$DISCOVERY_FILE" > "$REPOS_ONLY_FILE"
 # Artifact ownership is resolved against repos AND worktrees, while maintenance
 # still runs against REPOS_ONLY_FILE alone. Keeping these separate matters: a
@@ -1273,6 +1512,13 @@ mark_dir() {
   # App static trees may be committed or feed flat-static manifests. Never add
   # an untracked Spotlight marker to them.
   [ "${d##*/}" = "static" ] && return 0
+  # A symlinked marker is never followed (#1586): warn distinctly and
+  # skip -- the [ -e ] check below would count a live symlink as
+  # already present, and spotlight_mark would refuse it anyway.
+  if [ -L "$d/$SPOTLIGHT_MARKER" ]; then
+    echo "  warning: cannot write $d/$SPOTLIGHT_MARKER (symlink; not followed)" >&2
+    return 0
+  fi
   [ -e "$d/$SPOTLIGHT_MARKER" ] && return 0
   if [ "$DRY_RUN" = "1" ]; then echo "  would mark: ${d/#$HOME/\~}"; MARKED=$((MARKED + 1)); return 0; fi
   spotlight_mark "$d" "$CALLER_USER" && MARKED=$((MARKED + 1))
@@ -1629,8 +1875,12 @@ tidy_file_to_bucket() {
   dest="$bucket_root/$year/$month"
   if [ "$DRY_RUN" = "1" ]; then
     echo "  would file away: ${entry/#$CALLER_USER_HOME/\~} -> ${dest/#$CALLER_USER_HOME/\~}/"
-  else
-    mkdir -p "$dest" && mv "$entry" "$dest/" 2>/dev/null
+  elif ! mkdir -p "$dest"; then
+    warn "could not create tidy bucket $dest for $entry"
+    TIDY_MOVE_FAILURES=$((TIDY_MOVE_FAILURES + 1))
+  elif ! mv "$entry" "$dest/" 2>/dev/null; then
+    warn "could not file away $entry -> $dest/"
+    TIDY_MOVE_FAILURES=$((TIDY_MOVE_FAILURES + 1))
   fi
 }
 tidy_dir_to_bucket() {
@@ -1642,8 +1892,12 @@ tidy_dir_to_bucket() {
   dest="$bucket_root/$year/$month"
   if [ "$DRY_RUN" = "1" ]; then
     echo "  would archive: ${dir/#$CALLER_USER_HOME/\~} -> ${dest/#$CALLER_USER_HOME/\~}/$(basename "$dir")/"
-  else
-    mkdir -p "$dest" && mv "$dir" "$dest/" 2>/dev/null
+  elif ! mkdir -p "$dest"; then
+    warn "could not create tidy bucket $dest for $dir"
+    TIDY_MOVE_FAILURES=$((TIDY_MOVE_FAILURES + 1))
+  elif ! mv "$dir" "$dest/" 2>/dev/null; then
+    warn "could not archive $dir -> $dest/"
+    TIDY_MOVE_FAILURES=$((TIDY_MOVE_FAILURES + 1))
   fi
 }
 
@@ -1720,7 +1974,7 @@ if [ -z "$TARGET_PATH" ]; then
   # sweep: tidy_opencode_loose_files skips anything with its own .git, and
   # clean_opencode_scratch_dir's idle check (clean tree, nothing unpushed,
   # past the age window) is what actually decides a worktree's fate.
-  for _vf_oc in /private/var/folders/*/*/T/opencode; do
+  for _vf_oc in "$VAR_FOLDERS_ROOT"/*/*/T/opencode; do
     [ -d "$_vf_oc" ] || continue
     tidy_opencode_loose_files "$_vf_oc" "$_vf_oc/_loose"
     clean_opencode_scratch_dir "$_vf_oc" "$OPENCODE_TMP_STALE_DAYS" "/private/var/folders T/opencode"
@@ -1872,3 +2126,20 @@ else echo "⚠️  No net disk reclaimed ($(human_size $(( -RECLAIMED ))) more u
 # just got deleted (size/dates captured before the delete, since the path is
 # gone by the time this prints).
 print_unknown_scratch_report
+
+# A failed --tmpdir sweep fails the run (#1270): its status is recorded at
+# the call site above and lands here, after every other sweep and the final
+# report, so a partially failed sweep no longer ends at exit 0.
+if outcome_has_failures; then
+  warn "/private/var/folders sweep failed -- clean.sh exiting non-zero"
+fi
+
+# Failed tidy archive moves fail the run (#1337): tidy_file_to_bucket /
+# tidy_dir_to_bucket counted every failed mkdir/mv above (and warned per
+# entry at the time), so a tidy pass that filed nothing away no longer
+# ends at exit 0 looking exactly like success.
+if [ "$TIDY_MOVE_FAILURES" -gt 0 ]; then
+  warn "opencode tidy: $TIDY_MOVE_FAILURES archive move(s) failed -- clean.sh exiting non-zero"
+  exit 1
+fi
+outcome_finish

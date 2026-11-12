@@ -29,9 +29,22 @@
 
 set -euo pipefail
 
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Sourced up front because the argument parser below uses
+# lib/common.sh's guard helpers (arg_die and friends) -- design #1145
+# phase 2 (#1147), the clean.sh SELF_DIR precedent. die() below stays
+# for runtime failures (exit 1); parse errors go through the shared
+# helpers (exit 2, usage on stderr).
+# shellcheck source=lib/common.sh
+. "$SELF_DIR/lib/common.sh"
+ARG_PROGRAM="opencode-db-vacuum"
+
 DB_DEFAULT="${HOME}/.local/share/opencode/opencode.db"
 DB="$DB_DEFAULT"
+DB_SET=0
 INTO=""
+INTO_SET=0
 DRY_RUN=0
 ASSUME_YES=0
 SET_AUTOVACUUM=0
@@ -41,6 +54,33 @@ FORCE=0
 die() {
   printf 'opencode-db-vacuum: %s\n' "$*" >&2
   exit 1
+}
+
+# Percent-encode the characters SQLite's URI parser treats specially in a
+# path (% first, then ? and #), so a --db/--into path containing them opens
+# the file actually named (#890). For sqlite3 CLI "file:" arguments, which
+# are URIs, not SQL literals -- a single quote needs no escaping there.
+uri_escape_path() {
+  printf '%s' "$1" | sed -e 's/%/%25/g' -e 's/?/%3f/g' -e 's/#/%23/g'
+}
+
+# Escape a path for interpolation into a single-quoted SQL literal (#891).
+sql_literal_escape() {
+  printf '%s' "$1" | sed -e "s/'/''/g"
+}
+
+# Filesystem identity of the path at $1: its device id. Two paths with
+# the same id live on the same filesystem, so a move between them is a
+# rename, never a copy. GNU stat first, BSD stat second, df's
+# filesystem column as the last resort (the device-comparison idiom
+# opencode-db-vacuum.test.sh already uses).
+# The stat calls dereference (-L): without it, stat reports a symlinked
+# directory's own device, not its target's, so an --into parent that is a
+# symlink onto another filesystem read as same-filesystem and the swap
+# skipped staging for what was really a cross-filesystem copy (Codex
+# review on #1781). df resolves the path itself; no flag needed there.
+fs_id() {
+  stat -L -c %d "$1" 2>/dev/null || stat -L -f %d "$1" 2>/dev/null || df -P "$1" | awk 'NR==2 {print $1}'
 }
 note() { printf '  %s\n' "$*"; }
 step() { printf '\n==> %s\n' "$*"; }
@@ -71,7 +111,10 @@ opencode_pids() {
       # starts with spaces and the "(^|/)opencode" test below can never
       # anchor ^ at the real argv[0] -- a process started as a bare
       # "opencode" (the normal PATH invocation) was missed entirely
-      # (#467). Trim the padding so cmd holds the true cmdline.
+      # (#467). Trim the padding so cmd holds the true cmdline. The
+      # match itself requires a boundary after the name ($ or space),
+      # so argv[0]s that merely start with "opencode" (opencode-share,
+      # opencode-server, opencodefoo) are not counted (#828).
       cmd[pid] = $0
       sub(/^ +/, "", cmd[pid])
       order[++n] = pid
@@ -86,7 +129,7 @@ opencode_pids() {
       }
       for (i = 1; i <= n; i++) {
         pid = order[i]
-        if (cmd[pid] !~ "(^|/)opencode") continue
+        if (cmd[pid] !~ "(^|/)opencode($| )") continue
         if (pid in chain) continue
         # Descendants of self (subshells, pipelines) are self too.
         c = pid; isself = 0
@@ -99,12 +142,34 @@ opencode_pids() {
         print pid
       }
     }'
+  local -a _snap_status=("${PIPESTATUS[@]}")
+  # A failed ps (or awk) means the snapshot is UNKNOWN, not empty
+  # (#1816): propagate the failure so write-mode callers refuse instead
+  # of reading silence as "no writer". PIPESTATUS is read explicitly so
+  # the verdict does not depend on the caller's pipefail setting.
+  [ "${_snap_status[0]}" -eq 0 ] && [ "${_snap_status[1]}" -eq 0 ]
 }
 opencode_list() {
   local pid
   for pid in $(opencode_pids); do
     ps -o pid=,args= -p "$pid" 2>/dev/null || printf '%s\n' "$pid"
   done
+}
+
+# Prints the count of candidate opencode processes, or "unknown" when
+# the process snapshot failed (#1816). A failed or incomplete snapshot
+# must never read as zero: zero is the one answer that licenses writes.
+opencode_running_count() {
+  local pids
+  if ! pids="$(opencode_pids)"; then
+    printf 'unknown\n'
+    return 0
+  fi
+  if [ -z "$pids" ]; then
+    printf '0\n'
+  else
+    printf '%s\n' "$pids" | wc -l | tr -d ' '
+  fi
 }
 
 usage() {
@@ -140,17 +205,23 @@ Typical use, in order:
 EOF
 }
 
+# Value-taking options reject an empty or flag-shaped value (#941, the
+# #930 pattern): "--into --dry-run" must die naming --into, not swallow
+# --dry-run as the target path and run a real vacuum.
+# They also reject a repeat (#1112, the adopt #1103 pattern): a repeated
+# --db used to silently discard the first path, redirecting this
+# destructive operation to a different database with no error.
 while [ $# -gt 0 ]; do
   case "$1" in
-    --db) DB="${2:?--db needs a path}"; shift 2 ;;
-    --into) INTO="${2:?--into needs a path}"; shift 2 ;;
+    --db) arg_require_value "$1" "${2:-}"; arg_once "$1" DB_SET; DB="$2"; shift 2 ;;
+    --into) arg_require_value "$1" "${2:-}"; arg_once "$1" INTO_SET; INTO="$2"; shift 2 ;;
     --auto-vacuum) SET_AUTOVACUUM=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --no-backup) KEEP_BACKUP=0; shift ;;
     --force) FORCE=1; shift ;;
     -y|--yes) ASSUME_YES=1; shift ;;
     -h|--help) usage; exit 0 ;;
-    *) die "unknown option: $1 (try --help)" ;;
+    *) arg_die "unknown option: $1 (try --help)" ;;
   esac
 done
 
@@ -163,29 +234,86 @@ command -v sqlite3 >/dev/null || die "sqlite3 not found on PATH"
 [ -f "$DB" ] || die "no database at $DB"
 note "database: $DB"
 
+# A real run's swap verification counts session/message/part/event; a
+# missing table used to surface only after VACUUM INTO had already built
+# the compacted copy (#1051). Refuse up front -- read-only, so it precedes
+# the running-process check and a drifted DB gets the schema refusal even
+# on a machine where opencode is up. --dry-run is read-only measurement
+# and stays exempt: it never reaches the verification, and a scratch DB
+# must still measure cleanly.
+if [ "$DRY_RUN" -eq 0 ]; then
+  for t in session message part event; do
+    sqlite3 -readonly "file:$(uri_escape_path "$DB")?mode=ro" \
+      "SELECT 1 FROM sqlite_master WHERE type='table' AND name='$t';" \
+      | grep -qx '1' \
+      || die "$t table missing -- schema changed, refusing to run"
+  done
+fi
+
 # opencode holds the db open with busy_timeout=5000; VACUUM needs an exclusive
 # lock, and the swap below replaces the file outright, so a live holder must
 # stop the run. Same shape as opencode-db-prune.sh's check_not_running.
-# pgrep exits 1 when nothing matches, and under `pipefail` a bare assignment
-# would inherit that and abort the script -- i.e. exactly when opencode IS
-# stopped, which is the only case in which a real run may proceed.
-running="$(opencode_pids | wc -l | tr -d ' ' || true)"
-running="${running:-0}"
+# A failed ps snapshot is UNKNOWN, not zero (#1816): a real run refuses;
+# a dry run reports the unknown state and stays read-only.
+running="$(opencode_running_count)"
+if [ "$running" = "unknown" ]; then
+  if [ "$DRY_RUN" -eq 0 ]; then
+    die "could not read the process table (ps snapshot failed) -- refusing to run while the opencode writer state is unknown"
+  fi
+  note "WARNING: could not read the process table (ps snapshot failed) -- whether"
+  note "         opencode is running is UNKNOWN. Measurement below is read-only"
+  note "         and safe, but a real run would refuse."
+  running=0
+fi
 if [ "$running" -gt 0 ] && command -v lsof >/dev/null 2>&1; then
   # Only a process holding THIS database matters. Guarding on "any opencode
   # process" would block work on a scratch --db while an unrelated session
   # is open. lsof is the direct question; without it, the (self-excluded)
   # count above stands as the conservative answer.
-  holders="$(lsof -t -- "$DB" 2>/dev/null | wc -l | tr -d ' ' || true)"
-  holders="${holders:-0}"
-  if [ "$holders" -eq 0 ]; then
+  # Real lsof semantics (verified against lsof 4.x): a query that finds
+  # no holder exits 1 with empty stdout AND empty stderr -- that is a
+  # successful empty result, not a failure. A failed query prints a
+  # diagnostic to stderr (e.g. "lsof: status error on ...") or exits
+  # with a status above 1; only that shape is UNKNOWN, and a failed
+  # query never authorizes a write (#1824). Same rule as prune.
+  lsof_err_file="$(mktemp "${TMPDIR:-/tmp}/opencode-db-vacuum-lsof.XXXXXX" 2>/dev/null || true)"
+  if [ -n "$lsof_err_file" ]; then
+    lsof_pids="$(lsof -t -- "$DB" 2>"$lsof_err_file")" && lsof_status=0 || lsof_status=$?
+  else
+    lsof_pids="$(lsof -t -- "$DB" 2>/dev/null)" && lsof_status=0 || lsof_status=$?
+  fi
+  holders="$(printf '%s\n' "$lsof_pids" | awk 'NF { n++ } END { print n+0 }')"
+  if [ "$holders" -gt 0 ]; then
+    lsof_state=holders
+  elif [ -n "$lsof_err_file" ] && [ -s "$lsof_err_file" ]; then
+    lsof_state=unknown
+  elif [ -z "$lsof_err_file" ] && [ "$lsof_status" -ne 0 ]; then
+    lsof_state=unknown
+  elif [ "$lsof_status" -gt 1 ]; then
+    lsof_state=unknown
+  else
+    lsof_state=empty
+  fi
+  [ -n "$lsof_err_file" ] && rm -f "$lsof_err_file"
+  if [ "$lsof_state" = unknown ]; then
+    if [ "$DRY_RUN" -eq 0 ]; then
+      die "could not check database holders (lsof exited $lsof_status) -- refusing to run while holder state is unknown"
+    fi
+    note "WARNING: could not check database holders (lsof exited $lsof_status) --"
+    note "         holder state for $DB is UNKNOWN. Measurement below is read-only"
+    note "         and safe, but a real run would refuse."
+    running=unknown
+  fi
+  if [ "$lsof_state" = unknown ]; then
+    :
+  elif [ "$holders" -eq 0 ]; then
     note "note: $running opencode process(es) running, but none has $DB open"
     running=0
   else
     running="$holders"
   fi
 fi
-if [ "$running" -gt 0 ]; then
+if [ "$running" != unknown ] && [ "$running" -gt 0 ]; then
   printf '\n'
   opencode_list | head -20 >&2 || true
   printf '\n' >&2
@@ -204,12 +332,18 @@ fi
 # ---------------------------------------------------------------------------
 step "Measuring"
 
-# Read-only URI so this is safe even while opencode is attached.
+# Read-only URI so this is safe even while opencode is attached. A failed
+# open must die here: blank measurements flowing onward used to end in a
+# line-233 integer error and a successful exit (#890).
+measure="$(sqlite3 -readonly "file:$(uri_escape_path "$DB")?mode=ro" \
+  "PRAGMA page_size; PRAGMA page_count; PRAGMA freelist_count; PRAGMA auto_vacuum; PRAGMA journal_mode;")" \
+  || die "sqlite3 could not open/read $DB"
 read -r page_size page_count freelist auto_vac journal <<EOF
-$(sqlite3 -readonly "file:${DB}?mode=ro" \
-  "PRAGMA page_size; PRAGMA page_count; PRAGMA freelist_count; PRAGMA auto_vacuum; PRAGMA journal_mode;" \
-  | tr '\n' ' ')
+$(printf '%s' "$measure" | tr '\n' ' ')
 EOF
+case "${page_size}${page_count}${freelist}" in
+  *[!0-9]*|'') die "unexpected measurements from $DB (page_size='$page_size' page_count='$page_count' freelist_count='$freelist')" ;;
+esac
 
 live_pages=$(( page_count - freelist ))
 total_bytes=$(( page_size * page_count ))
@@ -247,6 +381,20 @@ fi
 # VACUUM INTO writes a full copy of the live data. Require headroom for it.
 target_dir="$(dirname "${INTO:-$DB}")"
 [ -d "$target_dir" ] || die "target directory does not exist: $target_dir"
+db_dir="$(dirname "$DB")"
+# Whether the compacted copy lands on the database's own filesystem
+# decides both the space accounting here and the swap mechanics in
+# step 5. Same filesystem: the swap renames the verified copy straight
+# in, so no second copy ever exists and the filesystem only needs room
+# for the one copy VACUUM INTO writes. Different filesystem: the copy
+# is staged beside the database before the swap, so the database
+# volume needs room for a copy of its own. (Codex review on #1781:
+# accounting by directory string got both wrong -- with the default
+# --into beside the database the staging copy the old swap made was
+# budgeted nowhere, and two directories sharing one filesystem were
+# checked as if they were independent pools.)
+same_fs=0
+[ "$(fs_id "$target_dir")" = "$(fs_id "$db_dir")" ] && same_fs=1
 avail_kb="$(df -Pk "$target_dir" | awk 'NR==2 {print $4}')"
 avail_bytes=$(( avail_kb * 1024 ))
 needed_bytes=$(( live_bytes + live_bytes / 10 ))   # live + 10% margin
@@ -261,6 +409,25 @@ if [ "$avail_bytes" -lt "$needed_bytes" ]; then
     Use --into /path/on/another/volume, or free space first."
 fi
 
+# Cross-filesystem only: the swap stages the verified copy beside the
+# database before renaming anything (#1780), so the database's own
+# volume also needs room for one copy of the live data. Without this
+# the staging copy is where a tight database volume failed, after the
+# original had already been renamed away.
+if [ "$same_fs" -eq 0 ]; then
+  db_avail_kb="$(df -Pk "$db_dir" | awk 'NR==2 {print $4}')"
+  db_avail_bytes=$(( db_avail_kb * 1024 ))
+  note "database volume: $db_dir"
+  note "available      : $(gb "$db_avail_bytes")  (staging copy needs $(gb "$needed_bytes"))"
+  if [ "$DRY_RUN" -eq 0 ] && [ "$db_avail_bytes" -lt "$needed_bytes" ]; then
+    die "not enough free space on $db_dir for the staged swap copy.
+    Need $(gb "$needed_bytes"), have $(gb "$db_avail_bytes").
+    The compacted copy is staged beside the database before the swap,
+    so the database volume needs room for it even when --into points
+    elsewhere. Free space on $db_dir first."
+  fi
+fi
+
 if [ "$DRY_RUN" -eq 1 ]; then
   printf '\n--dry-run: stopping here. Nothing was changed.\n'
   exit 0
@@ -270,7 +437,13 @@ fi
 # 3. Integrity + WAL checkpoint
 # ---------------------------------------------------------------------------
 step "Integrity check"
-integrity="$(sqlite3 "$DB" 'PRAGMA integrity_check;' | head -1)"
+# NOTE (#1460): no `| head -1` here. Under pipefail, head exits after the
+# first line; when integrity_check reports many problems the output exceeds
+# the pipe buffer, sqlite3 dies with SIGPIPE, and the script aborts with
+# exit 141 and no verdict. Capture the full result and take the first
+# line in-shell instead.
+integrity="$(sqlite3 "$DB" 'PRAGMA integrity_check;')"
+integrity="${integrity%%$'\n'*}"
 note "integrity_check: $integrity"
 [ "$integrity" = "ok" ] || die "integrity check failed -- do NOT vacuum a corrupt database"
 
@@ -283,8 +456,12 @@ note "WAL folded into main database"
 # ---------------------------------------------------------------------------
 if [ "$SET_AUTOVACUUM" -eq 1 ]; then
   step "Setting auto_vacuum=INCREMENTAL"
-  sqlite3 "$DB" 'PRAGMA auto_vacuum=INCREMENTAL;' >/dev/null
-  note "set; it is baked in by the vacuum below"
+  # The pragma is connection-local until a vacuum rebuilds the database:
+  # setting it in its own sqlite3 invocation is lost on disconnect and
+  # the compacted copy comes out with the old value (pinned by
+  # opencode-db-vacuum.test.sh, #1088). It is therefore applied in the
+  # same connection as the VACUUM INTO in step 5 below.
+  note "applied with the vacuum below, in the same connection"
   note "future reclaim becomes: sqlite3 \"$DB\" 'PRAGMA incremental_vacuum;'"
 fi
 
@@ -293,23 +470,43 @@ fi
 # ---------------------------------------------------------------------------
 COMPACT="${INTO:-${DB}.compact}"
 [ -e "$COMPACT" ] && die "refusing to overwrite existing $COMPACT"
+# The swap below would silently replace an existing ${DB}.old -- the only
+# rollback copy from a previous run (#892). Same refusal shape as $COMPACT
+# above and prune's $BACKUP guard.
+[ -e "${DB}.old" ] && die "refusing to overwrite existing backup ${DB}.old -- move or delete it first"
+# The swap stages the verified copy at ${DB}.staging, on the database's
+# own filesystem, before any rename (#1780). Same refusal shape: a
+# leftover staging file is a previous run's state a human should see.
+STAGED="${DB}.staging"
+[ -e "$STAGED" ] && die "refusing to overwrite existing staging file $STAGED -- move or delete it first"
 
 step "Vacuuming into $COMPACT"
 note "this rewrites $(gb "$live_bytes") and may take a while..."
-sqlite3 "$DB" "VACUUM INTO '$COMPACT';"
+vacuum_sql="VACUUM INTO '$(sql_literal_escape "$COMPACT")';"
+if [ "$SET_AUTOVACUUM" -eq 1 ]; then
+  vacuum_sql="PRAGMA auto_vacuum=INCREMENTAL; $vacuum_sql"
+fi
+sqlite3 "$DB" "$vacuum_sql"
 
 new_bytes="$(wc -c <"$COMPACT" | tr -d ' ')"
 note "new size: $(gb "$new_bytes")  (was $(gb "$total_bytes"))"
 
 step "Verifying the compacted copy"
-new_integrity="$(sqlite3 -readonly "file:${COMPACT}?mode=ro" 'PRAGMA integrity_check;' | head -1)"
+# NOTE (#1460): no `| head -1` here. Under pipefail, head exits after the
+# first line; when integrity_check reports many problems the output exceeds
+# the pipe buffer, sqlite3 dies with SIGPIPE, and the script aborts with
+# exit 141 and no verdict. Capture the full result and take the first
+# line in-shell instead.
+new_integrity="$(sqlite3 -readonly "file:$(uri_escape_path "$COMPACT")?mode=ro" 'PRAGMA integrity_check;')"
+new_integrity="${new_integrity%%$'\n'*}"
 note "integrity_check: $new_integrity"
 [ "$new_integrity" = "ok" ] || die "compacted copy failed integrity check; original untouched at $DB"
 
 for t in session message part event; do
-  old_n="$(sqlite3 -readonly "file:${DB}?mode=ro" "SELECT COUNT(*) FROM $t;" 2>/dev/null || echo skip)"
-  new_n="$(sqlite3 -readonly "file:${COMPACT}?mode=ro" "SELECT COUNT(*) FROM $t;" 2>/dev/null || echo skip)"
-  [ "$old_n" = skip ] && continue
+  old_n="$(sqlite3 -readonly "file:$(uri_escape_path "$DB")?mode=ro" "SELECT COUNT(*) FROM $t;" 2>/dev/null || echo skip)"
+  new_n="$(sqlite3 -readonly "file:$(uri_escape_path "$COMPACT")?mode=ro" "SELECT COUNT(*) FROM $t;" 2>/dev/null || echo skip)"
+  [ "$old_n" = skip ] && die "row count query failed for $t on the original database; original untouched at $DB"
+  [ "$new_n" = skip ] && die "row count query failed for $t on the compacted copy; original untouched at $DB"
   note "$(printf '%-8s %12s -> %12s' "$t" "$old_n" "$new_n")"
   [ "$old_n" = "$new_n" ] || die "row count mismatch in $t; original untouched at $DB"
 done
@@ -324,8 +521,68 @@ if [ "$ASSUME_YES" -eq 0 ]; then
 fi
 
 step "Swapping"
-mv "$DB" "${DB}.old"
-mv "$COMPACT" "$DB"
+
+# Put the verified copy on the database's own filesystem BEFORE the
+# original is renamed (#1780). The old swap renamed $DB to ${DB}.old and
+# then moved $COMPACT in; with --into on another volume that second move
+# is a copy onto the database volume, and if it failed (ENOSPC on the
+# very volume the user said was tight) `set -e` exited with the active
+# path missing. A staging copy that fails here fails safe: the original
+# has not been touched. When $COMPACT is already on the database's
+# filesystem no staging copy is made at all -- the swap renames it
+# straight in, so a tight database volume never has to hold two
+# compacted copies at once (Codex review on #1781).
+if [ "$same_fs" -eq 1 ]; then
+  STAGED="$COMPACT"
+  note "compacted copy is already on the database filesystem; swapping it in by rename, no staging copy needed"
+else
+  note "staging the verified copy beside the database: $STAGED"
+  if ! cp "$COMPACT" "$STAGED"; then
+    rm -f "$STAGED"
+    die "could not stage the compacted copy on the database volume; original untouched at $DB, compacted copy left at $COMPACT"
+  fi
+  if ! cmp -s "$COMPACT" "$STAGED"; then
+    rm -f "$STAGED"
+    die "staged copy does not match the verified compacted copy; original untouched at $DB, compacted copy left at $COMPACT"
+  fi
+fi
+
+# From here the swap is two renames on one filesystem. Arm a rollback
+# for the window between them: any exit in that window (a failed rename,
+# an interrupt) puts the original back at the active path, so the
+# database is never left missing or partial.
+SWAP_ARMED=0
+restore_original_on_exit() {
+  if [ "$SWAP_ARMED" -eq 1 ] && [ ! -e "$DB" ] && [ -e "${DB}.old" ]; then
+    if mv "${DB}.old" "$DB" 2>/dev/null; then
+      printf 'opencode-db-vacuum: swap interrupted -- original restored at %s\n' "$DB" >&2
+    else
+      printf 'opencode-db-vacuum: swap interrupted -- original is at %s; restore it with: mv %s %s\n' "${DB}.old" "${DB}.old" "$DB" >&2
+    fi
+  fi
+}
+trap restore_original_on_exit EXIT
+SWAP_ARMED=1
+if ! mv "$DB" "${DB}.old"; then
+  SWAP_ARMED=0
+  die "could not rename the original database; active database untouched at $DB, staged copy left at $STAGED"
+fi
+if ! mv "$STAGED" "$DB"; then
+  if mv "${DB}.old" "$DB"; then
+    SWAP_ARMED=0
+    # Remove the staging copy only when it is one; when the swap was a
+    # rename, $STAGED is $COMPACT itself and stays for inspection.
+    [ "$STAGED" != "$COMPACT" ] && rm -f "$STAGED"
+    die "swap failed; the original database has been restored at $DB, compacted copy left at $COMPACT"
+  fi
+  die "swap failed AND the original could not be moved back; the original database is at ${DB}.old -- restore it with: mv '${DB}.old' '$DB'"
+fi
+SWAP_ARMED=0
+# The staged copy is now the active database. When it was copied from
+# the VACUUM INTO output, that output is a duplicate (on whatever
+# volume --into named) and goes; when the swap was a rename, $COMPACT
+# is the active database itself and nothing remains to remove.
+[ "$STAGED" != "$COMPACT" ] && rm -f "$COMPACT"
 # Safe only now: clean checkpoint above, no process attached. opencode
 # re-enables WAL on next open.
 rm -f "${DB}-wal" "${DB}-shm"

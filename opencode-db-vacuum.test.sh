@@ -508,6 +508,71 @@ case "$out" in *UNKNOWN*) ;; *) fail "failing ps: dry run does not report the un
 cmp -s "$db" "$fx/psfail.before" || fail "failing ps: dry run mutated the fixture DB"
 ok_if_clean "$before" "failing ps snapshot: dry run reports UNKNOWN and changes nothing"
 
+# --- lsof failure is unknown, not an empty holder result. ----------------
+# Report an OpenCode process so the database-specific holder query is made.
+processbin="$HOME/processbin"; mkdir -p "$processbin"
+cat >"$processbin/ps" <<'EOF'
+#!/bin/sh
+case "$*" in
+  *"-eo pid=,ppid=,args="*) printf '424242 1 opencode\n' ;;
+  *"-o pid=,args="*) printf '424242 opencode\n' ;;
+  *) exit 0 ;;
+esac
+EOF
+chmod +x "$processbin/ps"
+mk_lsof() { # $1 = dir, $2 = behavior: fail | empty | holder
+  mkdir -p "$1"
+  case "$2" in
+    fail) printf '#!/bin/sh\necho "lsof: simulated failure" >&2\nexit 1\n' >"$1/lsof" ;;
+    empty) printf '#!/bin/sh\nexit 1\n' >"$1/lsof" ;;
+    badstatus) printf '#!/bin/sh\nexit 2\n' >"$1/lsof" ;;
+    holder) printf '#!/bin/sh\nprintf "424242\\n"\nexit 0\n' >"$1/lsof" ;;
+  esac
+  chmod +x "$1/lsof"
+}
+
+before=$failures
+db="$fx/lsoffail.db"; mk_fixture "$db"; cp "$db" "$fx/lsoffail.before"
+shimdir="$HOME/lsof-fail"; mk_lsof "$shimdir" fail
+out="$(PATH="$shimdir:$processbin:$PATH" bash "$VACUUM" --db "$db" -y 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] || fail "failed lsof: real run exited 0, expected refusal: $out"
+case "$out" in *"holder state is unknown"*) ;; *) fail "failed lsof: real run did not report unknown holder state: $out" ;; esac
+cmp -s "$db" "$fx/lsoffail.before" || fail "failed lsof: real run mutated fixture DB"
+[ ! -e "${db}.old" ] || fail "failed lsof: real run created .old"
+out="$(PATH="$shimdir:$processbin:$PATH" bash "$VACUUM" --db "$db" --dry-run 2>&1)"; rc=$?
+[ "$rc" -eq 0 ] || fail "failed lsof: dry run exited $rc: $out"
+case "$out" in *"holder state"*UNKNOWN*) ;; *) fail "failed lsof: dry run did not clearly report UNKNOWN: $out" ;; esac
+cmp -s "$db" "$fx/lsoffail.before" || fail "failed lsof: dry run mutated fixture DB"
+ok_if_clean "$before" "failed lsof with reported OpenCode process: real vacuum refuses and dry run reports UNKNOWN; DB unchanged"
+
+before=$failures
+db="$fx/lsofempty.db"; mk_fixture "$db"
+shimdir="$HOME/lsof-empty"; mk_lsof "$shimdir" empty
+out="$(PATH="$shimdir:$processbin:$PATH" bash "$VACUUM" --db "$db" -y 2>&1)"; rc=$?
+[ "$rc" -eq 0 ] || fail "successful empty lsof: real run exited $rc: $out"
+counts_ok "$db" || fail "successful empty lsof: normal vacuum did not preserve row counts"
+[ -f "${db}.old" ] || fail "successful empty lsof: expected normal vacuum backup"
+ok_if_clean "$before" "real lsof no-match (silent exit 1, no holders) preserves behavior: vacuum completes and keeps backup"
+
+before=$failures
+db="$fx/lsofbad.db"; mk_fixture "$db"; cp "$db" "$fx/lsofbad.before"
+shimdir="$HOME/lsof-badstatus"; mk_lsof "$shimdir" badstatus
+out="$(PATH="$shimdir:$processbin:$PATH" bash "$VACUUM" --db "$db" -y 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] || fail "silent exit-2 lsof: real run exited 0, expected refusal: $out"
+case "$out" in *"holder state is unknown"*) ;; *) fail "silent exit-2 lsof: real run did not report unknown holder state: $out" ;; esac
+cmp -s "$db" "$fx/lsofbad.before" || fail "silent exit-2 lsof: real run mutated fixture DB"
+[ ! -e "${db}.old" ] || fail "silent exit-2 lsof: real run created .old"
+ok_if_clean "$before" "silent exit-2 lsof is UNKNOWN: real vacuum refuses; DB unchanged"
+
+before=$failures
+db="$fx/lsofholder.db"; mk_fixture "$db"; cp "$db" "$fx/lsofholder.before"
+shimdir="$HOME/lsof-holder"; mk_lsof "$shimdir" holder
+out="$(PATH="$shimdir:$processbin:$PATH" bash "$VACUUM" --db "$db" -y 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] || fail "positive-holder lsof: real run exited 0, expected refusal: $out"
+cmp -s "$db" "$fx/lsofholder.before" || fail "positive-holder lsof: real run mutated fixture DB"
+[ ! -e "${db}.old" ] || fail "positive-holder lsof: real run created .old"
+ok_if_clean "$before" "successful positive lsof result preserves behavior: real vacuum refuses and DB is unchanged"
+
 if [ "$failures" -ne 0 ]; then
   echo "$failures failure(s)" >&2
   exit 1

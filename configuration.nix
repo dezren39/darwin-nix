@@ -775,26 +775,61 @@ lib.recursiveUpdate {
     # this just guarantees it.
     #
     # Zen stable and Zen Twilight share bundle id app.zen-browser.zen, so the
-    # handler cannot distinguish them; macOS resolves it to whichever bundle it
-    # last registered. Prefer Twilight by re-registering it with lsregister so
-    # it wins, then assert the handler.
-    zen_app=""
-    for candidate in /Applications/Twilight.app /Applications/Zen.app; do
-      [ -d "$candidate" ] && { zen_app="$candidate"; break; }
-    done
-    if [ -n "$zen_app" ]; then
+    # stock handler cannot distinguish them -- AND launching the stock bundle
+    # directly bypasses `--remote-debugging-port` (Firefox 160 / Zen 1.24t have
+    # no profile pref that starts WebDriver BiDi without that CLI flag).
+    # Pinning LaunchServices URL/document handlers to the BiDi launcher app in
+    # `/Applications/Nix Apps` (installed by firefoxFamilyBidi in
+    # systemPackages.nix, with CFBundleURLTypes/CFBundleDocumentTypes declared)
+    # ensures cold-starting the default browser from any link click opens Zen
+    # Twilight with WebDriver BiDi listening on 127.0.0.1:19227 (or Zen BiDi on
+    # 19226 if Twilight.app is absent), falling back to stock app.zen-browser.zen
+    # only if neither Nix launcher app exists yet.
+    default_browser_app=""
+    default_browser_id=""
+    if [ -d "/Applications/Twilight.app" ] && [ -d "/Applications/Nix Apps/Zen Twilight BiDi.app" ]; then
+      default_browser_app="/Applications/Nix Apps/Zen Twilight BiDi.app"
+      default_browser_id="local.drewrypope.zen-twilight-bidi"
+    elif [ -d "/Applications/Zen.app" ] && [ -d "/Applications/Nix Apps/Zen BiDi.app" ]; then
+      default_browser_app="/Applications/Nix Apps/Zen BiDi.app"
+      default_browser_id="local.drewrypope.zen-bidi"
+    else
+      for candidate in /Applications/Twilight.app /Applications/Zen.app; do
+        [ -d "$candidate" ] && {
+          default_browser_app="$candidate"
+          default_browser_id="app.zen-browser.zen"
+          break
+        }
+      done
+    fi
+    if [ -n "$default_browser_app" ]; then
       primary_uid_browser=$(/usr/bin/id -u ${config.system.primaryUser})
       /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
-        -f "$zen_app" 2>/dev/null || true
+        -f "$default_browser_app" 2>/dev/null || true
       for scheme in http https; do
         /usr/bin/sudo -u ${config.system.primaryUser} \
           /usr/bin/launchctl asuser "$primary_uid_browser" \
-          ${pkgs.duti}/bin/duti -s app.zen-browser.zen "$scheme" 2>/dev/null || true
+          ${pkgs.duti}/bin/duti -s "$default_browser_id" "$scheme" 2>/dev/null || true
       done
       # HTML documents opened from Finder
       /usr/bin/sudo -u ${config.system.primaryUser} \
         /usr/bin/launchctl asuser "$primary_uid_browser" \
-        ${pkgs.duti}/bin/duti -s app.zen-browser.zen public.html all 2>/dev/null || true
+        ${pkgs.duti}/bin/duti -s "$default_browser_id" public.html all 2>/dev/null || true
+    fi
+
+    # =====================================================================
+    # Safari & Safari Technology Preview WebDriver / BiDi / MCP authorization
+    # =====================================================================
+    # Authorize safaridriver non-interactively as root so WebDriver, WebDriver
+    # BiDi (`safari-bidi` / `safari-tp-bidi`), and `safaridriver --mcp` never
+    # stop on a macOS admin password dialog. Note: macOS SIP still requires the
+    # one-time Safari > Settings > Developer > "Allow remote automation" UI
+    # checkbox for each Safari build the user wants automated.
+    if [ -x /usr/bin/safaridriver ]; then
+      /usr/bin/safaridriver --enable 2>/dev/null || true
+    fi
+    if [ -x "/Applications/Safari Technology Preview.app/Contents/MacOS/safaridriver" ]; then
+      "/Applications/Safari Technology Preview.app/Contents/MacOS/safaridriver" --enable 2>/dev/null || true
     fi
 
     # =====================================================================

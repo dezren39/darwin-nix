@@ -1261,6 +1261,74 @@ rec {
               bash ./mcp-clients-activation.test.sh
               touch $out
             '';
+        # Probes for browser-remote-debug.py (Chromium-family Local State
+        # devtools.remote_debugging.user-enabled = true): CLI contract,
+        # key/mode preservation, running-browser SingletonSocket/SingletonLock
+        # skip, stale crashed-lock recovery, symlink preservation, and
+        # per-browser failure isolation without leaking Local State content.
+        browser-remote-debug-tests =
+          pkgs.runCommandLocal "browser-remote-debug-tests"
+            {
+              nativeBuildInputs = [ pkgs.python3 ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/browser-remote-debug.py $src/browser-remote-debug.test.py ./
+              chmod u+w ./browser-remote-debug.py ./browser-remote-debug.test.py
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              python3 ./browser-remote-debug.test.py
+              touch $out
+            '';
+        # Guard for the Chromium-family CDP launcher port claims
+        # (#1878): runs the real make_cdp_app generation out of
+        # systemPackages.nix and asserts Chrome/Edge launchers carry
+        # the non-default --user-data-dir their advertised fixed ports
+        # require, Helium's do not, and mcpx.config.nix + docs/mcp.md
+        # agree on which launch path serves helium-live's 19222.
+        chromium-family-cdp-tests =
+          pkgs.runCommandLocal "chromium-family-cdp-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.coreutils
+                pkgs.gnugrep
+                pkgs.gnused
+              ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/systemPackages.nix $src/mcpx.config.nix $src/chromium-family-cdp.test.sh ./
+              mkdir -p docs
+              cp $src/docs/mcp.md docs/
+              chmod u+w ./chromium-family-cdp.test.sh
+              bash ./chromium-family-cdp.test.sh
+              touch $out
+            '';
+        # Exercise the home-manager activation wrapper around
+        # browser-remote-debug.py: partial failures are recorded in
+        # service-events without blocking activation; unrecorded failures
+        # fail activation loudly.
+        browser-remote-debug-activation-tests =
+          pkgs.runCommandLocal "browser-remote-debug-activation-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.coreutils
+                pkgs.gnugrep
+                pkgs.gnused
+                pkgs.python3
+              ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/browser-remote-debug-activation.sh $src/browser-remote-debug-activation.test.sh $src/browser-remote-debug.py ./
+              chmod u+w ./browser-remote-debug-activation.test.sh
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./browser-remote-debug-activation.test.sh
+              touch $out
+            '';
         # #1454: activation must durably record failures from the root and
         # primary-user helper runs without hiding helper output or blocking
         # later activation entries when the event write succeeds.

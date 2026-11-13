@@ -132,7 +132,11 @@ expect_no_steps "rebuild.sh --bogus"
 : > "$LOG"
 run_script "$REBUILD_WORK" rebuild.sh
 expect_rc "rebuild.sh no argument exits 0" 0
-check "rebuild.sh no argument runs git add" grep -q "^git add \.$" "$LOG"
+if grep -q "^git " "$LOG"; then
+  fail "rebuild.sh no argument must not run git (a053a8e) — log: $(cat "$LOG")"
+else
+  echo "ok: rebuild.sh no argument runs no git command"
+fi
 check "rebuild.sh no argument runs nix flake update" \
   grep -q "^nix .* flake update$" "$LOG"
 check "rebuild.sh no argument runs ./simple-rebuild.sh" \

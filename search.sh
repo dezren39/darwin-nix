@@ -72,8 +72,12 @@ if [[ -n "$BREW_LIST" ]]; then
         exit 1
     fi
 
-    # One line per installed app artifact: "<lower>|<normalized>",
-    # the two forms check_if_brew_installed compares against. An
+    # One line per installed app artifact: the lower-cased bundle
+    # name alone. The normalized form check_if_brew_installed
+    # compares against is derived in bash below with the same
+    # tr ' .' '-' it applies to on-disk names, so a bundle name is
+    # never split on a character it may itself contain (#1875:
+    # the old "<lower>|<normalized>" form split Odd|Name.app). An
     # app artifact's list is [source, ..., {options}]: a 'target'
     # option renames the installed bundle, so the target's basename
     # is the app that exists on disk -- the source name does not
@@ -102,7 +106,7 @@ for c in casks:
                 if base.lower().endswith('.app'):
                     base = base[:-4]
                 lower = base.lower()
-                print(lower + '|' + lower.replace(' ', '-').replace('.', '-'))
+                print(lower)
 "); then
         echo "search: error: could not parse 'brew info --cask' output -- installed cask artifacts could not be enumerated" >&2
         exit 1
@@ -111,9 +115,9 @@ for c in casks:
     # Read into arrays with Bash 3.2-compatible loops. `mapfile` was added
     # in Bash 4, while macOS's system `/usr/bin/env bash` is still 3.2.
     if [[ -n "$ARTIFACT_NAMES" ]]; then
-        while IFS='|' read -r lower normalized; do
+        while IFS= read -r lower; do
             BREW_APPS+=("$lower")
-            BREW_NAMES+=("$normalized")
+            BREW_NAMES+=("$(printf '%s' "$lower" | tr ' .' '-')")
         done < <(printf '%s\n' "$ARTIFACT_NAMES")
     fi
 fi

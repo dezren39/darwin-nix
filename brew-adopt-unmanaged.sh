@@ -169,6 +169,13 @@ elif [ -d "$APPLICATIONS/OneDrive.app" ]; then
   if [ -z "$installed_version" ]; then
     installed_version=$("$PLISTBUDDY" -c "Print :CFBundleShortVersionString" "$APPLICATIONS/OneDrive.app/Contents/Info.plist" 2>/dev/null || true)
   fi
+  if [ -z "$installed_version" ]; then
+    log "ERROR: OneDrive is present at $APPLICATIONS/OneDrive.app but its version could not be read: both CFBundleVersion and CFBundleShortVersionString are missing or unreadable in $APPLICATIONS/OneDrive.app/Contents/Info.plist."
+    log "ERROR: without the installed version, the downgrade guard cannot prove the vendored pkg (${vendored_version:-unknown}) is not a downgrade, so it fails closed."
+    log "ERROR: remedy: fix or reinstall OneDrive so its Info.plist is readable, or remove $APPLICATIONS/OneDrive.app if the bundle is corrupt — then re-run ./s."
+    log "ERROR: aborting before brew bundle so the failure is this message, not the installer's."
+    exit 1
+  fi
   if [ -n "$vendored_version" ] && [ -n "$installed_version" ] &&
     [ "$(vercmp "$installed_version" "$vendored_version")" = "1" ]; then
     log "ERROR: OneDrive self-updated to $installed_version — newer than the vendored cask ($vendored_version) — before brew adopted it."

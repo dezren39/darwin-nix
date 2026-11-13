@@ -215,7 +215,19 @@ run
 check "upstream caught up: exit 0" test $rc -eq 0
 check "upstream caught up: retire logged" out_has "retire homebrew-local"
 
-# 9. No apps at all (fresh machine): both skip cleanly.
+# 9. OneDrive present but both PlistBuddy reads fail: fail closed, exit 1.
+reset_state
+echo drewry.pope >"$tmp/state/chrome_owner"
+touch "$tmp/state/receipt_google-chrome"
+OD_CFVERSION=""
+OD_CFSHORT=""
+run
+check "onedrive unreadable: exit 1" test $rc -eq 1
+check "onedrive unreadable: diagnostic names the plist" out_has "could not be read"
+check "onedrive unreadable: plist path named" out_has "OneDrive.app/Contents/Info.plist"
+check "onedrive unreadable: no bundle handoff logged" out_has -v "brew bundle will install the vendored pkg"
+
+# 10. No apps at all (fresh machine): both skip cleanly.
 reset_state
 rm -rf "$tmp/apps/Google Chrome.app" "$tmp/apps/OneDrive.app"
 run

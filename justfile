@@ -193,7 +193,7 @@ switch:
 [group('format')]
 fmt:
     nixfmt *.nix pkgs/*.nix
-    nix run .#flake-tidy -- all || true
+    nix run .#flake-tidy -- all
 
 # =============================================================================
 # Flake Tidy

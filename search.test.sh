@@ -29,7 +29,11 @@
 #     artifact, a `target` rename manages the target bundle (not the
 #     source name), an unrelated app is still reported, and a failed
 #     or unparseable `brew info` exits 1 naming the step with no
-#     findings -- enumeration failures are never a silent inventory.
+#     findings -- enumeration failures are never a silent inventory;
+#   * an artifact bundle name containing the old artifact-list
+#     delimiter is preserved whole (#1875): Odd|Name.app is
+#     brew-managed and not reported, an unrelated app still is,
+#     and `brew info` still runs exactly once.
 # The first leg's /Applications is redirected with the script's
 # SEARCH_APPLICATIONS_DIR seam (#983); the second leg uses the
 # scratch HOME's ~/Applications. Stubs use #!/bin/sh: the nix build
@@ -85,6 +89,7 @@ case "$1" in
       working) echo "foo" ;;
       all-managed) printf 'foo\nbar\n' ;;
       artifacts) printf 'iterm2\nsuite\n' ;;
+      pipe-artifact) printf 'alpha\n' ;;
       info-fail|info-garbage) echo "foo" ;;
       empty) : ;;
       failing) echo "Error: brew is broken" >&2; exit 1 ;;
@@ -95,6 +100,7 @@ case "$1" in
       working) printf '%s' '{"casks":[{"token":"foo","artifacts":[{"app":["Foo.app"]}]}]}' ;;
       all-managed) printf '%s' '{"casks":[{"token":"foo","artifacts":[{"app":["Foo.app"]}]},{"token":"bar","artifacts":[{"app":["Bar.app"]}]}]}' ;;
       artifacts) printf '%s' '{"casks":[{"token":"iterm2","artifacts":[{"app":["iTerm.app"]}]},{"token":"suite","artifacts":[{"app":["Multi.app"]},{"app":["Helper.app",{"target":"Renamed Helper.app"}]}]}]}' ;;
+      pipe-artifact) printf '%s' '{"casks":[{"token":"alpha","artifacts":[{"app":["Odd|Name.app"]}]}]}' ;;
       info-fail) echo "Error: brew info is broken" >&2; exit 1 ;;
       info-garbage) printf '%s' 'this is not json' ;;
       *) echo "brew stub: info must not run in mode $STUB_BREW_MODE" >&2; exit 1 ;;
@@ -305,6 +311,28 @@ check "missing brew names the step on stderr" \
   grep -q "brew list --cask" "$TMP_ROOT/err"
 check "missing brew reports no findings" \
   bash -c "! grep -qx -e foo -e bar '$TMP_ROOT/out'"
+
+
+# --- #1875: a bundle name containing the old delimiter is preserved ---------
+APPS3="$TMP_ROOT/Applications3"
+mkdir -p "$APPS3/Odd|Name.app" "$APPS3/Unrelated.app"
+: > "$LOG"
+HOME="$HOME_DIR" BASH_ENV="$MAPFILE_GUARD" SEARCH_APPLICATIONS_DIR="$APPS3" STUB_BREW_LOG="$LOG"   STUB_BREW_MODE=pipe-artifact PATH="$BIN:$PATH"   bash "$SCRIPT" > "$TMP_ROOT/out" 2> "$TMP_ROOT/err"
+RC=$?
+expect_rc "delimiter-name artifact brew exits 0" 0
+check "delimiter-containing artifact (Odd|Name.app) is not reported under its full name"   bash -c "! grep -qx 'odd|name' '$TMP_ROOT/out'"
+check "delimiter-containing artifact (Odd|Name.app) is not reported under a split fragment"   bash -c "! grep -qx odd '$TMP_ROOT/out'"
+check "unrelated app is still reported (delimiter-name artifacts)"   grep -qx unrelated "$TMP_ROOT/out"
+if [ "$(list_calls)" = "1" ]; then
+  echo "ok: brew list ran exactly once (delimiter-name artifacts)"
+else
+  fail "brew list ran exactly once (delimiter-name artifacts) — got $(list_calls)"
+fi
+if [ "$(info_calls)" = "1" ]; then
+  echo "ok: brew info ran exactly once (delimiter-name artifacts)"
+else
+  fail "brew info ran exactly once (delimiter-name artifacts) — got $(info_calls)"
+fi
 
 if [ "$failures" -gt 0 ]; then
   echo "$failures failure(s)" >&2

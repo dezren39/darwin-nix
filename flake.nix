@@ -484,6 +484,37 @@ rec {
               pytest -q -p no:cacheprovider
               touch $out
             '';
+        # #1873: tests/fmt-tidy-propagation.sh is the hermetic regression
+        # for #1801 (`just fmt` swallowing a flake-tidy failure via
+        # `|| true`). Nothing ran it: it lives outside pkgs/flake-tidy's
+        # pytest suite, so wire it here following the *-tests pattern.
+        # The script stubs nix/nixfmt itself but needs a real `just`
+        # binary on PATH, and computes the repo root from its own
+        # location, so stage justfile + tests/ in that layout. The
+        # script's runtime-generated stubs use `#!/usr/bin/env bash`,
+        # which has no interpreter in the build sandbox, so the staged
+        # copy is rewritten to the store bash (patchShebangs for stubs
+        # that only exist at test runtime; the repo file is untouched).
+        fmt-tidy-propagation-tests =
+          pkgs.runCommandLocal "fmt-tidy-propagation-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.coreutils
+                pkgs.just
+              ];
+            }
+            ''
+              mkdir -p tests
+              cp ${./justfile} justfile
+              cp ${./tests/fmt-tidy-propagation.sh} tests/fmt-tidy-propagation.sh
+              chmod u+w justfile tests/fmt-tidy-propagation.sh
+              sed -i "s|#!/usr/bin/env bash|#!${pkgs.bash}/bin/bash|g" tests/fmt-tidy-propagation.sh
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash tests/fmt-tidy-propagation.sh
+              touch $out
+            '';
         # #1149: simple-rebuild.test.sh pins simple-rebuild.sh's
         # mode-flag parser -- --build-only with --activate-only in
         # either order and a repeated --activate-only exit 2 naming

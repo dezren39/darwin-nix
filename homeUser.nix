@@ -134,6 +134,16 @@ lib.recursiveUpdate {
           ${pkgs.python3}/bin/python3 ${./mcp-clients.py} \
           ${lib.getExe' inputs.self.packages.${system}.service-events "service-event"}
       '';
+      # Enable Chromium-family (Chrome, Helium, Edge) remote debugging on their
+      # default user-data-dirs by setting devtools.remote_debugging.user-enabled
+      # = true in Local State whenever the browser is not running (Chrome 136+
+      # ignores --remote-debugging-port on the default profile). Partial
+      # failures record a service-event without aborting activation.
+      browserRemoteDebug = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+        run ${pkgs.bash}/bin/bash ${./browser-remote-debug-activation.sh} \
+          ${pkgs.python3}/bin/python3 ${./browser-remote-debug.py} \
+          ${lib.getExe' inputs.self.packages.${system}.service-events "service-event"}
+      '';
       # installGhCopilot: gh copilot is now built into gh (>=2.65) and executes
       # the native `copilot` binary from PATH (managed via copilot-cli cask).
       #

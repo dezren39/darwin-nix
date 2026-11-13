@@ -101,12 +101,21 @@ orig_mode="$(stat -c %a "$write_flake" 2>/dev/null || stat -f %Lp "$write_flake"
   { echo "adopt: cannot stat $write_flake" >&2; exit 1; }
 
 # This Mac's name, the way darwin-rebuild matches it (flake.nix: darwin-
-# rebuild matches via scutil --get LocalHostName).
+# rebuild matches via scutil --get LocalHostName). scutil is only the
+# preferred source (#1856): when it is absent, fails, or returns an
+# empty name, fall back to hostname -s as the usage text promises.
+# Each capture is guarded with || so set -e cannot abort the script
+# silently inside the command substitution before the fallback runs.
 if [[ -z "$host" ]]; then
   if command -v scutil >/dev/null 2>&1; then
-    host="$(scutil --get LocalHostName)"
-  else
-    host="$(hostname -s)"
+    host="$(scutil --get LocalHostName 2>/dev/null)" || host=""
+  fi
+  if [[ -z "$host" ]]; then
+    host="$(hostname -s 2>/dev/null)" || host=""
+  fi
+  if [[ -z "$host" ]]; then
+    echo "adopt: could not determine this Mac's host name: scutil --get LocalHostName and hostname -s both failed or returned an empty name (pass --host NAME to set it explicitly)" >&2
+    exit 1
   fi
 fi
 [[ "$host" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] ||

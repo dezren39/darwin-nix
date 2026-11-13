@@ -869,5 +869,55 @@ mark_dir "$MD_CLEAN" 2> "$MD_DIR/clean.err"
 [ -s "$MD_DIR/clean.err" ] && fail "mark_dir clean sibling warned unexpectedly: $(cat "$MD_DIR/clean.err")"
 echo "ok: mark_dir skips both symlinked markers and marks the clean sibling"
 
+# ─── #1853: failed freshness scan must fail closed ─────────────────────
+# Drive the real sweep with a failing find stub. Neither fresh nor stale
+# matching entries may be offered to del when the scan is incomplete.
+SS_DIR="$TMP_ROOT/short-scratch"
+mkdir -p "$SS_DIR/base" "$SS_DIR/bin"
+touch "$SS_DIR/base/openchamber-fresh-fixture"
+touch -t 200001010000 "$SS_DIR/base/openchamber-stale-fixture"
+sed -n '/^sweep_short_lived_scratch() {/,/^}/p' "$SCRIPT" > "$SS_DIR/sweep.sh"
+[ -s "$SS_DIR/sweep.sh" ] || fail "could not extract sweep_short_lived_scratch"
+cat > "$SS_DIR/bin/find" <<'STUB'
+#!/bin/sh
+exit 1
+STUB
+chmod +x "$SS_DIR/bin/find"
+SHORT_SCRATCH_GLOBS=('openchamber-*')
+SHORT_SCRATCH_STALE_HOURS=8
+CALLER_USER_HOME="$SS_DIR"
+_ss_total_removed=0
+del() { printf '%s\n' "$1" >> "$SS_DIR/deleted"; }
+warn() { printf '%s\n' "$*" >&2; }
+info() { :; }
+short_scratch_is_kept() { return 1; }
+# shellcheck disable=SC1091
+. "$SS_DIR/sweep.sh"
+SS_OLD_PATH="$PATH"
+TMPDIR="$SS_DIR"
+PATH="$SS_DIR/bin:$PATH"
+export TMPDIR PATH
+set +e
+sweep_short_lived_scratch "$SS_DIR/base" 2> "$SS_DIR/failure.err"
+SS_RC=$?
+set -e
+ [ "$SS_RC" -eq 0 ] || fail "failed freshness scan returned $SS_RC"
+PATH="$SS_OLD_PATH"
+export PATH
+[ ! -s "$SS_DIR/deleted" ] || fail "failed freshness scan offered entries to del: $(cat "$SS_DIR/deleted")"
+grep -q 'freshness scan failed; skipping this base' "$SS_DIR/failure.err" \
+  || fail "failed freshness scan did not warn and skip the base"
+
+# Successful scan still deletes stale matching entries but keeps fresh ones.
+rm -f "$SS_DIR/deleted"
+sweep_short_lived_scratch "$SS_DIR/base"
+grep -Fxq "$SS_DIR/base/openchamber-stale-fixture" "$SS_DIR/deleted" \
+  || fail "successful freshness scan did not offer stale entry to del"
+if grep -Fxq "$SS_DIR/base/openchamber-fresh-fixture" "$SS_DIR/deleted"; then
+  fail "successful freshness scan offered fresh entry to del"
+fi
+echo "ok: short-lived scratch skips deletion on failed freshness scan and preserves successful-scan behavior"
+rm -rf "$SS_DIR"
+
 [ "$failures" -eq 0 ] || { echo "$failures failure(s)" >&2; exit 1; }
 echo "all clean.sh flag-shaped-value checks passed"

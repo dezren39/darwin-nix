@@ -1267,10 +1267,20 @@ sweep_short_lived_scratch() {
   local base="$1" removed=0
   [ -d "$base" ] || return 0
   local -A fresh=()
-  local f entry name g match
+  local f entry name g match fresh_list
+  if ! fresh_list=$(mktemp "${TMPDIR:-/tmp}/clean-short-scratch.XXXXXX"); then
+    warn "short-lived scratch ($base): cannot create freshness-scan file; skipping this base"
+    return 0
+  fi
+  if ! find "$base" -maxdepth 1 -mindepth 1 -mmin "-$((SHORT_SCRATCH_STALE_HOURS * 60))" -print0 > "$fresh_list" 2>/dev/null; then
+    rm -f "$fresh_list"
+    warn "short-lived scratch ($base): freshness scan failed; skipping this base"
+    return 0
+  fi
   while IFS= read -r -d '' f; do
     fresh["${f##*/}"]=1
-  done < <(find "$base" -maxdepth 1 -mindepth 1 -mmin "-$((SHORT_SCRATCH_STALE_HOURS * 60))" -print0 2>/dev/null)
+  done < "$fresh_list"
+  rm -f "$fresh_list"
   for entry in "$base"/*; do
     [ -e "$entry" ] || continue
     name="${entry##*/}"

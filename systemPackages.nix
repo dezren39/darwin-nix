@@ -24,13 +24,20 @@ let
   # user-data-dir ("DevTools remote debugging requires a non-default
   # data directory. Specify this using --user-data-dir."); Helium 0.19
   # removed that restriction and listens on 19222 even on its default
-  # profile. For Chrome/Edge's default profile, `browser-remote-debug.py`
-  # (run by `home.activation.browserRemoteDebug` in homeUser.nix) sets
+  # profile. The Chrome/Edge launchers below therefore supply a
+  # dedicated non-default `--user-data-dir` of their own
+  # (`$HOME/.local/share/cdp-profiles/<browser>`, #1878): the advertised
+  # fixed ports 19223/19228 actually serve, from a separate persistent
+  # CDP profile — NOT the user's default profile (no default-profile
+  # tabs or sign-ins; sign in inside the CDP profile if a session needs
+  # an identity). For Chrome/Edge's default profile,
+  # `browser-remote-debug.py` (run by
+  # `home.activation.browserRemoteDebug` in homeUser.nix) sets
   # `devtools.remote_debugging.user-enabled = true` in `Local State`,
   # which turns on the approval-gated CDP server on 127.0.0.1:9222 for
-  # every normal launch (Dock, Spotlight, `open -a`). To run an
-  # unattended fixed-port Chrome/Edge CDP session on 19223/19228, pass
-  # `--user-data-dir=<dir>` to `google-chrome-cdp` / `microsoft-edge-cdp`.
+  # every normal launch (Dock, Spotlight, `open -a`); that is the path
+  # `chrome-live` attaches to (DevToolsActivePort discovery), and no
+  # fixed fleet port is claimed for it.
   #
   # Fleet port table, one place for every browser remote endpoint,
   # loopback-only:
@@ -41,19 +48,19 @@ let
   #   19231 Safari Technology Preview BiDi (safaridriver -p 19232 -b 19231)
   chromiumFamilyCdp = pkgs.stdenvNoCC.mkDerivation {
     pname = "chromium-family-cdp";
-    version = "1.1";
+    version = "1.2";
     src = null;
     dontUnpack = true;
     installPhase = ''
       mkdir -p "$out/bin"
 
       make_cdp_app() {
-        display="$1"; bin_name="$2"; target="$3"; port="$4"; ident="$5"
+        display="$1"; bin_name="$2"; target="$3"; port="$4"; ident="$5"; profile="$6"
         app="$out/Applications/$display.app"
         mkdir -p "$app/Contents/MacOS"
         cat > "$app/Contents/MacOS/$display" <<LAUNCHER
       #!/bin/sh
-      exec "$target" --remote-debugging-address=127.0.0.1 --remote-debugging-port=$port "\$@"
+      exec "$target" --remote-debugging-address=127.0.0.1 --remote-debugging-port=$port ''${profile:+--user-data-dir=$profile} "\$@"
       LAUNCHER
         chmod +x "$app/Contents/MacOS/$display"
         cat > "$app/Contents/Info.plist" <<PLIST
@@ -70,7 +77,7 @@ let
         <key>CFBundlePackageType</key>
         <string>APPL</string>
         <key>CFBundleShortVersionString</key>
-        <string>1.1</string>
+        <string>1.2</string>
         <key>LSUIElement</key>
         <false/>
       </dict>
@@ -78,14 +85,18 @@ let
       PLIST
         cat > "$out/bin/$bin_name" <<LAUNCHER
       #!/bin/sh
-      exec "$target" --remote-debugging-address=127.0.0.1 --remote-debugging-port=$port "\$@"
+      exec "$target" --remote-debugging-address=127.0.0.1 --remote-debugging-port=$port ''${profile:+--user-data-dir=$profile} "\$@"
       LAUNCHER
         chmod +x "$out/bin/$bin_name"
       }
 
-      make_cdp_app "Helium CDP" helium-cdp "/Applications/Helium.app/Contents/MacOS/Helium" 19222 helium-cdp
-      make_cdp_app "Google Chrome CDP" google-chrome-cdp "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" 19223 google-chrome-cdp
-      make_cdp_app "Microsoft Edge CDP" microsoft-edge-cdp "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge" 19228 microsoft-edge-cdp
+      # The profile argument is a literal `$HOME/...` path: it is written
+      # into the launcher verbatim and expands when the launcher runs.
+      # Chrome/Edge need it (non-default dir, see the caveat above);
+      # Helium serves its port on the default profile and gets none.
+      make_cdp_app "Helium CDP" helium-cdp "/Applications/Helium.app/Contents/MacOS/Helium" 19222 helium-cdp ""
+      make_cdp_app "Google Chrome CDP" google-chrome-cdp "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" 19223 google-chrome-cdp '$HOME/.local/share/cdp-profiles/google-chrome'
+      make_cdp_app "Microsoft Edge CDP" microsoft-edge-cdp "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge" 19228 microsoft-edge-cdp '$HOME/.local/share/cdp-profiles/microsoft-edge'
     '';
     meta = {
       description = "Helium, Google Chrome and Microsoft Edge launchers with CDP remote debugging on loopback (19222/19223/19228)";

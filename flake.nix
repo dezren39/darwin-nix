@@ -1246,6 +1246,31 @@ rec {
               python3 ./browser-remote-debug.test.py
               touch $out
             '';
+        # Guard for the Chromium-family CDP launcher port claims
+        # (#1878): runs the real make_cdp_app generation out of
+        # systemPackages.nix and asserts Chrome/Edge launchers carry
+        # the non-default --user-data-dir their advertised fixed ports
+        # require, Helium's do not, and mcpx.config.nix + docs/mcp.md
+        # agree on which launch path serves helium-live's 19222.
+        chromium-family-cdp-tests =
+          pkgs.runCommandLocal "chromium-family-cdp-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.coreutils
+                pkgs.gnugrep
+                pkgs.gnused
+              ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/systemPackages.nix $src/mcpx.config.nix $src/chromium-family-cdp.test.sh ./
+              mkdir -p docs
+              cp $src/docs/mcp.md docs/
+              chmod u+w ./chromium-family-cdp.test.sh
+              bash ./chromium-family-cdp.test.sh
+              touch $out
+            '';
         # Exercise the home-manager activation wrapper around
         # browser-remote-debug.py: partial failures are recorded in
         # service-events without blocking activation; unrecorded failures

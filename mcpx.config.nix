@@ -102,8 +102,11 @@ let
     # - chrome-live: connects to Chrome's default profile via DevToolsActivePort
     #   (enabled in Local State by home.activation.browserRemoteDebug; Chrome
     #   prompts once to allow the connection).
-    # - helium-live: connects to Helium's structural CDP port 19222 (`helium-cdp`
-    #   or Helium with Local State remote debugging enabled).
+    # - helium-live: connects to Helium's structural CDP port 19222, which is
+    #   served by the `helium-cdp` launcher only. A normally launched Helium
+    #   (Local State remote debugging enabled) serves the approval-gated CDP
+    #   server on 9222 instead — the DevToolsActivePort path `chrome-live`
+    #   uses for Chrome — and no fixed fleet port is claimed for it (#1878).
     # - safari: Apple's native `/usr/bin/safaridriver --mcp` stdio MCP server
     #   (requires one-time Safari > Settings > Developer > "Allow remote automation").
     chrome-live = {

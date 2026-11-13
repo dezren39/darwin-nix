@@ -67,11 +67,13 @@ Covers the two PR #904 fallout bugs:
 Run: python3 mcp-clients.test.py  (exit 0 = all probes passed)
 """
 
+import importlib.util
 import json
 import os
 import shutil
 import subprocess
 import sys
+import threading
 import tempfile
 
 SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mcp-clients.py")
@@ -105,6 +107,80 @@ def check(name, cond, detail=""):
 
 def fresh_home():
     return tempfile.mkdtemp(prefix="mcp-clients-test-")
+
+
+# #1844: two writers that have both staged their content must not collide
+# when they atomically replace the same destination. The replace barrier
+# makes both writes reach the commit point before either rename happens.
+home = fresh_home()
+write_path = seed(home, ".claude.json", '{"mcpServers": {"old": {}}}\n')
+os.chmod(write_path, 0o640)
+os.makedirs(os.path.join(home, ".local/state/mcp-clients/backup"), exist_ok=True)
+shutil.copy2(write_path, os.path.join(home, ".local/state/mcp-clients/backup", write_path.replace("/", "%")))
+spec = importlib.util.spec_from_file_location("mcp_clients_under_test", SCRIPT)
+mcp_clients = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mcp_clients)
+mcp_clients.BACKUP_DIR = os.path.join(home, ".local/state/mcp-clients/backup")
+replace_barrier = threading.Barrier(2)
+original_replace = os.replace
+write_errors = []
+
+
+def synchronized_replace(src, dst):
+    replace_barrier.wait(timeout=5)
+    return original_replace(src, dst)
+
+
+def concurrent_write(text):
+    try:
+        mcp_clients.write(write_path, text, "concurrent test")
+    except Exception as exc:
+        write_errors.append(exc)
+
+
+os.replace = synchronized_replace
+try:
+    writers = [threading.Thread(target=concurrent_write, args=(text,)) for text in (
+        '{"mcpServers": {"first": {}}}\n',
+        '{"mcpServers": {"second": {}}}\n',
+    )]
+    for writer in writers:
+        writer.start()
+    for writer in writers:
+        writer.join(timeout=10)
+finally:
+    os.replace = original_replace
+check("1844 both concurrent writes succeed", not write_errors and all(not writer.is_alive() for writer in writers),
+      ", ".join(repr(error) for error in write_errors))
+try:
+    final_config = json.loads(read(write_path))
+    valid_config = isinstance(final_config.get("mcpServers"), dict)
+except (ValueError, OSError):
+    valid_config = False
+check("1844 concurrent result remains valid JSON", valid_config)
+check("1844 destination mode is preserved", os.stat(write_path).st_mode & 0o777 == 0o640)
+before_failure = read(write_path)
+
+
+def failed_replace(src, dst):
+    raise OSError("simulated replace failure")
+
+
+os.replace = failed_replace
+try:
+    try:
+        mcp_clients.write(write_path, '{"mcpServers": {"failed": {}}}\n', "failure cleanup test")
+    except OSError:
+        replace_failed = True
+    else:
+        replace_failed = False
+finally:
+    os.replace = original_replace
+leftover_temps = [name for name in os.listdir(os.path.dirname(write_path))
+                  if name.startswith("..claude.json.mcp-clients-") and name.endswith(".tmp")]
+check("1844 failed replace cleans up its temp file",
+      replace_failed and not leftover_temps and read(write_path) == before_failure)
+shutil.rmtree(home)
 
 
 # #906: malformed first client (Copilot) -- the rest are still enforced,

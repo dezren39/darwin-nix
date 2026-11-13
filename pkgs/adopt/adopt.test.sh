@@ -28,6 +28,10 @@
 #      (#1746): a bare 3DPrinter key makes the whole flake fail to
 #      parse, so adopt writes "3DPrinter", a second run is a no-op,
 #      and copying the quoted entry under an ordinary name works
+#   Q  host selection falls back to hostname -s when scutil fails or
+#      returns an empty name (#1856); when both sources fail the run
+#      fails loudly with a useful error and changes nothing, and a
+#      successful scutil result still wins over hostname -s
 set -uo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -301,6 +305,43 @@ diff -q "$TMP_ROOT/p/before" "$TMP_ROOT/p/flake.nix" >/dev/null && ok "P: second
 grep -q '^      COPYMAC = {$' "$TMP_ROOT/p/flake.nix" && ok "P: quoted entry copied under an ordinary name" || fail "P: quoted entry copy missing"
 out="$(cd "$TMP_ROOT/p" && bash "$SCRIPT" --host 9LIVES --dry-run)" || fail "P: digit-leading dry-run exited non-zero"
 [[ "$out" == *'"9LIVES" = {'* ]] && ok "P: dry-run shows the quoted form" || fail "P: dry-run does not show the quoted form: $out"
+
+# Q: hostname -s fallback when scutil cannot read LocalHostName (#1856)
+mkdir -p "$TMP_ROOT/qfail" "$TMP_ROOT/qempty" "$TMP_ROOT/qboth" "$TMP_ROOT/qwin"
+# Q1: scutil exits 1, hostname prints fallback-host
+printf '#!/bin/sh\nexit 1\n' > "$TMP_ROOT/qfail/scutil"
+printf '#!/bin/sh\necho FALLBACKMAC\n' > "$TMP_ROOT/qfail/hostname"
+chmod +x "$TMP_ROOT/qfail/scutil" "$TMP_ROOT/qfail/hostname"
+new_flake "$TMP_ROOT/q1"
+out="$(cd "$TMP_ROOT/q1" && PATH="$TMP_ROOT/qfail:$PATH" bash "$SCRIPT" --dry-run 2>&1)"; rc=$?
+(( rc == 0 )) && ok "Q: failing scutil with hostname fallback exits 0" || fail "Q: failing scutil run exited $rc, want 0: $out"
+[[ "$out" == *"FALLBACKMAC = {"* ]] && ok "Q: fallback hostname used when scutil fails" || fail "Q: fallback hostname not used when scutil fails: $out"
+# Q2: scutil returns an empty name, hostname prints fallback-host
+printf '#!/bin/sh\nexit 0\n' > "$TMP_ROOT/qempty/scutil"
+printf '#!/bin/sh\necho FALLBACKMAC\n' > "$TMP_ROOT/qempty/hostname"
+chmod +x "$TMP_ROOT/qempty/scutil" "$TMP_ROOT/qempty/hostname"
+new_flake "$TMP_ROOT/q2"
+out="$(cd "$TMP_ROOT/q2" && PATH="$TMP_ROOT/qempty:$PATH" bash "$SCRIPT" --dry-run 2>&1)"; rc=$?
+(( rc == 0 )) && ok "Q: empty scutil with hostname fallback exits 0" || fail "Q: empty scutil run exited $rc, want 0: $out"
+[[ "$out" == *"FALLBACKMAC = {"* ]] && ok "Q: fallback hostname used when scutil returns empty" || fail "Q: fallback hostname not used when scutil returns empty: $out"
+# Q3: both sources fail -- useful error, nonzero exit, flake unchanged
+printf '#!/bin/sh\nexit 1\n' > "$TMP_ROOT/qboth/scutil"
+printf '#!/bin/sh\nexit 1\n' > "$TMP_ROOT/qboth/hostname"
+chmod +x "$TMP_ROOT/qboth/scutil" "$TMP_ROOT/qboth/hostname"
+new_flake "$TMP_ROOT/q3"
+cp "$TMP_ROOT/q3/flake.nix" "$TMP_ROOT/q3/before"
+out="$(cd "$TMP_ROOT/q3" && PATH="$TMP_ROOT/qboth:$PATH" bash "$SCRIPT" --dry-run 2>&1)"; rc=$?
+(( rc != 0 )) && ok "Q: both sources failing exits nonzero" || fail "Q: both sources failing exited 0"
+[[ "$out" == *"could not determine"* && "$out" == *"--host"* ]] && ok "Q: both-fail error is useful (names the failure and --host)" || fail "Q: both-fail error not useful: $out"
+diff -q "$TMP_ROOT/q3/before" "$TMP_ROOT/q3/flake.nix" >/dev/null && ok "Q: both-fail run changed nothing" || fail "Q: both-fail run changed the flake"
+# Q4: a successful scutil result still wins over hostname -s
+printf '#!/bin/sh\necho SCUTILMAC\n' > "$TMP_ROOT/qwin/scutil"
+printf '#!/bin/sh\necho HOSTNAMEMAC\n' > "$TMP_ROOT/qwin/hostname"
+chmod +x "$TMP_ROOT/qwin/scutil" "$TMP_ROOT/qwin/hostname"
+new_flake "$TMP_ROOT/q4"
+out="$(cd "$TMP_ROOT/q4" && PATH="$TMP_ROOT/qwin:$PATH" bash "$SCRIPT" --dry-run 2>&1)"; rc=$?
+(( rc == 0 )) && ok "Q: successful scutil run exits 0" || fail "Q: successful scutil run exited $rc, want 0: $out"
+[[ "$out" == *"SCUTILMAC = {"* && "$out" != *"HOSTNAMEMAC = {"* ]] && ok "Q: scutil result wins over hostname fallback" || fail "Q: scutil result did not win: $out"
 
 if (( failures )); then
   echo "$failures failure(s)" >&2

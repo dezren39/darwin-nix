@@ -23,7 +23,13 @@
 #   * an unknown argument -> exit 2 naming it, usage on stderr, and
 #     no brew call at all; --help -> usage, exit 0, no brew call (#1158);
 #   * a missing first-leg directory -> a "does not exist" notice,
-#     exit 0, no raw find error, and the ~/Applications leg still runs (#1255).
+#     exit 0, no raw find error, and the ~/Applications leg still runs (#1255);
+#   * cask app artifacts, not tokens, decide what is managed (#1779):
+#     `iterm2` manages iTerm.app, a multi-artifact cask manages every
+#     artifact, a `target` rename manages the target bundle (not the
+#     source name), an unrelated app is still reported, and a failed
+#     or unparseable `brew info` exits 1 naming the step with no
+#     findings -- enumeration failures are never a silent inventory.
 # The first leg's /Applications is redirected with the script's
 # SEARCH_APPLICATIONS_DIR seam (#983); the second leg uses the
 # scratch HOME's ~/Applications. Stubs use #!/bin/sh: the nix build
@@ -78,8 +84,20 @@ case "$1" in
     case "$STUB_BREW_MODE" in
       working) echo "foo" ;;
       all-managed) printf 'foo\nbar\n' ;;
+      artifacts) printf 'iterm2\nsuite\n' ;;
+      info-fail|info-garbage) echo "foo" ;;
       empty) : ;;
       failing) echo "Error: brew is broken" >&2; exit 1 ;;
+    esac
+    ;;
+  info)
+    case "$STUB_BREW_MODE" in
+      working) printf '%s' '{"casks":[{"token":"foo","artifacts":[{"app":["Foo.app"]}]}]}' ;;
+      all-managed) printf '%s' '{"casks":[{"token":"foo","artifacts":[{"app":["Foo.app"]}]},{"token":"bar","artifacts":[{"app":["Bar.app"]}]}]}' ;;
+      artifacts) printf '%s' '{"casks":[{"token":"iterm2","artifacts":[{"app":["iTerm.app"]}]},{"token":"suite","artifacts":[{"app":["Multi.app"]},{"app":["Helper.app",{"target":"Renamed Helper.app"}]}]}]}' ;;
+      info-fail) echo "Error: brew info is broken" >&2; exit 1 ;;
+      info-garbage) printf '%s' 'this is not json' ;;
+      *) echo "brew stub: info must not run in mode $STUB_BREW_MODE" >&2; exit 1 ;;
     esac
     ;;
   *)
@@ -114,6 +132,7 @@ expect_rc() { # expect_rc <desc> <want>
   fi
 }
 list_calls() { grep -c '^list$' "$LOG" || true; }
+info_calls() { grep -c '^info$' "$LOG" || true; }
 search_calls() { grep -c '^search$' "$LOG" || true; }
 
 # --- working brew: foo is a cask, bar is not --------------------------------
@@ -158,6 +177,11 @@ if [ "$(list_calls)" = "1" ]; then
   echo "ok: brew list ran exactly once (empty)"
 else
   fail "brew list ran exactly once (empty) — got $(list_calls)"
+fi
+if [ "$(info_calls)" = "0" ]; then
+  echo "ok: brew info does not run for an empty cask list"
+else
+  fail "brew info does not run for an empty cask list — got $(info_calls)"
 fi
 
 # --- failing brew list: loud exit 1, no findings -----------------------------
@@ -223,6 +247,56 @@ if [ "$(list_calls)" = "1" ]; then
 else
   fail "brew list ran exactly once (missing dir) — got $(list_calls)"
 fi
+
+# --- #1779: artifacts, not tokens, decide what is managed -------------------
+APPS2="$TMP_ROOT/Applications2"
+mkdir -p "$APPS2/iTerm.app" "$APPS2/Multi.app" "$APPS2/Renamed Helper.app" "$APPS2/Unrelated.app"
+: > "$LOG"
+HOME="$HOME_DIR" BASH_ENV="$MAPFILE_GUARD" SEARCH_APPLICATIONS_DIR="$APPS2" STUB_BREW_LOG="$LOG" \
+  STUB_BREW_MODE=artifacts PATH="$BIN:$PATH" \
+  bash "$SCRIPT" > "$TMP_ROOT/out" 2> "$TMP_ROOT/err"
+RC=$?
+expect_rc "artifact-matching brew exits 0" 0
+check "renamed bundle iTerm.app (cask iterm2) is not reported" \
+  bash -c "! grep -qx iterm '$TMP_ROOT/out'"
+check "first artifact of a multi-artifact cask (Multi.app) is not reported" \
+  bash -c "! grep -qx multi '$TMP_ROOT/out'"
+check "target-renamed artifact (Renamed Helper.app) is not reported" \
+  bash -c "! grep -qx renamed-helper '$TMP_ROOT/out'"
+check "artifact source name replaced by its target (Helper.app) is not resurrected" \
+  bash -c "! grep -qx helper '$TMP_ROOT/out'"
+check "unrelated app is still reported (artifacts)" \
+  grep -qx unrelated "$TMP_ROOT/out"
+check "second leg still reports its non-cask app (artifacts)" \
+  grep -qx bar "$TMP_ROOT/out"
+if [ "$(list_calls)" = "1" ]; then
+  echo "ok: brew list ran exactly once (artifacts)"
+else
+  fail "brew list ran exactly once (artifacts) — got $(list_calls)"
+fi
+if [ "$(info_calls)" = "1" ]; then
+  echo "ok: brew info ran exactly once (artifacts)"
+else
+  fail "brew info ran exactly once (artifacts) — got $(info_calls)"
+fi
+
+# --- #1779: a failed brew info is a loud enumeration failure ------------------
+run_search info-fail
+expect_rc "failing brew info exits 1" 1
+check "failing brew info names the step on stderr" \
+  grep -q "brew info" "$TMP_ROOT/err"
+check "failing brew info surfaces brew's own stderr" \
+  grep -q "brew info is broken" "$TMP_ROOT/err"
+check "failing brew info reports no findings" \
+  bash -c "! grep -qx -e foo -e bar '$TMP_ROOT/out'"
+
+# --- #1779: unparseable brew info is a loud enumeration failure ---------------
+run_search info-garbage
+expect_rc "unparseable brew info exits 1" 1
+check "unparseable brew info names the step on stderr" \
+  grep -q "brew info" "$TMP_ROOT/err"
+check "unparseable brew info reports no findings" \
+  bash -c "! grep -qx -e foo -e bar '$TMP_ROOT/out'"
 
 # --- missing brew: same exit-1 path ------------------------------------------
 run_search missing

@@ -831,6 +831,9 @@ rec {
                 pkgs.findutils
                 pkgs.gnugrep
                 pkgs.gnused
+                # #1779: search.sh parses `brew info --json=v2` output
+                # with python3 (the brew-repair pattern).
+                pkgs.python3
               ];
               src = inputs.self;
             }

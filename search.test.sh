@@ -162,8 +162,8 @@ if [ "$(search_calls)" = "0" ]; then
 else
   fail "no brew search calls (working) -- got $(search_calls)"
 fi
-printf 'Checking %s...\nbar\nChecking ~/Applications...\nbar\n' "$APPS" > "$TMP_ROOT/expected"
-check "working brew report byte-identical to the pre-#1617 output" \
+printf 'Checking %s...\nbar\nChecking ~/Applications...\nbar\nFound 2 app(s) not installed via Homebrew.\n' "$APPS" > "$TMP_ROOT/expected"
+check "working brew report includes summary after #1617 cleanup" \
   cmp -s "$TMP_ROOT/expected" "$TMP_ROOT/out"
 
 # --- no unmatched apps: make the empty result explicit -----------------------

@@ -176,4 +176,7 @@ fi
 
 if [[ ! -s "$UNMANAGED_APPS_FILE" ]]; then
     echo "No non-Homebrew apps found."
+else
+    count=$(wc -l < "$UNMANAGED_APPS_FILE" | tr -d ' ')
+    echo "Found ${count} app(s) not installed via Homebrew."
 fi

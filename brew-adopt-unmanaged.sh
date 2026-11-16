@@ -173,9 +173,17 @@ fi
 if brew_has_cask dezren39/local/onedrive; then
   log "onedrive: already brew-managed via the vendored cask (dezren39/local/onedrive); nothing to do"
 elif [ -d "$APPLICATIONS/OneDrive.app" ]; then
-  installed_version=$("$PLISTBUDDY" -c "Print :CFBundleVersion" "$APPLICATIONS/OneDrive.app/Contents/Info.plist" 2>/dev/null || true)
-  if [ -z "$installed_version" ]; then
-    installed_version=$("$PLISTBUDDY" -c "Print :CFBundleShortVersionString" "$APPLICATIONS/OneDrive.app/Contents/Info.plist" 2>/dev/null || true)
+  bundle_version=$("$PLISTBUDDY" -c "Print :CFBundleVersion" "$APPLICATIONS/OneDrive.app/Contents/Info.plist" 2>/dev/null || true)
+  short_version=$("$PLISTBUDDY" -c "Print :CFBundleShortVersionString" "$APPLICATIONS/OneDrive.app/Contents/Info.plist" 2>/dev/null || true)
+  # The cask version (and Microsoft's pkg URL) is the three-part short
+  # version plus the build's last component. CFBundleVersion alone is not
+  # that: from 26.212 it drops the first dot (26212.1029.0006 for
+  # 26.212.1029.0006), which compared as 26212 > 26 against every cask.
+  # A four-part CFBundleVersion (the older format) is used as-is.
+  if [[ "$bundle_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && [[ "$short_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    installed_version="$short_version.${bundle_version##*.}"
+  else
+    installed_version=${bundle_version:-$short_version}
   fi
   if [ -n "$vendored_version" ] && [ -n "$installed_version" ] &&
     [ "$(vercmp "$installed_version" "$vendored_version")" = "1" ]; then

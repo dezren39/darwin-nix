@@ -253,6 +253,34 @@ run
 check "gnu stat, managed chrome: exit 0" test $rc -eq 0
 check "gnu stat, managed chrome: no chown" out_has -v "chown -R"
 
+# 12. OneDrive 26.212 writes CFBundleVersion without the first dot
+# (26212.1029.0006, short 26.212.1029). The version reported and compared
+# must be 26.212.1029.0006, the form Microsoft's pkg URL uses: a newer
+# install still fails closed, and the remedy names the dotted version.
+reset_state
+echo drewry.pope >"$tmp/state/chrome_owner"
+touch "$tmp/state/receipt_google-chrome"
+OD_CFVERSION="26212.1029.0006" OD_CFSHORT="26.212.1029"
+run
+check "dotless build: newer still exits 1" test $rc -eq 1
+check "dotless build: remedy names the dotted version" out_has "bump homebrew-local/Casks/onedrive.rb to 26.212.1029.0006"
+check "dotless build: dotless form not offered" out_has -v "to 26212.1029.0006"
+
+# 13. Same dotless build, vendored cask bumped to match: same-version
+# install proceeds (comparing 26212 against 26 would call it newer).
+reset_state
+echo drewry.pope >"$tmp/state/chrome_owner"
+touch "$tmp/state/receipt_google-chrome"
+OD_CFVERSION="26212.1029.0006" OD_CFSHORT="26.212.1029"
+vendored_rb="$tmp/taps/dezren39/homebrew-local/Casks/onedrive.rb"
+cp "$vendored_rb" "$tmp/onedrive.rb.orig"
+sed -i.bak 's/version "26.198.1011.0006"/version "26.212.1029.0006"/' "$vendored_rb"
+grep -q '26.212.1029.0006' "$vendored_rb" || { echo "FAIL: test 13 setup did not bump the vendored version" >&2; exit 1; }
+run
+check "dotless build, matching cask: exit 0" test $rc -eq 0
+check "dotless build, matching cask: bundle handoff logged" out_has "brew bundle will install the vendored pkg"
+cp "$tmp/onedrive.rb.orig" "$vendored_rb"
+
 if [ $failures -gt 0 ]; then
   echo "$failures check(s) failed" >&2
   echo "--- captured script output ---" >&2

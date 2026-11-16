@@ -11,17 +11,19 @@
 # self-updating (auto_updates).
 #
 # sha256 is of Microsoft's own pkg at the URL below for this version
-# (289,917,016 bytes, verified 2026-11-11). The upstream livecheck
-# block is deliberately omitted: it reports the Deferred ring, the
-# wrong signal for this pin.
+# (295,579,433 bytes, verified 2026-11-16; Developer ID Installer:
+# Microsoft Corporation, notarized). Bumped from 26.198.1011.0006 after
+# OneDrive self-updated to 26.212.1029.0006 before brew adopted it.
+# The upstream livecheck block is deliberately omitted: it reports the
+# Deferred ring, the wrong signal for this pin.
 #
 # RETIRE this file (and the dezren39/homebrew-local tap + trust entry
 # in configuration.nix, and switch casks.nix back to plain "onedrive")
-# once the pinned upstream homebrew-cask reaches >= 26.198.1011.0006.
+# once the pinned upstream homebrew-cask reaches >= 26.212.1029.0006.
 # brew-adopt-unmanaged.sh logs that moment at activation.
 cask "onedrive" do
-  version "26.198.1011.0006"
-  sha256 "928516faca5cc0ccecdf939b9e101eddf252aea76d499d9ffe2c29b421818bf2"
+  version "26.212.1029.0006"
+  sha256 "678c576c9c3e9a5237867542867fbeadcc7b8af0067fbdfc47ebf0dda3a3c5df"
 
   url "https://oneclient.sfx.ms/Mac/Installers/#{version}/universal/OneDrive.pkg"
   name "OneDrive"

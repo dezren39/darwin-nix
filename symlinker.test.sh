@@ -765,6 +765,40 @@ fi
 check "R: free-destination run created the symlink" test -L "$R/out/item"
 check "R: free-destination run backed up the conflict" grep -qx conflict "$R/out/item.old"
 
+# --- Scenario R2 (#1908): dry-run --skip-backup must not simulate deleting
+# a refused occupied backup destination. PR #1906's dry-run loop logs
+# REFUSE for an occupied destination, but the --skip-backup simulation
+# then unconditionally logged rm -rf for it and counted it under
+# "Would delete", claiming a protected previous backup would be deleted.
+# The execute path is correct: only backups this run created are deleted.
+RD="$R/dry"; mkdir -p "$RD/in" "$RD/out" "$RD/cache"
+printf 'conflict\n' > "$RD/out/item"
+printf 'previous-backup\n' > "$RD/out/item.old"
+printf 'incoming\n' > "$RD/in/item"
+printf 'conflict2\n' > "$RD/out/free"
+printf 'incoming2\n' > "$RD/in/free"
+if XDG_CACHE_HOME="$RD/cache" bash "$SCRIPT" --input-dir "$RD/in" --output-dir "$RD/out" --dry-run --force --yes --skip-backup --backup-suffix .old --no-input >"$RD/log" 2>"$RD/err"; then
+  echo "ok: R2: dry-run --skip-backup exits 0"
+else
+  fail "R2: dry-run --skip-backup should exit 0: $(cat "$RD/log" "$RD/err")"
+fi
+check "R2: dry-run logs the refusal" grep -qF "REFUSE mv out/item out/item.old" "$RD/log"
+if grep -qF "rm -rf out/item.old" "$RD/log"; then
+  fail "R2: dry-run simulated deleting the refused occupied backup destination"
+else
+  echo "ok: R2: dry-run does not simulate deleting the refused destination"
+fi
+check "R2: dry-run still simulates deleting a free destination backup" grep -qF "rm -rf out/free.old" "$RD/log"
+if grep -A2 "Would delete" "$RD/log" | grep -qF "out/item.old"; then
+  fail "R2: dry-run Would delete lists the refused occupied backup destination"
+else
+  echo "ok: R2: dry-run Would delete omits the refused destination"
+fi
+grep -A2 "Would delete" "$RD/log" | grep -qF "out/free.old" || fail "R2: dry-run Would delete does not list the free destination backup"
+check "R2: dry-run counts exactly one deletion" grep -qF "1 deleted" "$RD/log"
+check "R2: dry-run left the previous backup untouched" grep -qx previous-backup "$RD/out/item.old"
+check "R2: dry-run left the conflict untouched" grep -qx conflict "$RD/out/item"
+
 if (( failures > 0 )); then
   echo "symlinker tests: $failures failure(s)" >&2
   exit 1

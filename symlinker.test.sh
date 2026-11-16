@@ -732,6 +732,39 @@ else
 fi
 check "Q: flag-before---undo undo removed the symlink" test ! -L "$Q/out/example.txt"
 
+
+# --- Scenario R (#1811): --force refuses an occupied backup destination ---
+# With a fixed --backup-suffix, the backup destination <conflict><suffix>
+# may already hold a previous backup; the Execute loop's mv used to
+# overwrite it silently, destroying the earlier backup. The run must
+# refuse that destination: exit 1 with an error naming the destination,
+# the previous backup byte-identical, and the conflict left in place
+# (no symlink created over it). A following run whose destination is
+# free must still back up and link normally.
+R="$TMP_ROOT/r"; mkdir -p "$R/in" "$R/out" "$R/cache"
+printf 'conflict\n' > "$R/out/item"
+printf 'previous-backup\n' > "$R/out/item.old"
+printf 'incoming\n' > "$R/in/item"
+r_run() { XDG_CACHE_HOME="$R/cache" bash "$SCRIPT" --input-dir "$R/in" --output-dir "$R/out" --force --yes --backup-suffix .old >"$R/log" 2>"$R/err"; }
+if r_run; then
+  fail "R: occupied backup destination should exit 1, got 0"
+else
+  echo "ok: R: occupied backup destination exits 1"
+fi
+grep -qF "backup destination already exists" "$R/log" "$R/err" || fail "R: output does not name the refusal: $(cat "$R/log" "$R/err")"
+check "R: previous backup contents preserved" grep -qx previous-backup "$R/out/item.old"
+check "R: conflict left in place (not moved, not linked over)" grep -qx conflict "$R/out/item"
+[[ ! -L "$R/out/item" ]] || fail "R: conflict was replaced by a symlink despite the refusal"
+# Free the destination: the same run must now succeed end to end.
+mv "$R/out/item.old" "$R/saved.old"
+if r_run; then
+  echo "ok: R: run with a free backup destination passes"
+else
+  fail "R: run with a free backup destination should pass: $(cat "$R/err") $(cat "$R/log")"
+fi
+check "R: free-destination run created the symlink" test -L "$R/out/item"
+check "R: free-destination run backed up the conflict" grep -qx conflict "$R/out/item.old"
+
 if (( failures > 0 )); then
   echo "symlinker tests: $failures failure(s)" >&2
   exit 1

@@ -93,7 +93,9 @@ for form in app cli; do
   check "$form: helium launcher exists and is executable" test -x "$helium"
   check "$form: helium serves 19222" contains "--remote-debugging-port=19222" "$helium"
   check "$form: helium keeps the default profile (no user-data-dir)" lacks "--user-data-dir" "$helium"
-  check "$form: all launchers bind loopback only" contains "--remote-debugging-address=127.0.0.1" "$chrome"
+  check "$form: chrome binds loopback only" contains "--remote-debugging-address=127.0.0.1" "$chrome"
+  check "$form: edge binds loopback only" contains "--remote-debugging-address=127.0.0.1" "$edge"
+  check "$form: helium binds loopback only" contains "--remote-debugging-address=127.0.0.1" "$helium"
 done
 
 # --- Cross-file port agreement ------------------------------------------

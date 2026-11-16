@@ -1360,12 +1360,16 @@ if $DRY_RUN; then
     for i in "${!conflict_links[@]}"; do
       lnk="${conflict_links[$i]}"
       tgt="${conflict_targets[$i]}"
-      log "mv $(disp "$lnk") $(disp "$lnk")${BACKUP_SUFFIX}"
-      done_backed_up_orig+=("$lnk")
-      done_backed_up_bak+=("${lnk}${BACKUP_SUFFIX}")
-      log "ln -s $(disp "$tgt") $(disp "$lnk")"
-      done_linked_links+=("$lnk")
-      done_linked_targets+=("$tgt")
+      if [[ -e "${lnk}${BACKUP_SUFFIX}" || -L "${lnk}${BACKUP_SUFFIX}" ]]; then
+        log "REFUSE mv $(disp "$lnk") $(disp "$lnk")${BACKUP_SUFFIX}: backup destination already exists"
+      else
+        log "mv $(disp "$lnk") $(disp "$lnk")${BACKUP_SUFFIX}"
+        done_backed_up_orig+=("$lnk")
+        done_backed_up_bak+=("${lnk}${BACKUP_SUFFIX}")
+        log "ln -s $(disp "$tgt") $(disp "$lnk")"
+        done_linked_links+=("$lnk")
+        done_linked_targets+=("$tgt")
+      fi
     done
     if $SKIP_BACKUP; then
       for i in "${!conflict_links[@]}"; do
@@ -1420,6 +1424,17 @@ else
       lnk="${conflict_links[$i]}"
       tgt="${conflict_targets[$i]}"
       bak="${lnk}${BACKUP_SUFFIX}"
+
+      # Refuse to overwrite an occupied backup destination (#1811): with a
+      # fixed --backup-suffix the destination may already hold a previous
+      # backup, and mv would silently destroy it.
+      if [[ -e "$bak" || -L "$bak" ]]; then
+        done_error_paths+=("$lnk")
+        done_error_msgs+=("backup destination already exists: $bak (refusing to overwrite)")
+        EXIT_CODE=1
+        if $STRICT; then break; fi
+        continue
+      fi
 
       # Back up the conflict
       err_msg=""

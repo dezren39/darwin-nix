@@ -166,8 +166,9 @@ rec {
       # touch-reopen test expired its own task before the reopen
       # under builder load and failed the mcpx-home-manager-module
       # flake check (run 43098524363).
+      # Pinned forward 2026-11-16 to developing-today/code main HEAD.
       inputs.opencode.inputs.mcpx-src.url =
-        "github:developing-today/code/67d9d908b080cba7231ef668e0a8692928e7cbd3";
+        "github:developing-today/code/2f5d9cba7d55adde867f8ca4810afc241fbe712f";
       # Pin the chain's opencode to the #1791 hash-fix rev: the rev the
       # chain otherwise resolves (6c43550) records an aarch64-darwin
       # node_modules fixed-output hash that does not match its own
@@ -177,7 +178,10 @@ rec {
       # pin branch for that tree (fork PR #2269, merged) carries the
       # corrected nix/hashes.json and nothing else. Drop this override
       # once the chain's own opencode resolution moves past 6c43550.
-      inputs.opencode.url = "github:developing-today-forks/opencode/b80e509fed9dce48d739887b3821cbba36ccc5d8";
+      # Pinned forward 2026-11-16 to the fork's main HEAD (e7d5bb7), which
+      # carries 118d889 (#1547): provider."opencode-route" overrides such
+      # as hidden apply to routes instead of disabling every route.
+      inputs.opencode.url = "github:developing-today-forks/opencode/e7d5bb7354053ca7aa09d6f370aee40d7f127503";
     };
     sidepulse-src = {
       url = "github:inteliwear/sidepulse/ffb1d3c2f3eed3b7e80e32d7876a7e1d67bd5dfb";

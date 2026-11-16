@@ -112,14 +112,22 @@ vercmp() {
   echo 0
 }
 
+# The owner of a path. darwin activation puts coreutils' GNU stat ahead
+# of /usr/bin/stat on PATH, and GNU reads BSD's `-f %Su` as --file-system:
+# it printed filesystem info as the "owner" and failed the switch
+# (switch-20261116T052331.log). Try GNU's form, then BSD's.
+file_owner() {
+  stat -c %U "$1" 2>/dev/null || stat -f %Su "$1"
+}
+
 # ---------------------------------------------------------------- chrome
 chrome_app="$APPLICATIONS/Google Chrome.app"
 if [ -d "$chrome_app" ]; then
-  owner=$(stat -f %Su "$chrome_app")
+  owner=$(file_owner "$chrome_app")
   if [ "$owner" != "$PRIMARY_USER" ]; then
     log "google-chrome: $chrome_app is owned by '$owner', not $PRIMARY_USER — brew cannot replace a bundle it does not own (#1791). Taking ownership: chown -R $PRIMARY_USER \"$chrome_app\""
     chown -R "$PRIMARY_USER" "$chrome_app" || true
-    owner=$(stat -f %Su "$chrome_app")
+    owner=$(file_owner "$chrome_app")
     if [ "$owner" = "$PRIMARY_USER" ]; then
       log "google-chrome: bundle now owned by $PRIMARY_USER (profile data in ~/Library/Application Support/Google/Chrome is untouched — it was never in the bundle)"
     else

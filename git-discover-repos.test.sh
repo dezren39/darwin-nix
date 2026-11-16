@@ -682,6 +682,56 @@ run --path "$COUNT_SCAN" --find trash --status
 [ "$STATUS" -eq 0 ] || fail "--find trash --status exited $STATUS (#1657)"
 case "$OUT" in *"FOUND"$'\t'"trash"$'\t'"-"$'\t'*) fail "--find trash --status kept the '-' status field (got: $OUT) (#1657)" ;; *"FOUND"$'\t'"trash"$'\t'*) echo "ok: --find with --status emits a real status field" ;; *) fail "--find trash --status lost its FOUND record (got: $OUT) (#1657)" ;; esac
 
+# ─── --status pins the four happy-path classifications (#1917) ───
+# PR #1912 rewrote status_for() to classify --find --status hits from
+# git exit codes (ls-files --error-unmatch -> tracked; diff --cached
+# --quiet exit 1 -> staged; ls-files --others --error-unmatch ->
+# untracked; fallthrough -> ignored), but no test pinned any specific
+# value: the #1657 cases above assert only a non-'-' field. The oracle
+# is the pre-#1912 output-capture semantics, verified identical to the
+# exit-code version on exactly these fixtures (pr-diff-review,
+# 2026-11-16). One fixture repo per status, each with a vendor
+# (risky) hit:
+#   tracked   vendor/keep committed
+#   staged    vendor/keep committed, then git rm --cached (a staged
+#             removal: absent from the index, index differs from HEAD)
+#   untracked vendor/keep present, never added, not ignored
+#   ignored   vendor/ named in a committed .gitignore
+# Inverting or dropping any single classification branch changes
+# exactly one expected line below and fails the suite.
+STATUS_SCAN="$TMP_ROOT/status-scan"
+mkdir -p "$STATUS_SCAN"
+status_git="$(command -v git)"
+for r in st-tracked st-staged st-untracked st-ignored; do
+  "$status_git" init -q "$STATUS_SCAN/$r"
+  mkdir -p "$STATUS_SCAN/$r/vendor"
+  printf 'x\n' > "$STATUS_SCAN/$r/vendor/keep"
+done
+"$status_git" -C "$STATUS_SCAN/st-tracked" add vendor/keep
+"$status_git" -C "$STATUS_SCAN/st-tracked" -c user.name=Test -c user.email=test@example.com commit -qm init
+"$status_git" -C "$STATUS_SCAN/st-staged" add vendor/keep
+"$status_git" -C "$STATUS_SCAN/st-staged" -c user.name=Test -c user.email=test@example.com commit -qm init
+"$status_git" -C "$STATUS_SCAN/st-staged" rm -q --cached vendor/keep
+printf 'vendor/\n' > "$STATUS_SCAN/st-ignored/.gitignore"
+"$status_git" -C "$STATUS_SCAN/st-ignored" add .gitignore
+"$status_git" -C "$STATUS_SCAN/st-ignored" -c user.name=Test -c user.email=test@example.com commit -qm init
+STATUS_SCAN_CANON="$(cd "$STATUS_SCAN" && pwd -P)"
+
+run --path "$STATUS_SCAN" --find vendor --status
+[ "$STATUS" -eq 0 ] || fail "--find vendor --status over the classification fixtures exited $STATUS (#1917)"
+for want in tracked staged untracked ignored; do
+  case "$want" in
+    tracked)   repo_name=st-tracked ;;
+    staged)    repo_name=st-staged ;;
+    untracked) repo_name=st-untracked ;;
+    ignored)   repo_name=st-ignored ;;
+  esac
+  case "$OUT" in
+    *"FOUND"$'\t'"risky"$'\t'"$want"$'\t'"$STATUS_SCAN_CANON/$repo_name/vendor"*) echo "ok: --status classifies $repo_name/vendor as $want (#1917)" ;;
+    *) fail "--status did not classify $repo_name/vendor as $want (got: $OUT) (#1917)" ;;
+  esac
+done
+
 # ─── --user with --path is judged, not silently ignored (#1710) ───
 # --user only resolves SCAN_HOME, which seed_auto() alone consumes;
 # seed_path() never read it, so --path DIR --user USER exited 0 with

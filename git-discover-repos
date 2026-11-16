@@ -289,7 +289,10 @@ canon() { (cd "$1" 2>/dev/null && pwd -P) || printf '%s\n' "$1"; }
 is_repo() { [ -e "$1/.git" ]; }
 # A bare repo has no .git entry; the directory itself is the object store.
 is_bare_repo() {
-  [ -d "$1" ] || return 1
+  # No [ -d "$1" ] first: a path that does not exist cannot hold HEAD, so
+  # the -f test below already answers false. The old leading test was one
+  # extra stat per directory in the discovery scan's hot classification
+  # loop, where this runs for every hit.
   [ -f "$1/HEAD" ] && [ -d "$1/objects" ] && [ -d "$1/refs" ]
 }
 is_numeric() { case "$1" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
@@ -394,23 +397,38 @@ fi
     declare -a bare_roots=()
     exec 3< "$candidate_list"
     IFS= read -r cand <&3 || cand=""
+    # Hot loop: one iteration per directory in the scan (hundreds of
+    # thousands for a home directory). Hoist the loop-invariant work out:
+    # the artifact-name test string (one join, not one per directory) and
+    # whether any bare candidate exists (with none, the cursor test below
+    # can never advance and is pure per-directory overhead).
+    artifact_set=" ${ALL_ARTIFACT_NAMES[*]} "
+    has_candidates=0
+    [ -s "$candidate_list" ] && has_candidates=1
     LC_ALL=C sort -u "$hits_file" | while IFS= read -r hit; do
-      while [ -n "$cand" ] && [[ "$cand" < "$hit" ]]; do
-        IFS= read -r cand <&3 || cand=""
-      done
+      if [ "$has_candidates" = 1 ]; then
+        while [ -n "$cand" ] && [[ "$cand" < "$hit" ]]; do
+          IFS= read -r cand <&3 || cand=""
+        done
+      fi
       # Drop bare roots whose subtree is exhausted: every descendant of a
       # root R sorts below R0 (the '/' separator incremented), so once the
       # stream passes that bound no later hit can be interior to R. Siblings
       # such as a.git-other sort between a root and its descendants, so a
       # single last-root variable is not enough — keep the open set.
-      open=()
-      for root in "${bare_roots[@]}"; do
-        [[ "$hit" < "${root}0" ]] && open+=("$root")
-      done
-      bare_roots=("${open[@]}")
-      for root in "${bare_roots[@]}"; do
-        case "$hit" in "$root"/*) continue 2 ;; esac
-      done
+      # Skip the open-set rebuild entirely when no bare repo is open
+      # (the common case): two array assignments and two loops per
+      # directory cost more than the rest of this iteration.
+      if [ ${#bare_roots[@]} -gt 0 ]; then
+        open=()
+        for root in "${bare_roots[@]}"; do
+          [[ "$hit" < "${root}0" ]] && open+=("$root")
+        done
+        bare_roots=("${open[@]}")
+        for root in "${bare_roots[@]}"; do
+          case "$hit" in "$root"/*) continue 2 ;; esac
+        done
+      fi
       base="${hit##*/}"
       if [ "$base" = ".git" ]; then
         printf '%s\n' "${hit%/.git}"
@@ -426,13 +444,15 @@ fi
       # is what reported bare repos the candidate search cannot see
       # (artifact-named roots the passes prune, roots under .git/modules).
       # Three builtin tests per directory is still far cheaper than the old
-      # shell launch per directory.
-      if is_bare_repo "$hit"; then
+      # shell launch per directory. Inline the same test as is_bare_repo()
+      # rather than calling it: this runs once per scanned directory and the
+      # function call itself cost as much as the stats on a large home.
+      if [ -f "$hit/HEAD" ] && [ -d "$hit/objects" ] && [ -d "$hit/refs" ]; then
         printf '%s\n' "$hit"
         bare_roots+=("$hit")
         continue
       fi
-      case " ${ALL_ARTIFACT_NAMES[*]} " in
+      case "$artifact_set" in
         *" $base "*) printf '%s\n' "$hit" >> "$ARTIFACTS_FILE"; continue ;;
       esac
     done
@@ -765,22 +785,33 @@ if [ -n "$FIND_SPEC" ]; then
   done
   build_name_expr FIND_EXPR "${FIND_NAMES[@]}"
 
+  # reason_for/status_for run once per hit in the sweep below -- hundreds
+  # to thousands of times over a home-sized tree. They set FOUND_REASON /
+  # FOUND_STATUS in this shell instead of echoing into a command
+  # substitution: every $( ) forks a subshell, and on macOS a fork costs
+  # more than the tests these functions run.
   reason_for() {
     local b; b="${1##*/}"
     local n
-    for n in "${TRASH_NAMES[@]}"; do [ "$b" = "$n" ] && { echo trash; return; }; done
-    for n in "${RISKY_NAMES[@]}"; do [ "$b" = "$n" ] && { echo risky; return; }; done
-    echo cache
+    FOUND_REASON=cache
+    for n in "${TRASH_NAMES[@]}"; do [ "$b" = "$n" ] && { FOUND_REASON=trash; return; }; done
+    for n in "${RISKY_NAMES[@]}"; do [ "$b" = "$n" ] && { FOUND_REASON=risky; return; }; done
   }
 
   status_for() {
-    [ "$WANT_STATUS" = "1" ] || { echo -; return; }
+    if [ "$WANT_STATUS" != "1" ]; then FOUND_STATUS=-; return; fi
     local d="$1" repo
-    repo="$(git_q -C "$d" rev-parse --show-toplevel 2>/dev/null)" || { echo unknown; return; }
-    [ -n "$(git_q -C "$repo" ls-files -- "$d" 2>/dev/null | head -1)" ] && { echo tracked; return; }
-    [ -n "$(git_q -C "$repo" diff --cached --name-only -- "$d" 2>/dev/null | head -1)" ] && { echo staged; return; }
-    [ -n "$(git_q -C "$repo" ls-files --others --exclude-standard -- "$d" 2>/dev/null | head -1)" ] && { echo untracked; return; }
-    echo ignored
+    repo="$(git_q -C "$d" rev-parse --show-toplevel 2>/dev/null)" || { FOUND_STATUS=unknown; return; }
+    # Ask git's exit status instead of capturing output through head(1):
+    # --error-unmatch and --quiet answer "did anything match?" themselves,
+    # so each test is one process instead of a git+head pipeline, and the
+    # match list is never read into memory. Exit 1 means "no match" and,
+    # as before, falls through to the next test.
+    if git_q -C "$repo" ls-files --error-unmatch -- "$d" >/dev/null 2>&1; then FOUND_STATUS=tracked; return; fi
+    git_q -C "$repo" diff --cached --quiet -- "$d" 2>/dev/null
+    if [ "$?" -eq 1 ]; then FOUND_STATUS=staged; return; fi
+    if git_q -C "$repo" ls-files --others --exclude-standard --error-unmatch -- "$d" >/dev/null 2>&1; then FOUND_STATUS=untracked; return; fi
+    FOUND_STATUS=ignored
   }
 
   # --walk descends the whole location; --no-walk looks only at the location
@@ -804,8 +835,11 @@ if [ -n "$FIND_SPEC" ]; then
       echo "git-discover-repos: failed to enumerate artifacts under: $loc" >&2
       FIND_STATUS=1
     fi
+    FOUND_REASON="" FOUND_STATUS=""
     while IFS= read -r hit; do
-      printf 'FOUND\t%s\t%s\t%s\n' "$(reason_for "$hit")" "$(status_for "$hit")" "$hit"
+      reason_for "$hit"
+      status_for "$hit"
+      printf 'FOUND\t%s\t%s\t%s\n' "$FOUND_REASON" "$FOUND_STATUS" "$hit"
     done < "$hits_file"
     rm -f "$hits_file" "$find_err_file"
   done < <(sort -u "$OUT_FILE")

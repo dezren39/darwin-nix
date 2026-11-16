@@ -1375,6 +1375,12 @@ if $DRY_RUN; then
       for i in "${!conflict_links[@]}"; do
         lnk="${conflict_links[$i]}"
         bak="${lnk}${BACKUP_SUFFIX}"
+        # A destination the loop above refused (occupied by a previous
+        # backup, #1908) was never backed up by this run, so there is
+        # nothing of ours to delete: do not simulate deleting it.
+        if [[ -e "$bak" || -L "$bak" ]]; then
+          continue
+        fi
         log "rm -rf $(disp "$lnk")${BACKUP_SUFFIX}"
         done_deleted_paths+=("$bak")
       done

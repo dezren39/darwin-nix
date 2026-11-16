@@ -96,6 +96,41 @@ let
         "--no-category-emulation"
       ];
     };
+    # Live user-session browsers: attach to the running browser rather than
+    # spawning an isolated headless profile, so SSO/MFA cookies stay in the
+    # browser.
+    # - chrome-live: connects to Chrome's default profile via DevToolsActivePort
+    #   (enabled in Local State by home.activation.browserRemoteDebug; Chrome
+    #   prompts once to allow the connection).
+    # - helium-live: connects to Helium's structural CDP port 19222, which is
+    #   served by the `helium-cdp` launcher only. A normally launched Helium
+    #   (Local State remote debugging enabled) serves the approval-gated CDP
+    #   server on 9222 instead — the DevToolsActivePort path `chrome-live`
+    #   uses for Chrome — and no fixed fleet port is claimed for it (#1878).
+    # - safari: Apple's native `/usr/bin/safaridriver --mcp` stdio MCP server
+    #   (requires one-time Safari > Settings > Developer > "Allow remote automation").
+    chrome-live = {
+      command = bin "chrome-devtools-mcp";
+      args = [
+        "--autoConnect"
+        "--no-usage-statistics"
+        "--no-performance-crux"
+        "--no-category-emulation"
+      ];
+    };
+    helium-live = {
+      command = bin "chrome-devtools-mcp";
+      args = [
+        "--browserUrl=http://127.0.0.1:19222"
+        "--no-usage-statistics"
+        "--no-performance-crux"
+        "--no-category-emulation"
+      ];
+    };
+    safari = {
+      command = "/usr/bin/safaridriver";
+      args = [ "--mcp" ];
+    };
     context7 = remote "https://mcp.context7.com/mcp";
     datadog = remote "https://mcp.datadoghq.com/v1/mcp?toolsets=core,workflows,alerting&omit_tools=delete_datadog_workflow";
     # Pin staticOAuthClientMetadata.scope to the 20 read/search scopes granted
@@ -181,6 +216,18 @@ let
     # A browser holds page state; two agents sharing one corrupt each other.
     # One per agent session instead.
     chrome-devtools = {
+      sharing = "exclusive";
+      scope = "session";
+    };
+    chrome-live = {
+      sharing = "exclusive";
+      scope = "session";
+    };
+    helium-live = {
+      sharing = "exclusive";
+      scope = "session";
+    };
+    safari = {
       sharing = "exclusive";
       scope = "session";
     };

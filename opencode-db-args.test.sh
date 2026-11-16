@@ -28,9 +28,13 @@ SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/arg-probe.sh
 . "$SELF_DIR/lib/arg-probe.sh"
 
-HOME="$(mktemp -d)"
-export HOME
-trap 'rm -rf "$HOME"' EXIT
+# Hermetic environment harness (design #1473, phase 1 / #1474): scratch
+# HOME/TMPDIR/XDG under one root, removed by its EXIT trap; the scoped
+# `ps` double for the apply-mode section below is shared with the vacuum
+# suite rather than copied here.
+# shellcheck source=lib/test-harness.sh
+. "$SELF_DIR/lib/test-harness.sh"
+harness_init || exit 1
 
 failures=0
 fail() { echo "FAIL: $1" >&2; failures=$((failures + 1)); }
@@ -204,14 +208,11 @@ if command -v sqlite3 >/dev/null; then
 
   # Hermetic wrt the host process table (#1451): the control below runs
   # prune in APPLY mode, whose check_not_running scans the real process
-  # table via ps and refuses wherever opencode serve is running. Shadow
-  # ps with a stub reporting no processes for this block only (the
-  # vacuum/prune suites' shadowing trick), and restore PATH at the end
-  # of the block so the rest of the suite still sees the real ps.
-  saved_path="$PATH"
-  stub="$fx/stubbin"; mkdir -p "$stub"
-  printf '#!/bin/sh\nexit 0\n' >"$stub/ps"; chmod +x "$stub/ps"
-  PATH="$stub:$PATH"; export PATH
+  # table via ps and refuses wherever opencode serve is running. The
+  # harness scopes a ps double reporting no processes to this block only,
+  # restoring PATH at the end so the rest of the suite still sees the
+  # real ps.
+  harness_ps_double_begin || exit 1
 
   # Full-schema fixture: one old session, 3 snapshots of msg_1 (seq 1-3,
   # so exactly seq 1-2 are eligible under --protect-days 0).
@@ -281,7 +282,7 @@ SQL
     ok "vacuum refuses missing-message DB up front, no compacted copy"
   fi
 
-  PATH="$saved_path"; export PATH
+  harness_ps_double_end
 fi
 
 # ---------------------------------------------------------------------------
@@ -325,8 +326,108 @@ probe_rejected "--max-age-days" "$BP" --max-age-days 999999999999999999999
 probe_accepted "$BP" --help
 probe_accepted "$BP" --dir "$HOME" --keep 08
 
-if [ "$failures" -ne 0 ]; then
-  echo "$failures failure(s)" >&2
-  exit 1
-fi
-echo "all argument-parser checks passed"
+# ---------------------------------------------------------------------------
+# Harness probe rows (lib/test-harness.sh, #1474): prove the mechanisms the
+# migrated suites rely on. Each row runs a small child script with the
+# parent's harness state scrubbed, so the child gets its own scratch root
+# and its own stub bin, exactly as a fresh suite would.
+# ---------------------------------------------------------------------------
+HARNESS_LIB="$SELF_DIR/lib/test-harness.sh"
+
+# probe_env <VAR=value...> -- run a command with the parent harness state
+# removed, so the child's harness_init does not reuse the parent's root.
+probe_env() {
+  env -u HARNESS_ROOT -u HARNESS_STUB_BIN -u HARNESS_SAVED_PATH \
+    -u HARNESS_SKIPS -u HARNESS_FAILURES -u HARNESS_CHECK "$@"
+}
+
+# check_harness_probe <name> <want-rc> <want-output> <check-mode 0|1> <script>
+check_harness_probe() {
+  local name="$1" want_rc="$2" want_out="$3" check="$4" body="$5"
+  local out rc
+  if [ "$check" = 1 ]; then
+    out="$(probe_env HARNESS_CHECK=1 bash -s -- "$HARNESS_LIB" 2>&1 <<<"$body")"; rc=$?
+  else
+    out="$(probe_env bash -s -- "$HARNESS_LIB" 2>&1 <<<"$body")"; rc=$?
+  fi
+  if [ "$rc" -ne "$want_rc" ]; then
+    fail "harness probe $name: exited $rc (want $want_rc): $out"
+  elif ! printf '%s' "$out" | grep -q -- "$want_out"; then
+    fail "harness probe $name: output does not contain '$want_out': $out"
+  else
+    ok "harness probe $name"
+  fi
+}
+
+# A by-name stub runs where /usr/bin/env is not on the default PATH: the
+# stub's shebang is the interpreter resolved when it was written, so the
+# sandbox-shaped PATH cannot break it.
+check_harness_probe "by-name stub without env on PATH" 0 "stub-ran" 0 '
+. "$1"
+harness_init || exit 10
+harness_stub hello "echo stub-ran" || exit 11
+saved="$PATH"
+PATH="$HARNESS_STUB_BIN"; export PATH
+command -v env >/dev/null 2>&1 && { echo "env is on PATH"; exit 12; }
+hello || exit 13
+PATH="$saved"; export PATH
+'
+
+# The ps double shadows a real ps, and the real one is back afterwards.
+# Tolerates a sandbox with no real ps on PATH: the row then proves the
+# double is what `ps` resolves to, and that PATH is restored after.
+check_harness_probe "ps double shadows real ps" 0 "ps double shadows real ps" 0 '
+. "$1"
+harness_init || exit 10
+before="$(command -v ps || true)"
+harness_ps_double_begin || exit 11
+double="$(command -v ps || true)"
+case "$double" in
+  "$HARNESS_STUB_BIN"/ps) ;;
+  *) echo "double is not first on PATH: $double"; exit 12 ;;
+esac
+out="$(ps)" || { echo "double ps failed"; exit 13; }
+[ -z "$out" ] || { echo "double ps printed: $out"; exit 14; }
+harness_ps_double_end
+after="$(command -v ps || true)"
+[ "$after" = "$before" ] || { echo "ps not restored: $after != $before"; exit 15; }
+echo "ps double shadows real ps (${before:-none on PATH})"
+'
+
+# A skip passes in direct mode, printing its reason; in check mode the
+# same skip fails the suite at summary time.
+HARNESS_SKIP_BODY='
+. "$1"
+harness_init || exit 10
+harness_skip "no second filesystem"
+harness_summary
+'
+check_harness_probe "direct-mode skip passes with reason" 0 "skip: no second filesystem" 0 "$HARNESS_SKIP_BODY"
+check_harness_probe "check-mode skip fails" 1 "check mode forbids skips" 1 "$HARNESS_SKIP_BODY"
+
+# The scratch root is gone after the child exits (the EXIT trap ran).
+check_harness_cleanup() {
+  local root rc
+  root="$(probe_env bash -s -- "$HARNESS_LIB" 2>/dev/null <<'BODY'
+. "$1"
+harness_init || exit 10
+case "$HOME" in
+  "$HARNESS_ROOT"/*) ;;
+  *) echo "HOME not under the scratch root: $HOME" >&2; exit 11 ;;
+esac
+printf '%s\n' "$HARNESS_ROOT"
+BODY
+)"; rc=$?
+  if [ "$rc" -ne 0 ]; then
+    fail "harness probe scratch cleanup: exited $rc"
+  elif [ -e "$root" ]; then
+    fail "harness probe scratch cleanup: $root survived exit"
+  else
+    ok "harness probe scratch cleanup removes the root on exit"
+  fi
+}
+check_harness_cleanup
+
+HARNESS_FAILURES="$failures"
+[ "$failures" -eq 0 ] && echo "all argument-parser checks passed"
+harness_summary

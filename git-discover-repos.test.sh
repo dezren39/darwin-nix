@@ -915,5 +915,34 @@ probe_accepted --path "$VALID" --dry-run --find trash --status
 probe_accepted --path "$VALID" --dry-run --status --find trash
 probe_accepted --path "$VALID" --dry-run --depth 08
 
+# ─── Tab-containing paths survive --paths-only (#1921) ─────────────
+# Records are kind<TAB>path, and the --paths-only emit used cut -f2,
+# so a literal tab inside a valid repository path truncated the path
+# at the tab while the run still exited 0 -- including under --print0,
+# which only changes the terminator afterwards. The contract pinned
+# here: tab-containing paths are preserved exactly (they are valid
+# git/filesystem paths), never truncated and never rejected.
+TAB_SCAN="$TMP_ROOT/tabscan"
+TAB_REPO="$TAB_SCAN/repo	name"
+mkdir -p "$TAB_REPO/.git"
+TAB_SCAN_CANON="$(cd "$TAB_SCAN" && pwd -P)"
+TAB_WANT="$TAB_SCAN_CANON/repo	name"
+run --path "$TAB_SCAN" --paths-only
+[ "$STATUS" -eq 0 ] || fail "--paths-only on a tab-containing path exited $STATUS (#1921)"
+[ "$OUT" = "$TAB_WANT" ] || fail "--paths-only truncated a tab-containing path (got: $OUT) (#1921)"
+[ "$OUT" = "$TAB_WANT" ] && echo "ok: --paths-only preserves a tab-containing path exactly (#1921)"
+run --path "$TAB_SCAN" --repos-only --paths-only
+[ "$OUT" = "$TAB_WANT" ] || fail "--repos-only --paths-only truncated a tab-containing path (got: $OUT) (#1921)"
+bash "$SCRIPT" --path "$TAB_SCAN" --paths-only --print0 > "$TMP_ROOT/tab0.out" 2> "$TMP_ROOT/tab0.err"
+tab0_status=$?
+[ "$tab0_status" -eq 0 ] || fail "--paths-only --print0 on a tab-containing path exited $tab0_status (#1921)"
+printf '%s\0' "$TAB_WANT" > "$TMP_ROOT/tab0.want"
+cmp -s "$TMP_ROOT/tab0.out" "$TMP_ROOT/tab0.want" || fail "--paths-only --print0 output bytes differ for a tab-containing path (got: $(od -An -c "$TMP_ROOT/tab0.out")) (#1921)"
+cmp -s "$TMP_ROOT/tab0.out" "$TMP_ROOT/tab0.want" && echo "ok: --paths-only --print0 preserves a tab-containing path byte-for-byte (#1921)"
+run --path "$TAB_SCAN"
+case "$OUT" in *"repo"$'\t'"$TAB_WANT"*) echo "ok: default output retains the full tab-containing path (#1921)" ;; *) fail "default output lost a tab-containing path (got: $OUT) (#1921)" ;; esac
+run --path "$TAB_SCAN" --count
+[ "$OUT" = "repos=1 worktrees=0 total=1" ] || fail "--count miscounted a tab-containing path (got: $OUT) (#1921)"
+
 [ "$failures" -eq 0 ] || { echo "$failures failure(s)" >&2; exit 1; }
 echo "all git-discover-repos --path exit-status checks passed"

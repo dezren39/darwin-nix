@@ -764,8 +764,11 @@ if [ "$COUNT_ONLY" = "1" ]; then
   exit "${FOLLOW_STATUS:-0}"
 fi
 
+# --paths-only strips only the kind field: cut -f2- keeps every later
+# field, so a path containing a literal tab survives intact (#1921).
+# (cut -f2 alone truncated such paths at the tab while exiting 0.)
 sort -u "$OUT_FILE" | filter_out \
-  | if [ "$PATHS_ONLY" = "1" ]; then cut -f2; else cat; fi \
+  | if [ "$PATHS_ONLY" = "1" ]; then cut -f2-; else cat; fi \
   | if [ "$PRINT0" = "1" ]; then tr '\n' '\0'; else cat; fi
 
 # ---------------------------------------------------------------------------

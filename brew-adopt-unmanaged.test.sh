@@ -100,6 +100,7 @@ reset_state() {
   FAIL_CHOWN=0 FAIL_ADOPT=0 FAIL_FORCE=0
   OD_CFVERSION="26.198.1011.0006" OD_CFSHORT="26.198.1011"
   UPSTREAM_VERSION="26.189.0928.0009"
+  SCRIPT_ARGS=(drewry.pope)
 }
 
 # BREW_ADOPT_PATH puts the stub bin first and keeps the ambient PATH
@@ -121,7 +122,7 @@ RB
     BREW_ADOPT_TAPS_DIR="$tmp/taps" \
     FAIL_CHOWN=$FAIL_CHOWN FAIL_ADOPT=$FAIL_ADOPT FAIL_FORCE=$FAIL_FORCE \
     OD_CFVERSION="$OD_CFVERSION" OD_CFSHORT="$OD_CFSHORT" \
-    bash "$script" drewry.pope >"$tmp/out" 2>&1
+    bash "$script" "${SCRIPT_ARGS[@]}" >"$tmp/out" 2>&1
 }
 
 # run: like run_script but never aborts the harness under `set -e`;
@@ -234,6 +235,39 @@ run
 check "fresh machine: exit 0" test $rc -eq 0
 check "fresh machine: chrome fresh-install note" out_has "brew bundle will install it fresh"
 check "fresh machine: onedrive fresh-install note" out_has "brew bundle will install the vendored cask fresh"
+
+# 11. Extra positional argument: usage on stderr, exit 2, no side effects.
+reset_state
+SCRIPT_ARGS=(drewry.pope extra)
+run
+check "extra arg: exit 2" test $rc -eq 2
+check "extra arg: usage printed" out_has "usage: brew-adopt-unmanaged.sh PRIMARY_USER"
+check "extra arg: no side effects" test ! -s "$tmp/state/calls"
+
+# 12. Unknown flag: exit 2, no side effects.
+reset_state
+SCRIPT_ARGS=(--bogus drewry.pope)
+run
+check "unknown flag: exit 2" test $rc -eq 2
+check "unknown flag: named" out_has "unknown argument: --bogus"
+check "unknown flag: no side effects" test ! -s "$tmp/state/calls"
+
+# 13. No argument: usage, exit 2, no side effects.
+reset_state
+SCRIPT_ARGS=()
+run
+check "no arg: exit 2" test $rc -eq 2
+check "no arg: no side effects" test ! -s "$tmp/state/calls"
+
+# 14. --help and -h: usage on stdout, exit 0, no side effects.
+for flag in --help -h; do
+  reset_state
+  SCRIPT_ARGS=("$flag")
+  run
+  check "$flag: exit 0" test $rc -eq 0
+  check "$flag: usage printed" out_has "usage: brew-adopt-unmanaged.sh PRIMARY_USER"
+  check "$flag: no side effects" test ! -s "$tmp/state/calls"
+done
 
 if [ $failures -gt 0 ]; then
   echo "$failures check(s) failed" >&2

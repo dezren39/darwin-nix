@@ -141,7 +141,7 @@ while [ $# -gt 0 ]; do
     --follow) { [ -z "$FOLLOW_GIVEN" ] || [ "$FOLLOW_GIVEN" = "--follow" ] || arg_die "--follow conflicts with --no-follow"; FOLLOW=1; FOLLOW_GIVEN="--follow"; arg_used DISCOVERY_FLAGS_USED --follow; } ;;
     --no-follow) { [ -z "$FOLLOW_GIVEN" ] || [ "$FOLLOW_GIVEN" = "--no-follow" ] || arg_die "--no-follow conflicts with --follow"; FOLLOW=0; FOLLOW_GIVEN="--no-follow"; arg_used DISCOVERY_FLAGS_USED --no-follow; } ;;
     --dry-run) DRY_RUN=1 ;;
-    -h|--help) usage; exit 0 ;;
+    -h|--help) { if [[ $# -gt 1 ]]; then arg_die "unexpected argument: $2"; fi; usage; exit 0; } ;;
     -*) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
     *)
       [ -n "$1" ] || arg_die "empty positional argument (target must not be empty)"

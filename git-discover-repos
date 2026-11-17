@@ -182,7 +182,7 @@ while [ $# -gt 0 ]; do
     --print0)         { arg_conflict --count --print0 "$COUNT_ONLY"; PRINT0=1; PRINT0_SET=1; } ;;
     --count)          { arg_conflict --count --find "$FIND_SET"; arg_conflict --count --paths-only "$PATHS_ONLY_SET"; arg_conflict --count --print0 "$PRINT0_SET"; COUNT_ONLY=1; } ;;
     --dry-run)        DRY_RUN=1 ;;
-    -h|--help)        usage; exit 0 ;;
+    -h|--help)        { if [[ $# -gt 1 ]]; then arg_die "unexpected argument: $2"; fi; usage; exit 0; } ;;
     -*)               echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
     *)                { arg_conflict --auto --path "$AUTO_SET"; MODE="path"; PATHS+=("$1"); PATH_SET=1; } ;;
   esac

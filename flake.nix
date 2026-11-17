@@ -949,7 +949,7 @@ rec {
               src = inputs.self;
             }
             ''
-              cp $src/search.sh $src/patch-vscode-insiders.sh $src/install-vscode-patch-agent.sh $src/var-folders-clean.sh $src/backup-zed.sh $src/code-install-extensions.sh $src/full-clean.sh $src/clean.sh $src/symlinker.sh $src/opencode-db-backup-prune.sh $src/opencode-db-prune.sh $src/opencode-db-vacuum.sh $src/help-extra-args.test.sh ./
+              cp $src/git-discover-repos $src/git-maintain-repos $src/spotlight-exclude-artifacts $src/search.sh $src/patch-vscode-insiders.sh $src/install-vscode-patch-agent.sh $src/var-folders-clean.sh $src/backup-zed.sh $src/code-install-extensions.sh $src/full-clean.sh $src/clean.sh $src/symlinker.sh $src/opencode-db-backup-prune.sh $src/opencode-db-prune.sh $src/opencode-db-vacuum.sh $src/help-extra-args.test.sh ./
               mkdir -p lib pkgs/brew-repair pkgs/adopt
               cp $src/lib/common.sh $src/lib/arg-probe.sh lib/
               cp $src/pkgs/brew-repair/brew-repair.sh pkgs/brew-repair/

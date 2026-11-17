@@ -137,6 +137,24 @@ run() {
   } >>"$tmp/all-out"
 }
 
+# run_args: like run but with explicit arguments instead of the fixed
+# primary user, for the argument-contract scenarios (#1884).
+run_args() {
+  rc=0
+  STUB_STATE="$tmp/state" \
+    BREW_ADOPT_PATH="$tmp/bin:$PATH" \
+    BREW_ADOPT_BREW="$tmp/bin/brew" \
+    BREW_ADOPT_SUDO="$tmp/bin/sudo" \
+    BREW_ADOPT_PLISTBUDDY="$tmp/bin/plistbuddy" \
+    BREW_ADOPT_APPLICATIONS="$tmp/apps" \
+    BREW_ADOPT_TAPS_DIR="$tmp/taps" \
+    bash "$script" "$@" >"$tmp/out" 2>&1 || rc=$?
+  {
+    echo "--- run_args $* (rc=$rc) ---"
+    cat "$tmp/out"
+  } >>"$tmp/all-out"
+}
+
 calls_has() { grep -q "$1" "$tmp/state/calls"; }
 out_has() {
   if [ "$1" = "-v" ]; then
@@ -234,6 +252,32 @@ run
 check "fresh machine: exit 0" test $rc -eq 0
 check "fresh machine: chrome fresh-install note" out_has "brew bundle will install it fresh"
 check "fresh machine: onedrive fresh-install note" out_has "brew bundle will install the vendored cask fresh"
+
+# 11. Extra positional argument: usage error, exit 2, no side effects (#1884).
+reset_state
+run_args drewry.pope extra-arg
+check "extra arg: exit 2" test $rc -eq 2
+check "extra arg: usage printed" out_has "usage: brew-adopt-unmanaged.sh PRIMARY_USER"
+check "extra arg: no stub calls" test ! -s "$tmp/state/calls"
+
+# 12. No argument at all: usage error, exit 2, no side effects (#1884).
+reset_state
+run_args
+check "no arg: exit 2" test $rc -eq 2
+check "no arg: usage printed" out_has "usage: brew-adopt-unmanaged.sh PRIMARY_USER"
+check "no arg: no stub calls" test ! -s "$tmp/state/calls"
+
+# 13. --help and -h: usage on stdout, exit 0, no side effects (#1884).
+reset_state
+run_args --help
+check "--help: exit 0" test $rc -eq 0
+check "--help: usage printed" out_has "usage: brew-adopt-unmanaged.sh PRIMARY_USER"
+check "--help: no stub calls" test ! -s "$tmp/state/calls"
+reset_state
+run_args -h
+check "-h: exit 0" test $rc -eq 0
+check "-h: usage printed" out_has "usage: brew-adopt-unmanaged.sh PRIMARY_USER"
+check "-h: no stub calls" test ! -s "$tmp/state/calls"
 
 if [ $failures -gt 0 ]; then
   echo "$failures check(s) failed" >&2

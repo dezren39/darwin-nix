@@ -195,7 +195,17 @@ def run_one(spec, timeout_s):
     else:
         raise ValueError("command spec requires 'argv' or 'shell'")
     t0 = time.time()
-    tmpdir = Path(tempfile.mkdtemp(prefix="exec-", dir=str(STATE_DIR / "exec")))
+    try:
+        tmpdir = Path(tempfile.mkdtemp(prefix="exec-",
+                                       dir=str(STATE_DIR / "exec")))
+    except OSError as e:  # spool dir uncreatable: ENOSPC, EMFILE, EACCES, ...
+        # Issue #1923: same per-command error shape as the Popen failure
+        # below, so the batch still gets a JSON response and results of
+        # commands that already ran are not discarded.
+        return {"exit": None, "error": f"{type(e).__name__}: {e}",
+                "stdout": "", "stderr": "",
+                "duration_ms": int((time.time() - t0) * 1000),
+                "truncated": False}
     out_path, err_path = tmpdir / "stdout", tmpdir / "stderr"
     try:
         with open(out_path, "wb") as out_f, open(err_path, "wb") as err_f:
@@ -228,6 +238,11 @@ def run_one(spec, timeout_s):
         if timed_out:
             result["timeout"] = True
         return result
+    except OSError as e:  # spool-file setup failed after mkdtemp (#1923)
+        return {"exit": None, "error": f"{type(e).__name__}: {e}",
+                "stdout": "", "stderr": "",
+                "duration_ms": int((time.time() - t0) * 1000),
+                "truncated": False}
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 

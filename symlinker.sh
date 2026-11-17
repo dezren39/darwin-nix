@@ -1,6 +1,30 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
+# symlinker-bash-guard:start (#1836)
+# ─── Bash version contract ───────────────────────────────────────────────────
+# This script uses associative arrays (declare -A), which need Bash 4+.
+# Stock macOS ships Bash 3.2 as /bin/bash and the #!/usr/bin/env bash
+# shebang resolves to it there, so without this guard the script died
+# mid-run with an opaque declare error after doing partial work. Refuse
+# early, by name, with the supported invocation paths instead. The
+# supported contract is Bash 4+: the packaged wrapper (pkgs/symlinker,
+# `nix run .#symlinker`) always runs a modern Bash, and
+# `just link-git-dirs` resolves one explicitly.
+symlinker_require_bash() {
+    local major="${1:-0}"
+    if [[ -z "${BASH_VERSION:-}" || "$major" -lt 4 ]]; then
+        echo "symlinker: requires Bash 4 or newer (found: ${BASH_VERSION:-not bash}) — associative arrays (declare -A) are not available in Bash 3.2" >&2
+        echo "symlinker: run it one of these ways instead:" >&2
+        echo "  nix run .#symlinker -- [args]                    # packaged wrapper (modern Bash, pinned)" >&2
+        echo "  /opt/homebrew/bin/bash ./symlinker.sh [args]     # Homebrew Bash on macOS" >&2
+        echo "  nix develop --command ./symlinker.sh [args]      # inside the flake dev shell" >&2
+        exit 2
+    fi
+}
+symlinker_require_bash "${BASH_VERSINFO[0]:-}"
+# symlinker-bash-guard:end
+
 RUN_TIMESTAMP="$(date +%s)"
 
 # ─── Record original command ─────────────────────────────────────────────────

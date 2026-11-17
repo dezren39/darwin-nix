@@ -799,6 +799,37 @@ check "R2: dry-run counts exactly one deletion" grep -qF "1 deleted" "$RD/log"
 check "R2: dry-run left the previous backup untouched" grep -qx previous-backup "$RD/out/item.old"
 check "R2: dry-run left the conflict untouched" grep -qx conflict "$RD/out/item"
 
+
+# ─── Scenario S (#1836): the Bash version guard refuses Bash < 4 ────────────
+# CI only has a modern Bash, so the guard's decision is exercised by
+# extracting the real guard block from the script (markers in
+# symlinker.sh) and calling it with the major versions it will meet:
+# 3 (stock macOS Bash 3.2) must refuse with exit 2 and the actionable
+# invocation paths, 5 must pass silently. A full run under the real
+# interpreter is the control: --help still exits 0.
+S="$TMP_ROOT/s"; mkdir -p "$S"
+sed -n '/# symlinker-bash-guard:start/,/# symlinker-bash-guard:end/p' "$SCRIPT" > "$S/guard.sh"
+grep -q "symlinker_require_bash" "$S/guard.sh" || fail "S: guard block not found in symlinker.sh"
+
+( source "$S/guard.sh"; symlinker_require_bash 3 ) >"$S/old.log" 2>&1
+rc_old=$?
+[[ $rc_old -eq 2 ]] || fail "S: guard with major 3 exited $rc_old, want 2"
+check "S: guard names the Bash 4 requirement" grep -q "requires Bash 4 or newer" "$S/old.log"
+check "S: guard names the found version" grep -q "found:" "$S/old.log"
+check "S: guard offers the packaged wrapper" grep -q "nix run .#symlinker" "$S/old.log"
+
+( source "$S/guard.sh"; symlinker_require_bash 5 ) >"$S/new.log" 2>&1
+rc_new=$?
+[[ $rc_new -eq 0 ]] || fail "S: guard with major 5 exited $rc_new, want 0"
+check "S: guard is silent for a modern Bash" test ! -s "$S/new.log"
+
+( source "$S/guard.sh"; symlinker_require_bash "" ) >"$S/none.log" 2>&1
+rc_none=$?
+[[ $rc_none -eq 2 ]] || fail "S: guard with no version exited $rc_none, want 2"
+
+bash "$SCRIPT" --help >"$S/help.log" 2>&1 || fail "S: --help under the real interpreter exited non-zero"
+check "S: --help still prints usage" grep -q "USAGE" "$S/help.log"
+
 if (( failures > 0 )); then
   echo "symlinker tests: $failures failure(s)" >&2
   exit 1

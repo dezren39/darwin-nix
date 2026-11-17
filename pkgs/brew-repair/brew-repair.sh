@@ -59,7 +59,7 @@ while [[ $# -gt 0 ]]; do
         exit 2
       fi
       SKIP_LIST+=("$2"); shift 2 ;;
-    -h|--help) usage; exit 0 ;;
+    -h|--help) if [[ $# -gt 1 ]]; then echo "brew-repair: unexpected argument: $2" >&2; usage >&2; exit 2; fi; usage; exit 0 ;;
     *) echo "brew-repair: unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
 done

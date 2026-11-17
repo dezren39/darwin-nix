@@ -251,7 +251,7 @@ while [ $# -gt 0 ]; do
     --no-git-maintenance|--no-maintenance|--no-git) { DO_MAINTENANCE=0; arg_used REPO_FLAGS_USED "$1"; } ;;
     --quick)          { MAINT_DEPTH="--quick"; arg_used REPO_FLAGS_USED --quick; } ;;
     --dry-run)        DRY_RUN=1 ;;
-    -h|--help)        usage; exit 0 ;;
+    -h|--help)        { if [[ $# -gt 1 ]]; then arg_die "unexpected argument: $2"; fi; usage; exit 0; } ;;
     -*)               echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
     *)                { [ -n "$1" ] || arg_die "empty positional argument (target must not be empty)"; [ "$TARGET_SET" -eq 0 ] || arg_die "unexpected argument: $1 (target already set to $TARGET_PATH)"; TARGET_PATH="$1"; TARGET_SET=1; } ;;
   esac

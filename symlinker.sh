@@ -328,7 +328,14 @@ while [[ $# -gt 0 ]]; do
       done
       [[ ${#FILTER_MATCH[@]} -gt $before ]] || { echo "Error: --match requires at least one value" >&2; exit 1; }
       ;;
-    -h|--help)           usage; exit 0 ;;
+    -h|--help)
+      if [[ $# -gt 1 ]]; then
+        echo "Error: Unknown argument: $2" >&2
+        echo >&2
+        usage >&2
+        exit 2
+      fi
+      usage; exit 0 ;;
     *)
       echo "Error: Unknown argument: $1" >&2
       echo >&2

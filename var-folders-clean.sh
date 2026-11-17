@@ -36,7 +36,7 @@ usage() {
 # still fails through the ${1:?} expansion below, unchanged.
 if [ $# -ge 1 ]; then
   case "$1" in
-    -h|--help) usage; exit 0 ;;
+    -h|--help) if [ $# -gt 1 ]; then echo "var-folders-clean.sh: unexpected argument: $2" >&2; usage >&2; exit 2; fi; usage; exit 0 ;;
     -*) echo "var-folders-clean.sh: unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
 fi

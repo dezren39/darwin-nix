@@ -17,7 +17,7 @@ usage() {
 # exits 0 with no side effects.
 if [[ $# -gt 0 ]]; then
     case "$1" in
-        -h|--help) usage; exit 0 ;;
+        -h|--help) if [[ $# -gt 1 ]]; then echo "patch-vscode-insiders: unexpected argument: $2" >&2; usage >&2; exit 2; fi; usage; exit 0 ;;
         *) echo "patch-vscode-insiders: unknown argument: $1" >&2; usage >&2; exit 2 ;;
     esac
 fi

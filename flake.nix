@@ -901,6 +901,39 @@ rec {
               bash ./search.test.sh
               touch $out
             '';
+        # #1892: help-extra-args.test.sh pins the operator-script help
+        # contract for the 14 scripts whose -h|--help arm used to exit 0
+        # without accounting for the rest of the command line:
+        # --help extra and -h --bogus are usage errors (exit 2, the
+        # unaccounted argument named); --help / -h alone print usage
+        # and exit 0. One shared suite, like opencode-db-args-tests,
+        # because the contract is cross-script by definition.
+        help-extra-args-tests =
+          pkgs.runCommandLocal "help-extra-args-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.coreutils
+                pkgs.findutils
+                pkgs.gnugrep
+                pkgs.gnused
+                pkgs.python3
+                pkgs.sqlite
+              ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/search.sh $src/patch-vscode-insiders.sh $src/install-vscode-patch-agent.sh $src/var-folders-clean.sh $src/backup-zed.sh $src/code-install-extensions.sh $src/full-clean.sh $src/clean.sh $src/symlinker.sh $src/opencode-db-backup-prune.sh $src/opencode-db-prune.sh $src/opencode-db-vacuum.sh $src/help-extra-args.test.sh ./
+              mkdir -p lib pkgs/brew-repair pkgs/adopt
+              cp $src/lib/common.sh $src/lib/arg-probe.sh lib/
+              cp $src/pkgs/brew-repair/brew-repair.sh pkgs/brew-repair/
+              cp $src/pkgs/adopt/adopt.sh pkgs/adopt/
+              chmod -R u+w ./
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./help-extra-args.test.sh
+              touch $out
+            '';
         # #1167: full-clean.test.sh drives the real full-clean.sh
         # with its steps (./s, prune, vacuum) and PATH commands
         # (sudo, nix-collect-garbage, nix, df) stubbed to log every

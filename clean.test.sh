@@ -950,5 +950,58 @@ case "$CACHE_OUT" in
 esac
 unset CACHE_OUT CACHE_ROOT
 
+# ─── #1904: del() must not skip dangling symlinks ─────────────────────
+# del() gated every deletion on [ -e "$p" ], which is false for a
+# dangling symlink, so stale dangling links in caches/logs/Trash were
+# silently skipped: no "would delete" line under --dry-run, no deletion
+# or warning on a real run. Extract the real del() and drive it.
+# Oracle: per-path filesystem state plus the dry-run line -- a dangling
+# link is reported under DRY_RUN=1 and removed under DRY_RUN=0; a live
+# symlink is removed without touching its target; a missing path is
+# still skipped silently. (This section runs under set -e -- see the
+# #1853 section -- so every real-run del call is guarded with
+# || fail: an unguarded non-zero return would kill the suite silently
+# instead of failing a case.) Mutation check (verified when written):
+# dropping the [ -L ] half of the gate makes the dangling cases fail
+# (no dry-run line, link survives) while the controls stay green.
+DEL_DIR="$TMP_ROOT/del-dangling"
+mkdir -p "$DEL_DIR"
+sed -n '/^del() {/,/^}/p' "$SCRIPT" > "$DEL_DIR/del.sh"
+[ -s "$DEL_DIR/del.sh" ] || fail "could not extract del from clean.sh"
+grep -q '\[ -L "\$p" \]' "$DEL_DIR/del.sh" \
+  || fail "extracted del has no symlink (-L) gate to test"
+warn() { printf '%s\n' "$*" >&2; }
+# shellcheck disable=SC1091
+. "$DEL_DIR/del.sh"
+
+# Dangling symlink under dry-run: reported, not removed.
+ln -s "$DEL_DIR/no-such-target" "$DEL_DIR/dangling-link"
+DEL_DRY_OUT="$(DRY_RUN=1 del "$DEL_DIR/dangling-link")"
+case "$DEL_DRY_OUT" in
+  *"would delete: $DEL_DIR/dangling-link"*) echo "ok: del reports a dangling symlink under dry-run" ;;
+  *) fail "del dry-run did not report the dangling symlink (got: $DEL_DRY_OUT)" ;;
+esac
+[ -L "$DEL_DIR/dangling-link" ] || fail "del dry-run removed the dangling symlink"
+
+# Dangling symlink on a real run: the link itself is removed.
+DRY_RUN=0 del "$DEL_DIR/dangling-link" || fail "del returned non-zero on a dangling symlink"
+[ ! -L "$DEL_DIR/dangling-link" ] && [ ! -e "$DEL_DIR/dangling-link" ] \
+  || fail "del left the dangling symlink in place on a real run"
+echo "ok: del removes a dangling symlink on a real run"
+
+# Live symlink control: link removed, target untouched.
+printf 'target\n' > "$DEL_DIR/live-target"
+ln -s "$DEL_DIR/live-target" "$DEL_DIR/live-link"
+DRY_RUN=0 del "$DEL_DIR/live-link" || fail "del returned non-zero on a live symlink"
+[ ! -L "$DEL_DIR/live-link" ] || fail "del left a live symlink in place"
+[ "$(cat "$DEL_DIR/live-target")" = "target" ] \
+  || fail "del followed a live symlink and modified its target"
+
+# Missing path control: skipped silently, no output, no failure.
+DEL_MISSING_OUT="$(DRY_RUN=0 del "$DEL_DIR/never-existed" 2>&1 || true)"
+[ -z "$DEL_MISSING_OUT" ] || fail "del on a missing path produced output: $DEL_MISSING_OUT"
+echo "ok: del handles dangling/live symlinks and still skips missing paths silently"
+rm -rf "$DEL_DIR"
+
 [ "$failures" -eq 0 ] || { echo "$failures failure(s)" >&2; exit 1; }
 echo "all clean.sh flag-shaped-value checks passed"

@@ -329,6 +329,7 @@ rec {
     homeManagerModules.mcpx = inputs.openchamber.homeManagerModules.mcpx;
     darwinModules.mcpx = inputs.openchamber.darwinModules.mcpx;
     homeManagerModules.fleet-brokers = import ./pkgs/fleet-brokers/home-module.nix;
+    homeManagerModules.meta-quota-export = import ./pkgs/meta-quota-export/home-module.nix;
 
     # Shared package definitions — used by packages, apps, devShells, and checks
     mkPackages =
@@ -1882,6 +1883,54 @@ rec {
                   exit 1
                 }
                 [ "$wantedBy" = "default.target" ] || { echo "WantedBy=$wantedBy, want default.target" >&2; exit 1; }
+                touch $out
+              '';
+        # darwin-nix#1776: the meta-quota-export home-manager module must
+        # render the service + timer faithful to the live hand-installed
+        # units on amd (oneshot, TimeoutStartSec=120, same ExecStart;
+        # OnCalendar=*:0/15, RandomizedDelaySec=20, Persistent=true).
+        meta-quota-export-home-manager-module =
+          if !pkgs.stdenv.hostPlatform.isLinux then
+            pkgs.runCommandLocal "meta-quota-export-home-manager-module-check" { } "touch $out"
+          else
+            let
+              eval = inputs.home-manager.lib.homeManagerConfiguration {
+                inherit pkgs;
+                modules = [
+                  inputs.self.homeManagerModules.meta-quota-export
+                  {
+                    services.meta-quota-export.enable = true;
+                    home = {
+                      username = "fleet-test";
+                      homeDirectory = "/home/fleet-test";
+                      stateVersion = "25.11";
+                    };
+                  }
+                ];
+              };
+              svc = eval.config.systemd.user.services.meta-quota-export.Service;
+              tim = eval.config.systemd.user.timers.meta-quota-export;
+            in
+            pkgs.runCommandLocal "meta-quota-export-home-manager-module-check"
+              {
+                svcExec = svc.ExecStart;
+                svcType = svc.Type;
+                svcTimeout = toString svc.TimeoutStartSec;
+                onCalendar = tim.Timer.OnCalendar;
+                randDelay = toString tim.Timer.RandomizedDelaySec;
+                persistent = if tim.Timer.Persistent then "true" else "false";
+                timerUnit = tim.Timer.Unit;
+                wantedBy = pkgs.lib.concatStringsSep " " tim.Install.WantedBy;
+              }
+              ''
+                [ "$svcExec" = "/run/current-system/sw/bin/node %h/atlas/meta-quota-export/meta-quota-export.mjs --cdp-port 19222 --out-dir %h/atlas/meta-quota-export" ] || { echo "ExecStart wrong: $svcExec" >&2; exit 1; }
+                [ "$svcType" = "oneshot" ] || { echo "Type wrong: $svcType" >&2; exit 1; }
+                [ "$svcTimeout" = "120" ] || { echo "TimeoutStartSec wrong: $svcTimeout" >&2; exit 1; }
+                [ "$onCalendar" = "*:0/15" ] || { echo "OnCalendar wrong: $onCalendar" >&2; exit 1; }
+                [ "$randDelay" = "20" ] || { echo "RandomizedDelaySec wrong: $randDelay" >&2; exit 1; }
+                [ "$persistent" = "true" ] || { echo "Persistent wrong: $persistent" >&2; exit 1; }
+                [ "$timerUnit" = "meta-quota-export.service" ] || { echo "Timer Unit wrong: $timerUnit" >&2; exit 1; }
+                [ "$wantedBy" = "timers.target" ] || { echo "WantedBy wrong: $wantedBy" >&2; exit 1; }
                 touch $out
               '';
         # code#5343: the laptop-agent must reject an empty token at startup

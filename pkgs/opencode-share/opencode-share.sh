@@ -368,6 +368,38 @@ do_status() {
   fi
 }
 
+# ─── Help/version are sole-argument only (#1894) ─────────────────────
+# The house argument contract (#1830): --help/-h/--version print and
+# exit 0 only when they are the SOLE argument. With anything after
+# them, the trailing argument is unaccounted: name it, usage, exit 1 —
+# the same shape as the unknown-option branch below. A help/version
+# flag reached later in the parse loop (after other arguments were
+# consumed) is rejected by the loop cases for the same reason.
+if [[ $# -gt 0 ]]; then
+  case "$1" in
+    --help | -h)
+      if [[ $# -gt 1 ]]; then
+        err "unknown argument: $2"
+        echo ""
+        usage
+        exit 1
+      fi
+      usage
+      exit 0
+      ;;
+    --version)
+      if [[ $# -gt 1 ]]; then
+        err "unknown argument: $2"
+        echo ""
+        usage
+        exit 1
+      fi
+      echo "$PROG $VERSION"
+      exit 0
+      ;;
+  esac
+fi
+
 # ─── Parse arguments ─────────────────────────────────────────────────────────
 
 TARGETS=()
@@ -428,13 +460,14 @@ while [[ $# -gt 0 ]]; do
       DRY_RUN=true
       shift
       ;;
-    --help | -h)
+    --help | -h | --version)
+      # Sole-argument help/version was handled before the loop (#1894);
+      # reaching this case means other arguments were already consumed,
+      # so the flag is not the sole argument: usage error, exit 1.
+      err "$1 must be the sole argument"
+      echo ""
       usage
-      exit 0
-      ;;
-    --version)
-      echo "$PROG $VERSION"
-      exit 0
+      exit 1
       ;;
     --)
       shift

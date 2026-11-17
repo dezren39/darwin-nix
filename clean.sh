@@ -1071,9 +1071,11 @@ fi
 # directory nobody has touched pins its whole closure in /nix/store. Dropping
 # the root lets the next nix-collect-garbage reclaim it.
 echo "🧽 Stale flake GC roots (>${CACHE_STALE_DAYS}d)"
-gcroot_dir=/nix/var/nix/gcroots/auto
-if [ -d "$gcroot_dir" ]; then
-  freed=0
+sweep_stale_flake_gc_roots() {
+  local gcroot_dir="${1:-/nix/var/nix/gcroots/auto}"
+  [ -d "$gcroot_dir" ] || return 0
+  local freed=0
+  local link target owner_dir fresh fresh_status
   while IFS= read -r link; do
     target="$(readlink "$link" 2>/dev/null)" || continue
     [ -n "$target" ] || continue
@@ -1100,14 +1102,24 @@ if [ -d "$gcroot_dir" ]; then
     esac
     case "$target" in
       */.direnv/*|*/result|*/result-*)
-        if [ -z "$(find "$owner_dir" -maxdepth 2 -type f -mtime "-${CACHE_STALE_DAYS}" -print -quit 2>/dev/null)" ]; then
+        # Check the find status separately from its output (#1859): a
+        # failed scan (I/O or permission error) also yields empty output,
+        # and treating that as staleness would delete both the GC-root
+        # link and the result symlink without freshness evidence. Warn
+        # and preserve both paths on scan failure.
+        fresh="$(find "$owner_dir" -maxdepth 2 -type f -mtime "-${CACHE_STALE_DAYS}" -print -quit 2>/dev/null)"
+        fresh_status=$?
+        if [ "$fresh_status" -ne 0 ]; then
+          warn "flake GC root freshness scan failed for $owner_dir; preserving $link and $target"
+        elif [ -z "$fresh" ]; then
           del "$link" "$target"; freed=$((freed + 1))
         fi
         ;;
     esac
   done < <(find "$gcroot_dir" -maxdepth 1 -type l 2>/dev/null)
   info "flake GC roots released: $freed"
-fi
+}
+sweep_stale_flake_gc_roots
 
 # nix garbage collection runs LAST of the nix work, deliberately: expiring
 # tarball-cache refs and releasing stale flake GC roots above is what makes

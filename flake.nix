@@ -1047,6 +1047,43 @@ rec {
               bash ./rebuild-backup-zed.test.sh
               touch $out
             '';
+        # #1852: rebuild-staging.test.sh is the regression test for
+        # the #1812 data-safety invariant (a rebuild must not stage
+        # unrelated work from the checkout). It passed manually but
+        # was referenced by nothing, so a future change could silently
+        # reintroduce the staging behavior. The suite copies the real
+        # rebuild.sh into a fixture git repo, stubs simple-rebuild.sh
+        # and the flake-update invocation, and pins that the tracked
+        # edits and the untracked file stay unstaged. The build
+        # sandbox has no /usr/bin/env, so the staged scripts are
+        # rewritten to store interpreters (the #1873 pattern:
+        # patchShebangs for the copied scripts, sed for the test
+        # file, whose runtime-generated simple-rebuild.sh stub also
+        # carries an env shebang; the repo files are untouched).
+        rebuild-staging-tests =
+          pkgs.runCommandLocal "rebuild-staging-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.zsh
+                pkgs.coreutils
+                pkgs.gnugrep
+                pkgs.gnused
+                pkgs.diffutils
+                pkgs.git
+              ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/rebuild.sh $src/simple-rebuild.sh $src/rebuild-staging.test.sh ./
+              chmod u+w ./rebuild.sh ./simple-rebuild.sh ./rebuild-staging.test.sh
+              patchShebangs ./rebuild.sh ./simple-rebuild.sh
+              sed -i "s|#!/usr/bin/env bash|#!${pkgs.bash}/bin/bash|g" ./rebuild-staging.test.sh
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./rebuild-staging.test.sh
+              touch $out
+            '';
         # #940: git-discover-repos.test.sh drives the real
         # git-discover-repos through bad, mixed, regular-file, all-valid,
         # --count and --dry-run --path runs — a bad --path used to exit 0,

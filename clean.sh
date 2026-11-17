@@ -446,7 +446,7 @@ run() {
 del() {
   local p
   for p in "$@"; do
-    [ -e "$p" ] || continue
+    [ -e "$p" ] || [ -L "$p" ] || continue
     if [ "$DRY_RUN" = "1" ]; then echo "  would delete: ${p/#$HOME/\~}"; continue; fi
     chmod -R u+w "$p" 2>/dev/null
     rm -rf "$p" 2>/dev/null || warn "could not fully remove $p"

@@ -75,11 +75,16 @@ jobs:
     # pm-dispatch).
     permissions:
       actions: read
+      contents: read
       issues: write
       id-token: write
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      # Checkout is only for .github/scripts/failing-jobs.sh (#1887): the
+      # extraction lives in a checked-in script so a flake check can pin
+      # it against fixtures (tests/failing-jobs-extraction.sh).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: File or append the breakage issue
         id: file
         env:
@@ -102,9 +107,18 @@ jobs:
           gh label create "status/needs-triage" --repo "$repo" --color fbca04 --description "Not yet triaged; needs a first look" --force
 
           # Sorted failing job names (comma-joined) feed the Breakage-ID.
-          failing_csv="$(gh api "repos/$repo/actions/runs/$RUN_ID/jobs" --jq '[.jobs[] | select(.conclusion == "failure") | .name] | sort | join(",")')"
+          # The extraction is paginated and lives in a script so a flake
+          # check can pin it (#1887): the first-page-only read lost real
+          # matrix failures, and its "(no failed jobs reported)" sentinel
+          # collapsed distinct breakages onto one Breakage-ID.
+          failing_csv="$(bash .github/scripts/failing-jobs.sh "$repo" "$RUN_ID")"
           if [ -z "$failing_csv" ]; then
-            failing_csv="(no failed jobs reported)"
+            # The run failed with no failed/timed-out job (cancelled,
+            # zero-job matrix, workflow-file error). Do not invent a
+            # name for it or reuse one ID for every such run: file
+            # nothing, as developing-today/code's main-broken.yml does.
+            echo "Run $RUN_ID failed with no failed or timed-out jobs; not filing a main-broken issue."
+            exit 0
           fi
           first_job="${failing_csv%%,*}"
           breakage_id="$(printf '%s' "$repo|$WORKFLOW_NAME|$failing_csv" | sha256sum | cut -c1-12)"

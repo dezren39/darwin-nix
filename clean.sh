@@ -1556,7 +1556,36 @@ del_and_stub() {
 }
 
 MARKED=0; TRASHED=0; PRUNED=0; SKIPPED_TRACKED=0; NONGIT=0
-declare -A IDLE_CACHE=()
+# IDLE_CACHE maps a repo/parent path to its idle verdict (idle|active).
+# Parallel indexed arrays rather than an associative array: that
+# declaration needs Bash 4+, but the supported entrypoints (./clean.sh via its
+# /usr/bin/env bash shebang, just clean) can resolve to the Bash 3.2
+# macOS ships at /bin/bash (#1829). Lookup is linear; the cache holds
+# one entry per distinct repo/parent in a single walk, so it stays tiny.
+IDLE_CACHE_KEYS=()
+IDLE_CACHE_VALUES=()
+idle_cache_get() { # idle_cache_get <path> - sets IDLE_CACHE_VALUE; returns 1 on a miss
+  local _i
+  IDLE_CACHE_VALUE=""
+  for (( _i = 0; _i < ${#IDLE_CACHE_KEYS[@]}; _i++ )); do
+    if [ "${IDLE_CACHE_KEYS[$_i]}" = "$1" ]; then
+      IDLE_CACHE_VALUE="${IDLE_CACHE_VALUES[$_i]}"
+      return 0
+    fi
+  done
+  return 1
+}
+idle_cache_set() { # idle_cache_set <path> <idle|active>
+  local _i
+  for (( _i = 0; _i < ${#IDLE_CACHE_KEYS[@]}; _i++ )); do
+    if [ "${IDLE_CACHE_KEYS[$_i]}" = "$1" ]; then
+      IDLE_CACHE_VALUES[$_i]="$2"
+      return 0
+    fi
+  done
+  IDLE_CACHE_KEYS+=("$1")
+  IDLE_CACHE_VALUES+=("$2")
+}
 
 echo "🗑  .trash, artifacts, Spotlight markers"
 while IFS=$'\t' read -r tag reason status path; do
@@ -1575,10 +1604,11 @@ while IFS=$'\t' read -r tag reason status path; do
         case "$path" in "$r"/*) [ ${#r} -gt ${#owner_repo} ] && owner_repo="$r" ;; esac
       done < "$OWNERS_FILE"
       if [ -n "$owner_repo" ]; then
-        if [ -z "${IDLE_CACHE[$owner_repo]:-}" ]; then
-          if repo_is_idle "$owner_repo"; then IDLE_CACHE[$owner_repo]=idle; else IDLE_CACHE[$owner_repo]=active; fi
+        if ! idle_cache_get "$owner_repo"; then
+          if repo_is_idle "$owner_repo"; then idle_cache_set "$owner_repo" idle; else idle_cache_set "$owner_repo" active; fi
+          idle_cache_get "$owner_repo"
         fi
-        if [ "${IDLE_CACHE[$owner_repo]}" = "idle" ]; then
+        if [ "$IDLE_CACHE_VALUE" = "idle" ]; then
           del_and_stub "$path"; PRUNED=$((PRUNED + 1))
         elif artifact_is_prunable "$path"; then
           # Repo is dirty or recently touched, but THIS artifact (not source)
@@ -1595,14 +1625,15 @@ while IFS=$'\t' read -r tag reason status path; do
         # forever, so a .venv outside a repo could not be reclaimed at all.
         # Judged against its own parent, using the same staleness window.
         parent="$(dirname "$path")"
-        if [ -z "${IDLE_CACHE[$parent]:-}" ]; then
+        if ! idle_cache_get "$parent"; then
           if [ -z "$(find "$parent" \
                \( "${CACHE_EXPR[@]}" -o "${RISK_EXPR[@]}" -o -name .git -o -name .worktrees \) -prune -o \
                -type f -mtime "-${ARTIFACT_STALE_DAYS}" -print -quit 2>/dev/null)" ]; then
-            IDLE_CACHE[$parent]=idle
-          else IDLE_CACHE[$parent]=active; fi
+            idle_cache_set "$parent" idle
+          else idle_cache_set "$parent" active; fi
+          idle_cache_get "$parent"
         fi
-        if [ "${IDLE_CACHE[$parent]}" = "idle" ]; then
+        if [ "$IDLE_CACHE_VALUE" = "idle" ]; then
           del_and_stub "$path"; PRUNED=$((PRUNED + 1)); NONGIT=$((NONGIT + 1))
         else
           mark_dir "$path"

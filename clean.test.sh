@@ -919,5 +919,36 @@ fi
 echo "ok: short-lived scratch skips deletion on failed freshness scan and preserves successful-scan behavior"
 rm -rf "$SS_DIR"
 
+# ─── Bash 3.2 compatibility: no associative-array cache (#1829) ─────
+# clean.sh's supported entrypoints (./clean.sh via its env-bash shebang,
+# just clean) can resolve to the Bash 3.2 macOS ships at /bin/bash, and
+# declare -A needs Bash 4+. The path-keyed IDLE_CACHE is parallel indexed
+# arrays now. Pin both halves: no Bash-4-only constructs in the script,
+# and the path-keyed cache decisions still happen in a real dry-run walk
+# (idle git repo judged by its repo path; non-repo artifact judged by
+# its parent path — the cache's two key sites).
+if grep -nE 'declare -A|mapfile|readarray' "$SCRIPT" > /dev/null; then
+  fail "clean.sh uses a Bash-4-only construct: $(grep -nE 'declare -A|mapfile|readarray' "$SCRIPT" | head -1)"
+else
+  echo "ok: clean.sh has no Bash-4-only constructs (#1829)"
+fi
+CACHE_ROOT="$TMP_ROOT/cache-fixture"
+mkdir -p "$CACHE_ROOT/idle-repo/.venv"
+echo stale > "$CACHE_ROOT/idle-repo/.venv/stale.txt"
+printf '.venv\n' > "$CACHE_ROOT/idle-repo/.gitignore"
+git -C "$CACHE_ROOT/idle-repo" init -q
+git -C "$CACHE_ROOT/idle-repo" add .gitignore
+GIT_AUTHOR_NAME=clean-test GIT_AUTHOR_EMAIL=clean@test GIT_COMMITTER_NAME=clean-test GIT_COMMITTER_EMAIL=clean@test git -C "$CACHE_ROOT/idle-repo" commit -qm fixture
+find "$CACHE_ROOT" -exec touch -t 202501010000 {} +
+# Direct capture, not the run helper: this section runs under set -e
+# (toggled by an earlier section), and a full walk's exit code carries
+# environment noise (user/sudo probes) that is not what is pinned here.
+CACHE_OUT="$(TMPDIR="$TMP_ROOT" bash "$SCRIPT" --no-system --dry-run --path "$CACHE_ROOT" 2>/dev/null || true)"
+case "$CACHE_OUT" in
+  *"would delete: $CACHE_ROOT/idle-repo/.venv"*) echo "ok: idle-repo .venv judged through the path-keyed cache" ;;
+  *) fail "idle-repo .venv not offered for deletion in dry-run" ;;
+esac
+unset CACHE_OUT CACHE_ROOT
+
 [ "$failures" -eq 0 ] || { echo "$failures failure(s)" >&2; exit 1; }
 echo "all clean.sh flag-shaped-value checks passed"

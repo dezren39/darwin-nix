@@ -2089,6 +2089,8 @@ rec {
               nativeBuildInputs = [ pkgs.python3 ];
             }
             ''
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
               cp -r ${./pkgs/laptop-agent/src} src
               cp -r ${./pkgs/laptop-agent/tests} tests
               python3 -m unittest discover -s tests -v

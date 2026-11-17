@@ -1461,5 +1461,58 @@ grep -q 'tidy_file_to_bucket' "$SW_DIR/tidy_file_to_bucket.sh" \
 rm -rf "$SW_DIR"
 
 
+# ─── #1902: dead-cask extraction spans multi-word app names ─────────────
+# The dead-cask check extracted the installed app path from `brew info`
+# with grep -oE '/Applications/[^ ]*\.app'. [^ ]* cannot span the space in
+# a multi-word bundle name, so those casks extracted empty and were
+# silently skipped by the MISSING-from-disk warning. Extract the real
+# block from clean.sh at test time, point it at a stub brew through the
+# CLEAN_APPS_DIR seam, and pin: multi-word dead flags, multi-word present
+# does not, and the single-word control still flags exactly as before.
+DC_DIR="$TMP_ROOT/dead-cask"
+mkdir -p "$DC_DIR/apps/Present Multi.app"
+cat > "$DC_DIR/brew" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = list ]; then printf '%s\n' dead-multi present-multi single-word; exit 0; fi
+if [ "$1" = info ]; then
+  case "$3" in
+    dead-multi)    printf '%s (App)\n' "$CLEAN_APPS_DIR/Dead Multi.app" ;;
+    present-multi) printf '%s (App)\n' "$CLEAN_APPS_DIR/Present Multi.app" ;;
+    single-word)   printf '%s (App)\n' "$CLEAN_APPS_DIR/Single.app" ;;
+  esac
+  exit 0
+fi
+exit 0
+EOF
+chmod +x "$DC_DIR/brew"
+sed -n '/^  _dead=""/,/MISSING from disk/p' "$SCRIPT" > "$DC_DIR/block.sh"
+[ -s "$DC_DIR/block.sh" ] || fail "could not extract the dead-cask block from clean.sh"
+grep -q 'info --cask' "$DC_DIR/block.sh" || fail "extracted dead-cask block lacks the brew info extraction"
+grep -q 'CLEAN_APPS_DIR:-/Applications' "$SCRIPT" || fail "dead-cask extraction lost its /Applications default"
+DC_OUT="$(
+  as_user() { "$@"; }
+  warn() { printf 'WARN: %s\n' "$*"; }
+  _b="$DC_DIR/brew"
+  export CLEAN_APPS_DIR="$DC_DIR/apps"
+  . "$DC_DIR/block.sh"
+)"
+case "$DC_OUT" in
+  *"MISSING from disk"*) echo "ok: dead-cask block warns on missing apps" ;;
+  *) fail "dead-cask block produced no MISSING warning (got: $DC_OUT)" ;;
+esac
+case "$DC_OUT" in
+  *dead-multi*) echo "ok: multi-word dead cask is flagged" ;;
+  *) fail "multi-word dead cask was not flagged (got: $DC_OUT)" ;;
+esac
+case "$DC_OUT" in
+  *present-multi*) fail "multi-word present cask was flagged (got: $DC_OUT)" ;;
+  *) echo "ok: multi-word present cask is not flagged" ;;
+esac
+case "$DC_OUT" in
+  *single-word*) echo "ok: single-word dead cask still flagged (control)" ;;
+  *) fail "single-word dead cask was not flagged (got: $DC_OUT)" ;;
+esac
+
+
 [ "$failures" -eq 0 ] || { echo "$failures failure(s)" >&2; exit 1; }
 echo "all clean.sh flag-shaped-value checks passed"

@@ -923,6 +923,64 @@ fi
 echo "ok: short-lived scratch skips deletion on failed freshness scan and preserves successful-scan behavior"
 rm -rf "$SS_DIR"
 
+# ─── #1859: failed flake GC-root freshness scan preserves both paths ──
+# Drive the extracted sweep with a find stub that fails only the
+# freshness scan (-mtime): neither the GC-root link nor the result path
+# may be offered to del, and the failure must warn. Controls with the
+# real find: a stale project's pair is still released, an active
+# project's pair is still preserved.
+GC_DIR="$TMP_ROOT/gc-roots"
+mkdir -p "$GC_DIR/roots" "$GC_DIR/bin" "$GC_DIR/stale-proj" "$GC_DIR/active-proj"
+printf 'result\n' > "$GC_DIR/stale-proj/result"
+printf 'result\n' > "$GC_DIR/active-proj/result"
+printf 'recent\n' > "$GC_DIR/active-proj/source.txt"
+touch -t 200001010000 "$GC_DIR/stale-proj/result"
+ln -s "$GC_DIR/stale-proj/result" "$GC_DIR/roots/stale-link"
+ln -s "$GC_DIR/active-proj/result" "$GC_DIR/roots/active-link"
+sed -n '/^sweep_stale_flake_gc_roots() {/,/^}/p' "$SCRIPT" > "$GC_DIR/sweep.sh"
+[ -s "$GC_DIR/sweep.sh" ] || fail "could not extract sweep_stale_flake_gc_roots"
+REAL_FIND="$(command -v find)"
+export REAL_FIND
+cat > "$GC_DIR/bin/find" <<'STUB'
+#!/bin/sh
+case " $* " in
+  *" -mtime "*) exit 1 ;;
+  *) exec "$REAL_FIND" "$@" ;;
+esac
+STUB
+chmod +x "$GC_DIR/bin/find"
+CACHE_STALE_DAYS=3
+del() { for _a in "$@"; do printf '%s\n' "$_a" >> "$GC_DIR/deleted"; done; }
+warn() { printf '%s\n' "$*" >&2; }
+info() { :; }
+# shellcheck disable=SC1091
+. "$GC_DIR/sweep.sh"
+GC_OLD_PATH="$PATH"
+PATH="$GC_DIR/bin:$PATH"
+export PATH
+GC_RC=0
+sweep_stale_flake_gc_roots "$GC_DIR/roots" 2> "$GC_DIR/failure.err" || GC_RC=$?
+PATH="$GC_OLD_PATH"
+export PATH
+[ "$GC_RC" -eq 0 ] || fail "failed GC-root freshness scan returned $GC_RC"
+[ ! -s "$GC_DIR/deleted" ] || fail "failed freshness scan offered GC root/result to del: $(cat "$GC_DIR/deleted")"
+grep -q 'freshness scan failed' "$GC_DIR/failure.err" \
+  || fail "failed GC-root freshness scan did not warn"
+rm -f "$GC_DIR/deleted"
+sweep_stale_flake_gc_roots "$GC_DIR/roots"
+grep -Fxq "$GC_DIR/roots/stale-link" "$GC_DIR/deleted" \
+  || fail "successful scan did not offer stale GC-root link to del"
+grep -Fxq "$GC_DIR/stale-proj/result" "$GC_DIR/deleted" \
+  || fail "successful scan did not offer stale result path to del"
+if grep -Fxq "$GC_DIR/roots/active-link" "$GC_DIR/deleted"; then
+  fail "successful scan offered active GC-root link to del"
+fi
+if grep -Fxq "$GC_DIR/active-proj/result" "$GC_DIR/deleted"; then
+  fail "successful scan offered active result path to del"
+fi
+echo "ok: flake GC-root sweep preserves both paths on failed freshness scan; stale released and active preserved on success"
+rm -rf "$GC_DIR"
+
 # ─── Bash 3.2 compatibility: no associative-array cache (#1829) ─────
 # clean.sh's supported entrypoints (./clean.sh via its env-bash shebang,
 # just clean) can resolve to the Bash 3.2 macOS ships at /bin/bash, and

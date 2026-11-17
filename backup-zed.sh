@@ -28,17 +28,94 @@ script_dir="${0:A:h}"
 cd "${script_dir}" || exit 1
 echo "entered: $script_dir"
 
-cp -f "$HOME/.config/zed/settings.json" ./.zed/settings.json
-cp -f "$HOME/Library/Application Support/Zed/extensions/index.json" ./.zed/index.json
-# Write to a temp file and mv on success (#860): a direct "> ./.zed/installed.txt"
-# truncates the committed list before find runs, so a missing extensions/installed
-# dir (or any other find failure) would leave it emptied when set -e exits.
+# Publish the three-file snapshot coherently (#1787). The copies used to
+# land sequentially, so a failure midway (a missing index, a failed find)
+# left a mixed old/new snapshot behind a nonzero exit. Now every output
+# is staged to a temp file in ./.zed/ first (same directory, so each
+# publish rename is atomic per file) and the snapshot is published only
+# after all three stages succeed. Three renames are NOT atomic as a
+# group, so publishing first copies each prior output aside and rolls
+# the already-published files back if a rename fails, reporting the
+# failure explicitly instead of leaving the mix in place.
+settings_src="$HOME/.config/zed/settings.json"
+index_src="$HOME/Library/Application Support/Zed/extensions/index.json"
+installed_src="$HOME/Library/Application Support/Zed/extensions/installed"
+
+settings_tmp=$(mktemp ./.zed/.settings.json.XXXXXX)
+index_tmp=$(mktemp ./.zed/.index.json.XXXXXX)
 installed_tmp=$(mktemp ./.zed/.installed.txt.XXXXXX)
-trap 'rm -f "$installed_tmp"' EXIT
+settings_bak=$(mktemp ./.zed/.settings.json.bak.XXXXXX)
+index_bak=$(mktemp ./.zed/.index.json.bak.XXXXXX)
+installed_bak=$(mktemp ./.zed/.installed.txt.bak.XXXXXX)
+trap 'rm -f "$settings_tmp" "$index_tmp" "$installed_tmp" "$settings_bak" "$index_bak" "$installed_bak"' EXIT
+
+cp -f "$settings_src" "$settings_tmp" || {
+    echo "backup-zed: cannot read settings source: $settings_src" >&2
+    exit 1
+}
+cp -f "$index_src" "$index_tmp" || {
+    echo "backup-zed: cannot read extensions index source: $index_src" >&2
+    exit 1
+}
 # Sort the list (#946): raw find order is readdir order, so the committed
 # snapshot reshuffled between runs. LC_ALL=C sort makes regeneration
-# byte-identical when nothing changed; pipefail keeps the #860 guarantee —
-# a failed find fails the pipeline, set -e exits, and the mv never runs.
-find "$HOME/Library/Application Support/Zed/extensions/installed" -mindepth 1 -maxdepth 1 -exec basename {} \; | LC_ALL=C sort > "$installed_tmp"
-mv -f "$installed_tmp" ./.zed/installed.txt
+# byte-identical when nothing changed; pipefail makes a failed find fail
+# the pipeline, so the enumeration failure is caught here and nothing
+# publishes (the #860 guarantee, now extended to all three outputs).
+find "$installed_src" -mindepth 1 -maxdepth 1 -exec basename {} \; | LC_ALL=C sort > "$installed_tmp" || {
+    echo "backup-zed: cannot enumerate installed extensions: $installed_src" >&2
+    exit 1
+}
+
+# Copy the prior outputs aside for rollback. A destination that does not
+# exist yet is recorded as absent, so rollback removes a first publish
+# instead of resurrecting a stale backup copy.
+had_settings=0
+had_index=0
+had_installed=0
+if [[ -e ./.zed/settings.json ]]; then
+    cp -f ./.zed/settings.json "$settings_bak" && had_settings=1
+fi
+if [[ -e ./.zed/index.json ]]; then
+    cp -f ./.zed/index.json "$index_bak" && had_index=1
+fi
+if [[ -e ./.zed/installed.txt ]]; then
+    cp -f ./.zed/installed.txt "$installed_bak" && had_installed=1
+fi
+
+published_settings=0
+published_index=0
+publish_failed=0
+mv -f "$settings_tmp" ./.zed/settings.json || publish_failed=1
+if [[ $publish_failed -eq 0 ]]; then
+    published_settings=1
+    mv -f "$index_tmp" ./.zed/index.json || publish_failed=1
+fi
+if [[ $publish_failed -eq 0 ]]; then
+    published_index=1
+    mv -f "$installed_tmp" ./.zed/installed.txt || publish_failed=1
+fi
+
+if [[ $publish_failed -ne 0 ]]; then
+    # A publish rename failed partway: restore whichever outputs were
+    # already replaced so the snapshot is the prior one, not a mix.
+    if [[ $published_settings -eq 1 ]]; then
+        if [[ $had_settings -eq 1 ]]; then
+            cp -f "$settings_bak" ./.zed/settings.json || true
+        else
+            rm -f ./.zed/settings.json
+        fi
+    fi
+    if [[ $published_index -eq 1 ]]; then
+        if [[ $had_index -eq 1 ]]; then
+            cp -f "$index_bak" ./.zed/index.json || true
+        else
+            rm -f ./.zed/index.json
+        fi
+    fi
+    echo "backup-zed: publishing the snapshot failed; prior snapshot restored" >&2
+    exit 1
+fi
+
+rm -f "$settings_bak" "$index_bak" "$installed_bak"
 trap - EXIT

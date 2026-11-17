@@ -50,7 +50,7 @@ parse_line="$(line_of '^mode="all"')"
 gen_line="$(line_of 'GENERATION must be a positive integer')"
 ht_line="$(line_of 'HEALTH_TIMEOUT must be a positive integer')"
 reclaim_line="$(line_of '^reclaim_root_owned$')"
-gitadd_line="$(awk '/^  git add \.$/{print NR; exit}' "$SCRIPT")"
+gitadd_line="$(awk '/^  stage_flake_inputs$/{print NR; exit}' "$SCRIPT")"
 token_line="$(line_of '^refresh_nix_access_token$')"
 if [ -n "$parse_line" ] && [ -n "$gen_line" ] && [ -n "$ht_line" ] && [ -n "$reclaim_line" ] \
   && [ -n "$gitadd_line" ] && [ -n "$token_line" ] \

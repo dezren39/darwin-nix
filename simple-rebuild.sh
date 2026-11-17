@@ -40,7 +40,7 @@ script_dir="${0:A:h}"
 # Git add for the script's directory
 cd "${script_dir}" || exit 1
 echo "entered: $script_dir"
-echo "git add ."
+echo "stage new flake inputs (scoped, #1864)"
 
 # Phases.
 #
@@ -52,11 +52,12 @@ echo "git add ."
 #   --build-only     prepare + build            no sudo
 #   --activate-only  activate + post + commit   sudo
 #   (no flag)        all of it
-#   --no-commit      combinable with any of the above: still stages (flakes
-#                    only see tracked files) but skips the marker commits, for
+#   --no-commit      combinable with any of the above: still registers new
+#                    flake inputs (flakes only see files git knows) but
+#                    skips the marker commits, for
 #                    iterating on a build that is not ready to be recorded
 # Parse and validate EVERYTHING before the first side effect (#1316):
-# reclaim_root_owned (may sudo chown), the first `git add .` and
+# reclaim_root_owned (may sudo chown), the first flake-input registration and
 # refresh_nix_access_token all run below this block, so a rejected
 # invocation -- and -h/--help -- must be decided here, not after them.
 mode="all"
@@ -198,10 +199,64 @@ reclaim_root_owned() {
 
 reclaim_root_owned
 
+# Staging scoped to the flake's inputs (#1864). A flake built from a
+# git worktree reads tracked files from the worktree whether or not
+# their edits are staged, so tracked edits never need staging for the
+# build -- but a NEWLY added input file is invisible to the flake
+# until git knows it exists. `git add .` used to cover that by staging
+# the whole tree: every unrelated tracked edit and untracked file was
+# staged, and the marker commits below could silently swallow work
+# that was never part of the rebuild. Register only the new files the
+# flake can actually reference -- an untracked, non-ignored file whose
+# repo-relative path (or an ancestor directory of it, e.g. a new
+# package directory named from flake.nix) is mentioned by a tracked
+# file -- and register them with intent-to-add only: the flake reads
+# their real worktree content, no content is staged, and
+# unstage_flake_inputs removes the registrations before any commit
+# (commit_marker) and at exit, so no commit can capture them either.
+# A new file referenced only by basename from another directory is
+# not detected; stage it once by hand (`git add <path>`) -- a build
+# that needs it names the missing path.
+typeset -a flake_registered
+flake_registered=()
+
+stage_flake_inputs() {
+  local f dir cand
+  local -a cands
+  flake_registered=()
+  while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    cands=("$f")
+    dir="${f%/*}"
+    while [[ "$dir" != "$f" && "$dir" == */* ]]; do
+      cands+=("$dir")
+      dir="${dir%/*}"
+    done
+    for cand in "${cands[@]}"; do
+      if git grep -q -F -e "$cand" -- . 2>/dev/null; then
+        flake_registered+=("$f")
+        break
+      fi
+    done
+  done < <(git ls-files --others --exclude-standard)
+  if (( ${#flake_registered} )); then
+    git add -N -- "${flake_registered[@]}"
+    echo "registered ${#flake_registered} new flake input(s) with intent-to-add (nothing staged): ${flake_registered[*]}"
+  fi
+}
+
+unstage_flake_inputs() {
+  if (( ${#flake_registered} )); then
+    git reset -q -- "${flake_registered[@]}" 2>/dev/null || true
+    flake_registered=()
+  fi
+}
+trap unstage_flake_inputs EXIT
+
 # Is the git on PATH actually usable? On a clean macOS install the only git
 # is /usr/bin/git, an Xcode Command Line Tools shim: invoking it pops the CLT
 # install dialog and exits non-zero, which under `set -e` killed ./s at the
-# `git add .` below -- before anything was built, let alone switched (#1069).
+# staging below -- before anything was built, let alone switched (#1069).
 # Git in this script is bookkeeping only (staging so the flake sees new
 # files, and the marker commits), so when it is missing or is the
 # uninstalled CLT shim, skip the git steps for this run instead of gating
@@ -217,9 +272,9 @@ elif [[ "$(command -v git)" == /usr/bin/git ]] && ! /usr/bin/xcode-select -p >/d
   git_ok=0
 fi
 if (( git_ok )); then
-  git add .
+  stage_flake_inputs
 else
-  echo "no usable git (missing, or the Xcode CLT shim on a clean install); skipping git add + marker commits for this run"
+  echo "no usable git (missing, or the Xcode CLT shim on a clean install); skipping flake-input registration + marker commits for this run"
 fi
 
 # Accept a pending Xcode license BEFORE anything builds (#1791). Every
@@ -246,7 +301,8 @@ fi
 
 # Keep Nix's GitHub token current. nix.conf (this directory, so tracked)
 # `include`s ~/.local/share/nix/access-tokens.conf, which holds the token and
-# must never be inside the repo: `git add .` above would commit it. Rewritten
+# must never be inside the repo: the flake-input registration above would
+# expose it to the build, and a broad `git add .` would commit it. Rewritten
 # from `gh auth token` on every run, so a rotated gh token cannot leave Nix
 # sending a stale one (a bad token fails every github: fetch with 401, which is
 # worse than the anonymous 60/hour it replaces). If gh is missing or logged
@@ -271,6 +327,9 @@ set -x
 
 # Every marker commit goes through here so --no-commit has one place to act.
 commit_marker() {
+  # Registrations are build-time only: remove them before any commit,
+  # so a marker commit can never capture a registered input (#1864).
+  unstage_flake_inputs
   if (( no_commit )); then
     echo "--no-commit: skipping commit \"$1\""
     return 0
@@ -738,9 +797,9 @@ record_activation() {
     current="$(basename "$(readlink -f /run/current-system)")"
   reclaim_root_owned
   if (( git_ok )); then
-    git add .
+    stage_flake_inputs
   else
-    echo "no usable git: skipping git add after $how"
+    echo "no usable git: skipping flake-input registration after $how"
   fi
   commit_marker "$(hostname) $how gen $gen $store"
 }

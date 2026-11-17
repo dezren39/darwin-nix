@@ -904,6 +904,32 @@ rec {
               bash ./tmux-navigator.test.sh
               touch $out
             '';
+        # #1851: gc-root-activation.test.sh extracts the
+        # rootActivatedGeneration entry from homeUser.nix and pins its
+        # end-of-DAG anchor (entryAfter every other entry in the built
+        # activate script) plus the behaviour that anchor buys: a
+        # later-entry failure leaves the prior activated generation's
+        # GC root intact, a successful activation advances it.
+        gc-root-activation-tests =
+          pkgs.runCommandLocal "gc-root-activation-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.coreutils
+                pkgs.gawk
+                pkgs.gnugrep
+                pkgs.gnused
+              ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/homeUser.nix $src/gc-root-activation.test.sh ./
+              chmod u+w ./homeUser.nix ./gc-root-activation.test.sh
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./gc-root-activation.test.sh
+              touch $out
+            '';
         # #967: symlink-scripts.test.sh drives the real symlink-commands
         # and symlink-plugins — in place against the repo's real
         # commands/ and plugins/, and as verbatim copies in a fixture

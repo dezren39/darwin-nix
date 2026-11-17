@@ -18,11 +18,16 @@ name: flake packages build
 #
 # Coverage is partitioned by system (#1850, mirroring #1832 in
 # flake-checks-build.yml): the x86_64-linux packages build on
-# ubuntu-latest and the aarch64-darwin packages on macos-14, each
+# ubuntu-latest and the aarch64-darwin packages on macos-15, each
 # list enumerated from the flake for its own system. The mcpx
 # exclusion above applies only to the x86_64-linux list — the
 # aarch64-darwin mcpx output has no other build owner, so the
 # darwin list is the flake's full aarch64-darwin package set.
+# The runner is macos-15, not macos-14: macos-14 jobs in this repo
+# are cancelled at assignment with no runner ever assigned
+# (flake-checks-build run 43999325716; this workflow's first
+# dispatch run 44029008656), while the repo's darwin verify
+# workflows run successfully on macos-15.
 
 on:
   schedule:
@@ -91,7 +96,7 @@ jobs:
   nix-build-darwin:
     name: nix build (aarch64-darwin) ${{ matrix.package }}
     needs: list-packages
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 60
     strategy:
       fail-fast: false

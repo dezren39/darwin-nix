@@ -33,7 +33,7 @@ Per-workflow application in this repo:
   (#1850): each system's package list is derived from the flake
   for that system (`nix eval --json .#packages.x86_64-linux` /
   `.#packages.aarch64-darwin`), never hardcoded, and Darwin
-  packages build on a native macOS runner (macos-14), Linux
+  packages build on a native macOS runner (macos-15), Linux
   packages on ubuntu-latest. The darwin list is the flake's full
   aarch64-darwin package set — the darwin mcpx output has no
   other build owner, so it is not excluded there.

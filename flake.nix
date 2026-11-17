@@ -330,6 +330,7 @@ rec {
     darwinModules.mcpx = inputs.openchamber.darwinModules.mcpx;
     homeManagerModules.fleet-brokers = import ./pkgs/fleet-brokers/home-module.nix;
     homeManagerModules.meta-quota-export = import ./pkgs/meta-quota-export/home-module.nix;
+    homeManagerModules.rustdesk-units = import ./pkgs/rustdesk-units/home-module.nix;
 
     # Shared package definitions — used by packages, apps, devShells, and checks
     mkPackages =
@@ -1931,6 +1932,60 @@ rec {
                 [ "$persistent" = "true" ] || { echo "Persistent wrong: $persistent" >&2; exit 1; }
                 [ "$timerUnit" = "meta-quota-export.service" ] || { echo "Timer Unit wrong: $timerUnit" >&2; exit 1; }
                 [ "$wantedBy" = "timers.target" ] || { echo "WantedBy wrong: $wantedBy" >&2; exit 1; }
+                touch $out
+              '';
+        # darwin-nix#1777: the rustdesk-units home-manager module must
+        # render both units faithful to the live hand-installed units on
+        # amd and install the vendored picker script at the live path.
+        rustdesk-units-home-manager-module =
+          if !pkgs.stdenv.hostPlatform.isLinux then
+            pkgs.runCommandLocal "rustdesk-units-home-manager-module-check" { } "touch $out"
+          else
+            let
+              eval = inputs.home-manager.lib.homeManagerConfiguration {
+                inherit pkgs;
+                modules = [
+                  inputs.self.homeManagerModules.rustdesk-units
+                  {
+                    services.rustdesk-units.enable = true;
+                    home = {
+                      username = "fleet-test";
+                      homeDirectory = "/home/fleet-test";
+                      stateVersion = "25.11";
+                    };
+                  }
+                ];
+              };
+              rd = eval.config.systemd.user.services.rustdesk.Service;
+              pk = eval.config.systemd.user.services.rd-picker-autogrant.Service;
+              picker = eval.config.home.file.".local/bin/rd-picker-autogrant.py";
+            in
+            pkgs.runCommandLocal "rustdesk-units-home-manager-module-check"
+              {
+                rdExec = rd.ExecStart;
+                rdType = rd.Type;
+                rdRestart = rd.Restart;
+                rdRestartSec = toString rd.RestartSec;
+                rdEnv = pkgs.lib.concatStringsSep " " rd.Environment;
+                pkExec = pk.ExecStart;
+                pkRestart = pk.Restart;
+                pkRestartSec = toString pk.RestartSec;
+                pickerSource = picker.source;
+                pickerExec = if picker.executable then "true" else "false";
+                wantedBy = pkgs.lib.concatStringsSep " " eval.config.systemd.user.services.rustdesk.Install.WantedBy;
+              }
+              ''
+                [ "$rdExec" = "/etc/profiles/per-user/user/bin/rustdesk --service" ] || { echo "rustdesk ExecStart wrong: $rdExec" >&2; exit 1; }
+                [ "$rdType" = "simple" ] || { echo "rustdesk Type wrong: $rdType" >&2; exit 1; }
+                [ "$rdRestart" = "on-failure" ] || { echo "rustdesk Restart wrong: $rdRestart" >&2; exit 1; }
+                [ "$rdRestartSec" = "5" ] || { echo "rustdesk RestartSec wrong: $rdRestartSec" >&2; exit 1; }
+                case "$rdEnv" in *"XDG_RUNTIME_DIR=/run/user/1337"*"WAYLAND_DISPLAY=wayland-1"*"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1337/bus"*) ;; *) echo "rustdesk Environment wrong: $rdEnv" >&2; exit 1 ;; esac
+                [ "$pkExec" = "/usr/bin/env python3 %h/.local/bin/rd-picker-autogrant.py" ] || { echo "picker ExecStart wrong: $pkExec" >&2; exit 1; }
+                [ "$pkRestart" = "always" ] || { echo "picker Restart wrong: $pkRestart" >&2; exit 1; }
+                [ "$pkRestartSec" = "3" ] || { echo "picker RestartSec wrong: $pkRestartSec" >&2; exit 1; }
+                case "$pickerSource" in *"rd-picker-autogrant.py") ;; *) echo "picker source wrong: $pickerSource" >&2; exit 1 ;; esac
+                [ "$pickerExec" = "true" ] || { echo "picker not executable" >&2; exit 1; }
+                [ "$wantedBy" = "default.target" ] || { echo "WantedBy wrong: $wantedBy" >&2; exit 1; }
                 touch $out
               '';
         # code#5343: the laptop-agent must reject an empty token at startup

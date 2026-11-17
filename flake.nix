@@ -515,6 +515,32 @@ rec {
               bash tests/fmt-tidy-propagation.sh
               touch $out
             '';
+        # #1887: tests/failing-jobs-extraction.sh pins the main-broken
+        # watcher's failing-jobs extraction (`.github/scripts/
+        # failing-jobs.sh`) against saved jobs-JSON pages, so a copy
+        # that drops pagination fails here instead of merging green.
+        # The script under test calls a stubbed `gh`; the stub applies
+        # the caller's --jq program with real jq, hence the jq input.
+        failing-jobs-tests =
+          pkgs.runCommandLocal "failing-jobs-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.coreutils
+                pkgs.jq
+              ];
+            }
+            ''
+              mkdir -p .github/scripts tests
+              cp ${./.github/scripts/failing-jobs.sh} .github/scripts/failing-jobs.sh
+              cp ${./tests/failing-jobs-extraction.sh} tests/failing-jobs-extraction.sh
+              chmod u+w .github/scripts/failing-jobs.sh tests/failing-jobs-extraction.sh
+              sed -i "s|#!/usr/bin/env bash|#!${pkgs.bash}/bin/bash|g" .github/scripts/failing-jobs.sh tests/failing-jobs-extraction.sh
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash tests/failing-jobs-extraction.sh
+              touch $out
+            '';
         # #1149: simple-rebuild.test.sh pins simple-rebuild.sh's
         # mode-flag parser -- --build-only with --activate-only in
         # either order and a repeated --activate-only exit 2 naming

@@ -143,7 +143,14 @@ for c in casks:
                 apps.extend(targets)
             else:
                 apps.extend(e for e in elements if isinstance(e, str))
-    print(c['token'] + '|' + '|'.join(apps))
+    # Marker framing, one value per line (#1847): '@' opens a cask record
+    # (token verbatim after the marker), each '+' line is one app name
+    # (verbatim after the marker). Name contents are never split, so an
+    # app named 'Odd|Name.app' survives the round trip -- the old
+    # '|'-delimited record read it as two names.
+    print('@' + c['token'])
+    for app in apps:
+        print('+' + app)
 # Rename evidence (#1552): a cask object's old_tokens names its
 # previous tokens, so record old|new pairs for the shell side. This
 # replaces the substring name-shape guess: docker->docker-desktop is
@@ -192,30 +199,37 @@ HEALTHY=0
 SKIPPED=0
 FONT_OR_NOAPP=0
 
-while IFS='|' read -r cask rest; do
-  [[ -z "$cask" ]] && continue
+# Marker-framed records (#1847): an '@' line opens a cask (token is the
+# rest of the line, verbatim), each following '+' line is one app name
+# (verbatim after the marker). Contents are never split on a delimiter.
+CURRENT_CASK=""
+CURRENT_APPS=()
+
+check_current_cask() {
+  [[ -z "$CURRENT_CASK" ]] && return
+  local cask="$CURRENT_CASK"
 
   # Find original cask name — may differ from token
-  original="${TOKEN_TO_ORIGINAL[$cask]:-$cask}"
+  local original="${TOKEN_TO_ORIGINAL[$cask]:-$cask}"
 
   if is_skipped "$cask" || is_skipped "$original"; then
     SKIPPED=$((SKIPPED + 1))
     [[ "$QUIET" == false ]] && echo -e "  ${YELLOW}⏭${NC}  $cask (skipped)"
-    continue
+    return
   fi
 
   # No app artifacts = font, plugin, CLI-only, etc.
-  if [[ -z "$rest" ]]; then
+  if [[ ${#CURRENT_APPS[@]} -eq 0 ]]; then
     FONT_OR_NOAPP=$((FONT_OR_NOAPP + 1))
     [[ "$QUIET" == false ]] && echo -e "  ${BLUE}—${NC}  $cask (no .app — font/plugin/CLI)"
-    continue
+    return
   fi
 
   # Check if ALL expected apps exist
-  ALL_FOUND=true
-  MISSING_APP=""
-  IFS='|' read -ra APP_LIST <<< "$rest"
-  for app in "${APP_LIST[@]}"; do
+  local ALL_FOUND=true
+  local MISSING_APP=""
+  local app
+  for app in "${CURRENT_APPS[@]}"; do
     [[ -z "$app" ]] && continue
     if [[ ! -d "/Applications/$app" ]] && [[ ! -d "$HOME/Applications/$app" ]]; then
       ALL_FOUND=false
@@ -232,12 +246,22 @@ while IFS='|' read -r cask rest; do
     BROKEN_ORIGINAL+=("$original")
     echo -e "  ${RED}❌${NC} $cask ${RED}→ missing ${MISSING_APP}${NC}"
   fi
+}
+
+while IFS= read -r line; do
+  case "$line" in
+    @*) check_current_cask; CURRENT_CASK="${line:1}"; CURRENT_APPS=() ;;
+    +*) CURRENT_APPS+=("${line:1}") ;;
+  esac
 done < "$TMPFILE"
+check_current_cask
 
 # Check for installed casks that weren't in the JSON output (removed/renamed upstream)
 declare -A SEEN_TOKENS
-while IFS='|' read -r cask _rest; do
-  SEEN_TOKENS["$cask"]=1
+while IFS= read -r line; do
+  case "$line" in
+    @*) SEEN_TOKENS["${line:1}"]=1 ;;
+  esac
 done < "$TMPFILE"
 
 UNCHECKED=0

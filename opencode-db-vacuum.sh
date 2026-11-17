@@ -220,7 +220,7 @@ while [ $# -gt 0 ]; do
     --no-backup) KEEP_BACKUP=0; shift ;;
     --force) FORCE=1; shift ;;
     -y|--yes) ASSUME_YES=1; shift ;;
-    -h|--help) usage; exit 0 ;;
+    -h|--help) if [[ $# -gt 1 ]]; then arg_die "unexpected argument: $2"; fi; usage; exit 0 ;;
     *) arg_die "unknown option: $1 (try --help)" ;;
   esac
 done

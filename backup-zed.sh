@@ -7,7 +7,7 @@
 # --help prints usage and exits 0, with no side effects.
 if [[ $# -gt 0 ]]; then
     case "$1" in
-        -h|--help) echo "Usage: backup-zed.sh"; exit 0 ;;
+        -h|--help) if [[ $# -gt 1 ]]; then echo "backup-zed: unexpected argument: $2" >&2; echo "Usage: backup-zed.sh" >&2; exit 2; fi; echo "Usage: backup-zed.sh"; exit 0 ;;
         *) echo "backup-zed: unknown argument: $1" >&2; echo "Usage: backup-zed.sh" >&2; exit 2 ;;
     esac
 fi

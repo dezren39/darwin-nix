@@ -62,7 +62,7 @@ while (( $# )); do
                fi
                flake="$2"; flake_set=1; shift ;;
     --dry-run) dry_run=1 ;;
-    -h|--help) usage; exit 0 ;;
+    -h|--help) if [[ $# -gt 1 ]]; then echo "adopt: unexpected argument '$2'" >&2; usage >&2; exit 2; fi; usage; exit 0 ;;
     -*)        echo "adopt: unknown option $1" >&2; usage >&2; exit 2 ;;
     *)         if (( template_set )); then
                  echo "adopt: unexpected extra argument '$1' (only one TEMPLATE may be given)" >&2

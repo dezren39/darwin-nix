@@ -29,10 +29,21 @@ HELP_NOTE = (
 def rotate(path, max_bytes, keep, copy_truncate=False):
     """Shift path to path.1 .. path.<keep> once it passes max_bytes.
 
-    copy_truncate is for files another process keeps open with O_APPEND
-    (launchd's StandardErrorPath): the file is copied, then truncated in
-    place, so the writer carries on at the new end. Returns the size rotated,
-    or 0.
+    copy_truncate is for files another process keeps open (launchd's
+    StandardErrorPath): the file is copied, then truncated in place, so
+    the writer keeps appending to the same inode at the new end. Returns
+    the size rotated, or 0.
+
+    #1833: O_APPEND does NOT make the old copy-then-truncate sequence
+    safe -- a writer appending after the copy finished but before the
+    truncate lost those bytes from both files. So after copying, any
+    bytes appended past the copied length are captured and appended to
+    the rotated file before truncating, and the return value is the
+    total bytes archived. One narrow window remains: an append landing
+    between the final size check and the truncate itself can still be
+    lost; that window is the check-to-truncate instant, not the whole
+    copy duration, and closing it entirely would need writer cooperation
+    (a lock or rename-based rotation) that launchd writers do not offer.
 
     #1643: in copy_truncate mode a symlinked path is NOT rotated: copying
     and truncating would follow the link and empty the target file, which
@@ -64,8 +75,21 @@ def rotate(path, max_bytes, keep, copy_truncate=False):
         if os.path.islink(f"{path}.1"):
             os.unlink(f"{path}.1")
         shutil.copyfile(path, f"{path}.1")
-        with open(path, "r+") as fh:
+        copied = os.path.getsize(f"{path}.1")
+        with open(path, "r+b") as fh, open(f"{path}.1", "ab") as archive:
+            while True:
+                current = os.fstat(fh.fileno()).st_size
+                if current <= copied:
+                    break
+                fh.seek(copied)
+                delta = fh.read(current - copied)
+                if not delta:
+                    break
+                archive.write(delta)
+                copied += len(delta)
+            archive.flush()
             fh.truncate(0)
+        return copied
     else:
         os.replace(path, f"{path}.1")
     return size

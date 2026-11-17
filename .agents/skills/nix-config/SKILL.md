@@ -36,7 +36,7 @@ breakdown; this skill is the fast path.
   user. When you change any of them, run the shell fragment yourself against a
   scratch directory where you can, and say in the commit and your reply that it
   is untested until a switch and what the user should check afterwards.
-- `just fmt` — nixfmt + flake-tidy (run before finishing nix edits).
+- `just fmt` — treefmt (nixfmt + rustfmt, via `nix fmt`) + flake-tidy (run before finishing nix edits).
 - `nix fmt` — treefmt (nixfmt + rustfmt).
 - `./clean` — aggressive disk cleanup (nix GC, docker prune, caches). Destructive.
 

@@ -304,6 +304,42 @@ for mode in bsd gnu; do
   esac
 done
 
+# ─── Unknown-scratch sweep honors VAR_FOLDERS_ROOT (#1865) ───────
+# Both unknown-scratch scans (the --only-unknown-scratch early exit
+# and the full-run catch-all) used to iterate the literal
+# /private/var/folders/*/*/T, ignoring the VAR_FOLDERS_ROOT seam
+# (#1346) -- so fixtures could not exercise the var/folders leg, and
+# --prune-unknown-scratch could delete host entries outside the
+# caller's intended root. Fixture: an eligible entry under a
+# configured root's */*/T, and a twin under an unconfigured root.
+VF_ROOT="$TMP_ROOT/vf-root-1865"
+VF_T="$VF_ROOT/ab/cd/T"
+mkdir -p "$VF_T"
+VF_ENTRY="$VF_T/zzvf1865"
+mkdir -p "$VF_ENTRY"
+dd if=/dev/zero of="$VF_ENTRY/blob" bs=1024 count=1536 2>/dev/null
+touch -d '2020-01-02 03:04:05' "$VF_ENTRY"
+VF_OTHER="$TMP_ROOT/vf-other-1865/ef/gh/T"
+mkdir -p "$VF_OTHER"
+VF_OTHER_ENTRY="$VF_OTHER/zzvf1865other"
+mkdir -p "$VF_OTHER_ENTRY"
+dd if=/dev/zero of="$VF_OTHER_ENTRY/blob" bs=1024 count=1536 2>/dev/null
+touch -d '2020-01-02 03:04:05' "$VF_OTHER_ENTRY"
+OUT="$(PATH="$LSOF_STUB_DIR:$PATH" VAR_FOLDERS_ROOT="$VF_ROOT" UNKNOWN_SCRATCH_MIN_MB=1 UNKNOWN_SCRATCH_STALE_DAYS=1 bash "$SCRIPT" --only-unknown-scratch 2>"$TMP_ROOT/err")"; STATUS=$?
+ERR="$(cat "$TMP_ROOT/err")"
+[ "$STATUS" -eq 0 ] || fail "vf-root (#1865): --only-unknown-scratch exited $STATUS (stderr: $ERR)"
+case "$OUT" in
+  *zzvf1865*) echo "ok: vf-root (#1865): --only-unknown-scratch reports the configured root's entry" ;;
+  *) fail "vf-root (#1865): configured root's entry not reported (got: $OUT)" ;;
+esac
+[ -d "$VF_ENTRY" ] || fail "vf-root (#1865): flagged-only run deleted the fixture entry"
+OUT="$(PATH="$LSOF_STUB_DIR:$PATH" VAR_FOLDERS_ROOT="$VF_ROOT" UNKNOWN_SCRATCH_MIN_MB=1 UNKNOWN_SCRATCH_STALE_DAYS=1 bash "$SCRIPT" --only-unknown-scratch --prune-unknown-scratch 2>"$TMP_ROOT/err")"; STATUS=$?
+ERR="$(cat "$TMP_ROOT/err")"
+[ "$STATUS" -eq 0 ] || fail "vf-root prune (#1865): exited $STATUS (stderr: $ERR)"
+[ -d "$VF_ENTRY" ] && fail "vf-root prune (#1865): eligible entry under the configured root survived" || echo "ok: vf-root prune (#1865): eligible entry under the configured root deleted"
+[ -d "$VF_OTHER_ENTRY" ] || fail "vf-root prune (#1865): entry under an UNCONFIGURED root was deleted"
+echo "ok: vf-root prune (#1865): unconfigured root untouched"
+
 # Pytest newest-run guard fires under BSD and GNU stat alike. Both
 # runs are older than PYTEST_KEEP_HOURS, so only the guard keeps the
 # newest (pytest-2). --dry-run makes del() report instead of remove:

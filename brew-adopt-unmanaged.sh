@@ -63,7 +63,27 @@
 set -uo pipefail
 PATH=${BREW_ADOPT_PATH:-/run/current-system/sw/bin:/usr/bin:/bin:/usr/sbin:/sbin}
 
-PRIMARY_USER=${1:?usage: brew-adopt-unmanaged.sh PRIMARY_USER}
+usage() { echo "usage: brew-adopt-unmanaged.sh PRIMARY_USER"; }
+
+case "${1:-}" in
+  -h | --help)
+    usage
+    exit 0
+    ;;
+esac
+case "${1:-}" in
+  -*)
+    usage >&2
+    echo "brew-adopt-unmanaged: unknown argument: $1" >&2
+    exit 2
+    ;;
+esac
+if [ $# -ne 1 ]; then
+  usage >&2
+  echo "brew-adopt-unmanaged: expected exactly one argument (PRIMARY_USER), got $#" >&2
+  exit 2
+fi
+PRIMARY_USER=$1
 BREW=${BREW_ADOPT_BREW:-/opt/homebrew/bin/brew}
 SUDO=${BREW_ADOPT_SUDO:-/usr/bin/sudo}
 PLISTBUDDY=${BREW_ADOPT_PLISTBUDDY:-/usr/libexec/PlistBuddy}

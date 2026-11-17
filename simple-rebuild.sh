@@ -72,6 +72,7 @@ usage="usage: ${0:t} [--no-commit] [--build-only|--activate-only [GENERATION]]"
 # parse time, naming the flags, before any phase runs.
 seen_build=0
 seen_activate=0
+want_help=0
 while (( $# )); do
   case "$1" in
     --build-only)
@@ -93,11 +94,22 @@ while (( $# )); do
       if [[ -n "${2:-}" && "$2" != --* ]]; then generation="$2"; shift; fi
       ;;
     --no-commit)     no_commit=1 ;;
-    -h|--help)       echo "$usage"; exit 0 ;;
-    *) echo "$usage" >&2; exit 2 ;;
+    # -h/--help is recorded, not honored on sight (#1888): the complete
+    # command line is validated first, so a help flag followed by an
+    # unaccounted argument is a usage error naming that argument
+    # (exit 2), not a successful help print. Help is honored below,
+    # after the loop, only when every argument was accounted for --
+    # the same validate-before-help rule as rebuild.sh (#1830).
+    -h|--help)       want_help=1 ;;
+    *) echo "simple-rebuild.sh: unknown argument: $1" >&2; echo "$usage" >&2; exit 2 ;;
   esac
   shift
 done
+
+if (( want_help )); then
+  echo "$usage"
+  exit 0
+fi
 
 # Validate GENERATION whole, here at parse time (#1022), in the shape of
 # the HEALTH_TIMEOUT block below (#880) and branch-cleanup's inactive_days

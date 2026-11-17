@@ -204,7 +204,7 @@ switch:
 # Format all nix files and run tidy
 [group('format')]
 fmt:
-    nixfmt *.nix pkgs/*.nix
+    nix fmt
     nix run .#flake-tidy -- all
 
 # =============================================================================

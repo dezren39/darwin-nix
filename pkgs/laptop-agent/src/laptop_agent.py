@@ -681,7 +681,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _do_GET(self):
         if not self._authed():
-            return self._send(401, {"error": "bad token"})
+            return self._send(401, {"error": "bad token"}, close=True)
         path = urlparse(self.path)
         if path.path == "/health":
             with JOBS_LOCK:
@@ -721,7 +721,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def _do_POST(self):
         if not self._authed():
-            return self._send(401, {"error": "bad token"})
+            # #1911: the request body is never read on this path, so it
+            # would stay on the socket and be parsed as the next request
+            # line. A 401 means the peer is untrusted: close, so the next
+            # request boundary is known (same contract as FramingError).
+            return self._send(401, {"error": "bad token"}, close=True)
         path = urlparse(self.path).path
         if path == "/exec":
             body = self._body()

@@ -228,6 +228,90 @@ class AuthNonAsciiTest(unittest.TestCase):
         self.assertEqual(json.loads(body), {"error": "bad token"})
 
 
+class AuthFailureConnectionTest(unittest.TestCase):
+    """Issue #1911: a 401 must not leave the request body on a live
+    keep-alive connection.
+
+    Oracle: on ONE http.client.HTTPConnection, a wrong-token POST with
+    a body is answered 401 with `Connection: close` and the unchanged
+    {"error": "bad token"} body; the follow-up right-token request on
+    the same connection object is then served normally (the client
+    reconnects to a clean 200) instead of being parsed as a request
+    line and answered with http.server's HTML 400 Bad request syntax.
+    """
+
+    def setUp(self):
+        self.token = "<MASKED_SECRET_002>"
+        with tempfile.NamedTemporaryFile("w", delete=False) as f:
+            f.write(self.token + "\n")
+            self.token_path = f.name
+        self.port = free_port()
+        env = dict(os.environ,
+                   LAPTOP_AGENT_TOKEN_FILE=self.token_path,
+                   LAPTOP_AGENT_HOST="127.0.0.1",
+                   LAPTOP_AGENT_PORT=str(self.port),
+                   LAPTOP_AGENT_STATE=tempfile.mkdtemp())
+        self.proc = subprocess.Popen([sys.executable, str(AGENT)], env=env,
+                                     stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE)
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            try:
+                conn = self._conn()
+                status, _, _ = self._call(conn, "GET", "/health", self.token)
+                conn.close()
+                if status == 200:
+                    return
+            except Exception:
+                time.sleep(0.1)
+        self.tearDown()
+        self.fail("agent did not start")
+
+    def tearDown(self):
+        self.proc.terminate()
+        self.proc.wait(timeout=10)
+        os.unlink(self.token_path)
+
+    def _conn(self):
+        return http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+
+    def _call(self, conn, method, path, token, body=None):
+        headers = {"X-Agent-Token": token,
+                   "Content-Type": "application/json"}
+        data = json.dumps(body).encode() if body is not None else None
+        conn.request(method, path, body=data, headers=headers)
+        r = conn.getresponse()
+        payload = r.read()
+        try:
+            parsed = json.loads(payload) if payload else {}
+        except ValueError:
+            parsed = {}
+        return r.status, r.getheader("Connection"), parsed
+
+    def _assert_401_close_then_ok(self, path, body, ok_statuses):
+        conn = self._conn()
+        status, connection, parsed = self._call(
+            conn, "POST", path, "WRONG-TOKEN", body)
+        self.assertEqual(status, 401, parsed)
+        self.assertEqual(parsed, {"error": "bad token"})
+        self.assertEqual(connection, "close")
+        status, _, parsed = self._call(conn, "POST", path, self.token, body)
+        self.assertIn(status, ok_statuses, parsed)
+        self.assertNotEqual(status, 400, parsed)
+        conn.close()
+        return parsed
+
+    def test_exec_401_closes_and_reused_connection_works(self):
+        parsed = self._assert_401_close_then_ok(
+            "/exec", {"cmds": [{"argv": ["/bin/echo", "hi"]}]}, (200,))
+        self.assertIn("results", parsed)
+
+    def test_jobs_401_closes_and_reused_connection_works(self):
+        parsed = self._assert_401_close_then_ok(
+            "/jobs", {"argv": ["/bin/sh", "-c", "true"]}, (200, 202))
+        self.assertIn("job_id", parsed)
+
+
 class TailFileTest(unittest.TestCase):
     def test_job_public_samples_state_before_reading_spools(self):
         with tempfile.NamedTemporaryFile("w", suffix="-token",

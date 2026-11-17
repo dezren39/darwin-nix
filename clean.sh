@@ -455,6 +455,24 @@ del() {
 # have CMD -- true if runnable. Missing tools are informational, never fatal.
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# dir_has_open_handles <path> -- three-outcome open-handle guard (#1803):
+#   0 = held (lsof printed at least one holder)
+#   1 = not held (lsof ran and reported no holder)
+#   2 = unknown (lsof is unavailable, or failed in a way that is not its
+#       no-match exit) -- callers must fail CLOSED (keep) on unknown: an
+#       lsof that cannot run used to read as "nothing has it open" at
+#       five deletion sites, silently disabling the in-use guard.
+# lsof exits 1 when nothing matches, so nonzero alone is NOT unknown:
+# unknown is decided by the command -v check plus exits other than 0/1.
+dir_has_open_handles() {
+  local path="$1" out rc
+  command -v lsof >/dev/null 2>&1 || return 2
+  out="$(lsof +D "$path" 2>/dev/null)"; rc=$?
+  [ -n "$out" ] && return 0
+  if [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ]; then return 1; fi
+  return 2
+}
+
 # ---------------------------------------------------------------------------
 # Privilege handling
 # ---------------------------------------------------------------------------
@@ -597,7 +615,7 @@ unknown_scratch_is_known() {
   return 1
 }
 sweep_unknown_large_scratch() {
-  local base="$1" entry name size_kb size_mb age_cutoff_min created modified status
+  local base="$1" entry name size_kb size_mb age_cutoff_min created modified status handles_rc
   [ -d "$base" ] || return 0
   age_cutoff_min=$((UNKNOWN_SCRATCH_STALE_DAYS * 1440))
   for entry in "$base"/*; do
@@ -609,7 +627,9 @@ sweep_unknown_large_scratch() {
     size_mb=$((size_kb / 1024))
     [ "$size_mb" -ge "$UNKNOWN_SCRATCH_MIN_MB" ] || continue
     [ -n "$(find "$entry" -maxdepth 0 -mmin "-${age_cutoff_min}" -print 2>/dev/null)" ] && continue  # too fresh
-    [ -n "$(lsof +D "$entry" 2>/dev/null | head -1)" ] && continue  # something has it open
+    dir_has_open_handles "$entry"; handles_rc=$?
+    [ "$handles_rc" -eq 0 ] && continue  # something has it open
+    if [ "$handles_rc" -eq 2 ]; then echo "  keeping (cannot verify open handles; lsof unavailable): ${entry/#$CALLER_USER_HOME/\~}"; continue; fi
     created="$(stat_birth_time "$entry")"
     modified="$(stat_mtime_time "$entry")"
     if [ "$PRUNE_UNKNOWN_SCRATCH" = "1" ]; then
@@ -1336,15 +1356,19 @@ done
 # match costs nothing.
 PG_SCRATCH_STALE_HOURS="${PG_SCRATCH_STALE_HOURS:-8}"
 sweep_ad_hoc_postgres_dirs() {
-  local base="$1" marker pgdir
+  local base="$1" marker pgdir handles_rc
   [ -d "$base" ] || return 0
   while IFS= read -r marker; do
     pgdir="$(dirname "$marker")"
     case "$pgdir" in "$base/opencode"/*) continue ;; esac # owned by the tidy pass, not here
-    if [ -z "$(find "$pgdir" -type f -not -name "$SPOTLIGHT_MARKER" -mmin "-$((PG_SCRATCH_STALE_HOURS * 60))" -print -quit 2>/dev/null)" ] &&
-       [ -z "$(lsof +D "$pgdir" 2>/dev/null | head -1)" ]; then
-      if [ "$DRY_RUN" = "1" ]; then echo "  would remove (postgres data dir, idle >${PG_SCRATCH_STALE_HOURS}h): ${pgdir/#$CALLER_USER_HOME/\~}"
-      else echo "  removing (postgres data dir, idle >${PG_SCRATCH_STALE_HOURS}h): ${pgdir/#$CALLER_USER_HOME/\~}"; del "$pgdir"; fi
+    if [ -z "$(find "$pgdir" -type f -not -name "$SPOTLIGHT_MARKER" -mmin "-$((PG_SCRATCH_STALE_HOURS * 60))" -print -quit 2>/dev/null)" ]; then
+      dir_has_open_handles "$pgdir"; handles_rc=$?
+      if [ "$handles_rc" -eq 2 ]; then
+        echo "  keeping (cannot verify open handles; lsof unavailable): ${pgdir/#$CALLER_USER_HOME/\~}"
+      elif [ "$handles_rc" -eq 1 ]; then
+        if [ "$DRY_RUN" = "1" ]; then echo "  would remove (postgres data dir, idle >${PG_SCRATCH_STALE_HOURS}h): ${pgdir/#$CALLER_USER_HOME/\~}"
+        else echo "  removing (postgres data dir, idle >${PG_SCRATCH_STALE_HOURS}h): ${pgdir/#$CALLER_USER_HOME/\~}"; del "$pgdir"; fi
+      fi
     fi
   done < <(find "$base" -maxdepth 2 -name PG_VERSION -type f 2>/dev/null)
 }
@@ -1507,7 +1531,7 @@ ACTIVE_ARTIFACT_STALE_HOURS="${ACTIVE_ARTIFACT_STALE_HOURS:-8}"
 # bookkeeping file clean.sh itself left behind. Verified against a real
 # worktree's .venv: its only file inside the window was its own marker.
 artifact_is_prunable() {
-  local path="$1"
+  local path="$1" handles_rc
   # Fail closed on a failed freshness scan (#1861): an empty result is
   # only evidence of staleness when find actually ran. Its exit status
   # used to be discarded, so a failed scan (bad path, partial traversal)
@@ -1521,7 +1545,12 @@ artifact_is_prunable() {
     return 1
   fi
   [ -n "$fresh" ] && return 1
-  [ -n "$(lsof +D "$path" 2>/dev/null | head -1)" ] && return 1
+  dir_has_open_handles "$path"; handles_rc=$?
+  [ "$handles_rc" -eq 0 ] && return 1
+  if [ "$handles_rc" -eq 2 ]; then
+    echo "  warning: cannot verify open handles for $path (lsof unavailable); keeping artifact (fail closed)" >&2
+    return 1
+  fi
   return 0
 }
 
@@ -1698,11 +1727,15 @@ while IFS= read -r _owner; do
   while IFS= read -r _marker; do
     _pgdir="$(dirname "$_marker")"
     [ -d "$_pgdir" ] || continue
-    if [ -z "$(find "$_pgdir" -type f -not -name "$SPOTLIGHT_MARKER" -mmin "-$((PG_SCRATCH_STALE_HOURS * 60))" -print -quit 2>/dev/null)" ] &&
-       [ -z "$(lsof +D "$_pgdir" 2>/dev/null | head -1)" ]; then
-      if [ "$DRY_RUN" = "1" ]; then echo "  would remove (postgres data dir in repo, idle >${PG_SCRATCH_STALE_HOURS}h): ${_pgdir/#$CALLER_USER_HOME/\~}"
-      else echo "  removing (postgres data dir in repo, idle >${PG_SCRATCH_STALE_HOURS}h): ${_pgdir/#$CALLER_USER_HOME/\~}"; del "$_pgdir"; fi
-      _repo_pg_removed=$((_repo_pg_removed + 1))
+    if [ -z "$(find "$_pgdir" -type f -not -name "$SPOTLIGHT_MARKER" -mmin "-$((PG_SCRATCH_STALE_HOURS * 60))" -print -quit 2>/dev/null)" ]; then
+      dir_has_open_handles "$_pgdir"; _handles_rc=$?
+      if [ "$_handles_rc" -eq 2 ]; then
+        echo "  keeping (cannot verify open handles; lsof unavailable): ${_pgdir/#$CALLER_USER_HOME/\~}"
+      elif [ "$_handles_rc" -eq 1 ]; then
+        if [ "$DRY_RUN" = "1" ]; then echo "  would remove (postgres data dir in repo, idle >${PG_SCRATCH_STALE_HOURS}h): ${_pgdir/#$CALLER_USER_HOME/\~}"
+        else echo "  removing (postgres data dir in repo, idle >${PG_SCRATCH_STALE_HOURS}h): ${_pgdir/#$CALLER_USER_HOME/\~}"; del "$_pgdir"; fi
+        _repo_pg_removed=$((_repo_pg_removed + 1))
+      fi
     fi
   done < <(find "$_owner" \( -type d \( -name .git -o -name node_modules -o -name .worktrees \) -prune \) -o -name PG_VERSION -type f -print 2>/dev/null)
 done < "$OWNERS_FILE"
@@ -1877,7 +1910,7 @@ tidy_dir_has_recent_file() {
 # of what the dir is named (pgdata, pgm2, heron-once-pg's data dir, ...) or
 # how big it got -- a much more reliable signal than name or size alone.
 tidy_purge_postgres_dirs() {
-  local root="$1" marker pgdir
+  local root="$1" marker pgdir handles_rc
   while IFS= read -r marker; do
     [ -n "$marker" ] || continue
     pgdir="$(dirname "$marker")"
@@ -1886,8 +1919,13 @@ tidy_purge_postgres_dirs() {
     # recent-file gate does not protect an idle-but-running server, which
     # can write nothing for >OPENCODE_TIDY_PROTECT_DAYS while still
     # holding its data dir open.
-    if [ -n "$(lsof +D "$pgdir" 2>/dev/null | head -1)" ]; then
+    dir_has_open_handles "$pgdir"; handles_rc=$?
+    if [ "$handles_rc" -eq 0 ]; then
       echo "  keeping (postgres data dir in use): ${pgdir/#$CALLER_USER_HOME/\~}"
+      continue
+    fi
+    if [ "$handles_rc" -eq 2 ]; then
+      echo "  keeping (cannot verify open handles; lsof unavailable): ${pgdir/#$CALLER_USER_HOME/\~}"
       continue
     fi
     if [ "$DRY_RUN" = "1" ]; then echo "  would remove (postgres data dir): ${pgdir/#$CALLER_USER_HOME/\~}"

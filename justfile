@@ -519,26 +519,7 @@ opencode-db-prune *args:
 # Back up the OpenCode database (APFS clone; instant, safe while it is in use)
 [group('opencode')]
 opencode-db-backup:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    db="$HOME/.local/share/opencode/opencode.db"
-    dest="$HOME/.local/share/opencode/backup/$(date +%Y%m%dT%H%M%S)"
-    mkdir -p "$dest"
-    # BEGIN IMMEDIATE takes SQLite's write lock: no commit lands and the WAL
-    # cannot be reset while it is held. A checkpoint can still copy WAL frames
-    # into the main file between the two clones, which is harmless: the WAL
-    # clone still holds every frame and replays them on open. cp -c is
-    # clonefile(2): atomic, and no extra disk until the files diverge.
-    /usr/bin/sqlite3 "$db" <<SQL
-    .timeout 120000
-    BEGIN IMMEDIATE;
-    .shell /bin/cp -c "$db" "$dest/opencode.db"
-    .shell if [ -f "$db-wal" ]; then /bin/cp -c "$db-wal" "$dest/opencode.db-wal"; fi
-    ROLLBACK;
-    SQL
-    chmod 600 "$dest"/opencode.db*
-    echo "backup: $dest"
-    just --justfile {{ justfile() }} opencode-db-check "$dest/opencode.db"
+    ./opencode-db-backup.sh
 
 # Retention for opencode-db-backup dirs: dry-run by default (lists what
 # would go), pass --apply to delete. Keeps the newest 3 by default.

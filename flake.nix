@@ -757,6 +757,31 @@ rec {
               bash ./opencode-db-backup-prune.test.sh
               touch $out
             '';
+        # #1758: opencode-db-backup.test.sh pins the backup writers
+        # completion proof — a happy-path run publishes exactly one
+        # timestamp dir whose copy carries the WAL-only rows; a failing
+        # clone cp exits non-zero and publishes nothing; a cp that
+        # silently drops the WAL copy is caught by the content check
+        # (live counts recorded under the write lock vs the staged
+        # copy). Self-contained: fixture WAL database only.
+        opencode-db-backup-tests =
+          pkgs.runCommandLocal "opencode-db-backup-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.coreutils
+                pkgs.sqlite
+              ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/opencode-db-backup.sh $src/opencode-db-backup.test.sh $src/opencode-db-backup-prune.sh ./
+              chmod u+w ./opencode-db-backup.sh ./opencode-db-backup.test.sh ./opencode-db-backup-prune.sh
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./opencode-db-backup.test.sh
+              touch $out
+            '';
         # #557: var-folders-clean.test.sh (the #553 test for clean.sh's
         # /private/var/folders sweep) was run by nothing, tested a pasted
         # copy of the loops instead of the shipped logic, and exited 0 on

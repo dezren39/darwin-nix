@@ -732,6 +732,38 @@ for want in tracked staged untracked ignored; do
   esac
 done
 
+# ─── --status fails closed when git cannot answer (#1900) ───
+# The #1917 pins above cover the happy path: every probe answering.
+# status_for() classifies from exit codes, but only 0/1 are answers --
+# a probe that fails outright (ls-files exits 128 on a corrupt index)
+# used to fall through all three probes to `ignored`, and clean.sh
+# deletes `ignored` risky dirs: committed files under a broken index
+# were reported disposable. A failing probe must yield `unknown`
+# (which clean.sh only marks). Control first: the healthy fixture
+# reports `tracked`; after the index is corrupted the same tree must
+# report `unknown`, never `ignored`.
+FAIL_SCAN="$TMP_ROOT/status-fail-scan"
+mkdir -p "$FAIL_SCAN/st-corrupt/vendor"
+printf 'x\n' > "$FAIL_SCAN/st-corrupt/vendor/keep"
+"$status_git" init -q "$FAIL_SCAN/st-corrupt"
+"$status_git" -C "$FAIL_SCAN/st-corrupt" add vendor/keep
+"$status_git" -C "$FAIL_SCAN/st-corrupt" -c user.name=Test -c user.email=test@example.com commit -qm init
+FAIL_SCAN_CANON="$(cd "$FAIL_SCAN" && pwd -P)"
+run --path "$FAIL_SCAN" --find vendor --status
+[ "$STATUS" -eq 0 ] || fail "--find vendor --status over the healthy corrupt-index control exited $STATUS (#1900)"
+case "$OUT" in
+  *"FOUND"$'\t'"risky"$'\t'"tracked"$'\t'"$FAIL_SCAN_CANON/st-corrupt/vendor"*) echo "ok: healthy-index control classifies st-corrupt/vendor as tracked (#1900)" ;;
+  *) fail "healthy-index control did not classify st-corrupt/vendor as tracked (got: $OUT) (#1900)" ;;
+esac
+printf garbage > "$FAIL_SCAN/st-corrupt/.git/index"
+run --path "$FAIL_SCAN" --find vendor --status
+[ "$STATUS" -eq 0 ] || fail "--find vendor --status over the corrupt-index fixture exited $STATUS (#1900)"
+case "$OUT" in
+  *"FOUND"$'\t'"risky"$'\t'"ignored"$'\t'"$FAIL_SCAN_CANON/st-corrupt/vendor"*) fail "corrupt-index fixture classified st-corrupt/vendor as ignored -- clean.sh would delete committed files (#1900)" ;;
+  *"FOUND"$'\t'"risky"$'\t'"unknown"$'\t'"$FAIL_SCAN_CANON/st-corrupt/vendor"*) echo "ok: corrupt-index fixture classifies st-corrupt/vendor as unknown (#1900)" ;;
+  *) fail "corrupt-index fixture did not classify st-corrupt/vendor as unknown (got: $OUT) (#1900)" ;;
+esac
+
 # ─── --user with --path is judged, not silently ignored (#1710) ───
 # --user only resolves SCAN_HOME, which seed_auto() alone consumes;
 # seed_path() never read it, so --path DIR --user USER exited 0 with

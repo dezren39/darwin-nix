@@ -571,6 +571,36 @@ rec {
               bash ./simple-rebuild.test.sh
               touch $out
             '';
+        # #1864: simple-rebuild-staging.test.sh pins simple-rebuild.sh's
+        # scoped staging -- a valid run registers only the new flake
+        # inputs a tracked file references (intent-to-add, removed
+        # before any commit) and never stages unrelated tracked edits
+        # or untracked files, in normal and --no-commit modes. The
+        # suite drives the real script in a disposable repo, with the
+        # nix build invocation redirected to a stub that probes the
+        # flake's view with the real nix (the #1852 precedent).
+        simple-rebuild-staging-tests =
+          pkgs.runCommandLocal "simple-rebuild-staging-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.zsh
+                pkgs.coreutils
+                pkgs.gnugrep
+                pkgs.gawk
+                pkgs.git
+                pkgs.nix
+              ];
+            }
+            ''
+              cp ${./simple-rebuild.sh} simple-rebuild.sh
+              cp ${./simple-rebuild-staging.test.sh} simple-rebuild-staging.test.sh
+              chmod u+w simple-rebuild.sh simple-rebuild-staging.test.sh
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./simple-rebuild-staging.test.sh
+              touch $out
+            '';
         # #1804: install-determinate-nix.test.sh pins
         # install-determinate-nix's argument validation -- extra
         # arguments and flag-shaped hostnames exit 2 naming the

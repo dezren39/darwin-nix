@@ -15,6 +15,14 @@ name: flake packages build
 # matrix job per package, fail-fast off so one broken package never
 # hides another. There is no per-merge build: a broken merge is
 # first built by the next nightly run (or a manual dispatch).
+#
+# Coverage is partitioned by system (#1850, mirroring #1832 in
+# flake-checks-build.yml): the x86_64-linux packages build on
+# ubuntu-latest and the aarch64-darwin packages on macos-14, each
+# list enumerated from the flake for its own system. The mcpx
+# exclusion above applies only to the x86_64-linux list — the
+# aarch64-darwin mcpx output has no other build owner, so the
+# darwin list is the flake's full aarch64-darwin package set.
 
 on:
   schedule:
@@ -39,6 +47,7 @@ jobs:
     timeout-minutes: 10
     outputs:
       packages: ${{ steps.list.outputs.packages }}
+      darwin_packages: ${{ steps.list-darwin.outputs.packages }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -49,6 +58,14 @@ jobs:
         run: |
           set -euo pipefail
           packages="$(nix eval --json .#packages.x86_64-linux --apply 'attrs: builtins.filter (name: name != "mcpx") (builtins.attrNames attrs)')"
+          printf 'Packages: %s\n' "$packages"
+          printf 'packages=%s\n' "$packages" >> "$GITHUB_OUTPUT"
+
+      - name: List aarch64-darwin packages
+        id: list-darwin
+        run: |
+          set -euo pipefail
+          packages="$(nix eval --json .#packages.aarch64-darwin --apply 'attrs: builtins.attrNames attrs')"
           printf 'Packages: %s\n' "$packages"
           printf 'packages=%s\n' "$packages" >> "$GITHUB_OUTPUT"
 
@@ -70,3 +87,22 @@ jobs:
         env:
           PACKAGE: ${{ matrix.package }}
         run: nix build ".#packages.x86_64-linux.${PACKAGE}" --print-build-logs
+
+  nix-build-darwin:
+    name: nix build (aarch64-darwin) ${{ matrix.package }}
+    needs: list-packages
+    runs-on: macos-14
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJSON(needs.list-packages.outputs.darwin_packages) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+
+      - name: Nix build
+        env:
+          PACKAGE: ${{ matrix.package }}
+        run: nix build ".#packages.aarch64-darwin.${PACKAGE}" --print-build-logs

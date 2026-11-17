@@ -281,7 +281,17 @@ LINK_GIT_OUTPUT_DIR := env_var_or_default("LINK_GIT_OUTPUT_DIR", home_directory(
 # Symlink ~/git/* into ~/ (add-only unless --force)
 [group('symlinks')]
 link-git-dirs *args:
-    ./symlinker.sh --input-dir "{{LINK_GIT_INPUT_DIR}}" --output-dir "{{LINK_GIT_OUTPUT_DIR}}" {{args}}
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # #1836: symlinker.sh requires Bash 4+ (declare -A); stock macOS
+    # /bin/bash is 3.2 and the script's env-bash shebang resolves to it.
+    # Resolve a modern Bash explicitly instead of relying on the shebang.
+    bash_bin=""
+    for cand in "${SYMLINKER_BASH:-}" /opt/homebrew/bin/bash /run/current-system/sw/bin/bash "$HOME/.nix-profile/bin/bash" "$(command -v bash || true)"; do
+        if [[ -n "$cand" && -x "$cand" ]] && "$cand" -c '[[ ${BASH_VERSINFO[0]} -ge 4 ]]' 2>/dev/null; then bash_bin="$cand"; break; fi
+    done
+    if [[ -z "$bash_bin" ]]; then echo "link-git-dirs: no Bash 4 or newer found — install Homebrew bash, or run the packaged wrapper: nix run .#symlinker" >&2; exit 2; fi
+    exec "$bash_bin" ./symlinker.sh --input-dir "{{LINK_GIT_INPUT_DIR}}" --output-dir "{{LINK_GIT_OUTPUT_DIR}}" {{args}}
 
 alias link-git     := link-git-dirs
 alias link-home    := link-git-dirs

@@ -809,11 +809,21 @@ if [ -n "$FIND_SPEC" ]; then
     # --error-unmatch and --quiet answer "did anything match?" themselves,
     # so each test is one process instead of a git+head pipeline, and the
     # match list is never read into memory. Exit 1 means "no match" and,
-    # as before, falls through to the next test.
-    if git_q -C "$repo" ls-files --error-unmatch -- "$d" >/dev/null 2>&1; then FOUND_STATUS=tracked; return; fi
-    git_q -C "$repo" diff --cached --quiet -- "$d" 2>/dev/null
-    if [ "$?" -eq 1 ]; then FOUND_STATUS=staged; return; fi
-    if git_q -C "$repo" ls-files --others --exclude-standard --error-unmatch -- "$d" >/dev/null 2>&1; then FOUND_STATUS=untracked; return; fi
+    # as before, falls through to the next test. Any higher exit is git
+    # failing outright (128 on a corrupt index, an unreadable object
+    # store, a safe.directory refusal): that is "git could not answer",
+    # not "no match", so the verdict is unknown -- never ignored, which
+    # clean.sh treats as proof a risky dir is disposable (#1900).
+    local rc
+    git_q -C "$repo" ls-files --error-unmatch -- "$d" >/dev/null 2>&1; rc=$?
+    if [ "$rc" -eq 0 ]; then FOUND_STATUS=tracked; return; fi
+    if [ "$rc" -gt 1 ]; then FOUND_STATUS=unknown; return; fi
+    git_q -C "$repo" diff --cached --quiet -- "$d" 2>/dev/null; rc=$?
+    if [ "$rc" -eq 1 ]; then FOUND_STATUS=staged; return; fi
+    if [ "$rc" -gt 1 ]; then FOUND_STATUS=unknown; return; fi
+    git_q -C "$repo" ls-files --others --exclude-standard --error-unmatch -- "$d" >/dev/null 2>&1; rc=$?
+    if [ "$rc" -eq 0 ]; then FOUND_STATUS=untracked; return; fi
+    if [ "$rc" -gt 1 ]; then FOUND_STATUS=unknown; return; fi
     FOUND_STATUS=ignored
   }
 

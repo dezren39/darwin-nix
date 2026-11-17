@@ -649,6 +649,124 @@ class JobSlotsTest(unittest.TestCase):
             shutil.rmtree(state_dir, ignore_errors=True)
 
 
+
+class ExecSpoolFailureTest(unittest.TestCase):
+    """Issue #1923: POST /exec spool-dir creation OSError escapes run_one.
+
+    Oracle: when tempfile.mkdtemp under STATE_DIR/exec raises OSError,
+    run_one returns the same per-command error entry shape as a Popen
+    failure ({"exit": None, "error": ...}), so POST /exec answers 200
+    JSON instead of dropping the connection, and results of commands
+    that already ran in the same batch are preserved.
+    """
+
+    def test_run_one_spool_oserror_returns_error_entry(self):
+        with tempfile.NamedTemporaryFile("w", delete=False) as t:
+            t.write("exec-spool-test-token\n")
+            token_path = t.name
+        os.environ.setdefault("LAPTOP_AGENT_TOKEN_FILE", token_path)
+        sys.path.insert(0, str(AGENT.parent))
+        import laptop_agent as la
+        with tempfile.TemporaryDirectory() as td:
+            good = Path(td) / "good"
+            (good / "exec").mkdir(parents=True)
+            blocker = Path(td) / "blocker"
+            blocker.write_text("not a directory")
+            spec = {"argv": [sys.executable, "-c", "print(12345)"]}
+            with patch.object(la, "STATE_DIR", good):
+                ok = la.run_one(spec, 10)
+            self.assertEqual(ok["exit"], 0, ok)
+            self.assertIn("12345", ok["stdout"])
+            # STATE_DIR is now a regular file: mkdtemp(dir=STATE_DIR/exec)
+            # raises NotADirectoryError, an OSError subclass.
+            with patch.object(la, "STATE_DIR", blocker):
+                # Batch shape of _do_POST: first cmd ran under good state,
+                # second hits the spool failure; both entries survive.
+                results = [ok, la.run_one(spec, 10)]
+            self.assertEqual(len(results), 2)
+            self.assertEqual(results[0]["exit"], 0)
+            self.assertIsNone(results[1]["exit"])
+            self.assertIn("error", results[1])
+            self.assertIn("NotADirectoryError", results[1]["error"])
+            self.assertEqual(results[1]["stdout"], "")
+
+    def test_exec_spool_failure_returns_200_json_not_dropped(self):
+        token = "exec-spool-failure-test-token"
+        with tempfile.NamedTemporaryFile("w", delete=False) as f:
+            f.write(token + "\n")
+            token_path = f.name
+        state_dir = tempfile.mkdtemp()
+        port = free_port()
+        env = dict(os.environ,
+                   LAPTOP_AGENT_TOKEN_FILE=token_path,
+                   LAPTOP_AGENT_HOST="127.0.0.1",
+                   LAPTOP_AGENT_PORT=str(port),
+                   LAPTOP_AGENT_STATE=state_dir)
+        proc = subprocess.Popen([sys.executable, str(AGENT)], env=env,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE)
+        headers = {"X-Agent-Token": token,
+                   "Content-Type": "application/json"}
+
+        def call(method, path, body=None):
+            data = json.dumps(body).encode() if body is not None else None
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}{path}", data=data,
+                headers=headers, method=method)
+            try:
+                with urllib.request.urlopen(req, timeout=20) as r:
+                    return r.status, json.loads(r.read())
+            except urllib.error.HTTPError as e:
+                with e:
+                    return e.code, json.loads(e.read())
+
+        try:
+            deadline = time.time() + 10
+            while True:
+                try:
+                    status, body = call("GET", "/health")
+                    if status == 200 and body["ok"]:
+                        break
+                except Exception:
+                    if time.time() > deadline:
+                        raise
+                    time.sleep(0.1)
+
+            # Replace the initialized exec spool parent after startup:
+            # mkdtemp now fails with ENOTDIR for every command.
+            exec_dir = Path(state_dir) / "exec"
+            exec_dir.rmdir()
+            exec_dir.write_text("not a directory")
+            status, body = call("POST", "/exec", {
+                "cmds": [{"argv": [sys.executable, "-c", "pass"]},
+                         {"argv": [sys.executable, "-c", "pass"]}]})
+            # Before the fix this POST got an empty reply (dropped
+            # connection); urlopen would raise instead of returning.
+            self.assertEqual(status, 200, body)
+            self.assertEqual(len(body["results"]), 2)
+            for entry in body["results"]:
+                self.assertIsNone(entry["exit"], entry)
+                self.assertIn("error", entry)
+
+            # Daemon still healthy, and /exec recovers once the spool
+            # parent is a directory again.
+            status, body = call("GET", "/health")
+            self.assertEqual(status, 200, body)
+            exec_dir.unlink()
+            exec_dir.mkdir()
+            status, body = call("POST", "/exec", {
+                "cmds": [{"argv": [sys.executable, "-c", "pass"]}]})
+            self.assertEqual(status, 200, body)
+            self.assertEqual(body["results"][0]["exit"], 0, body)
+        finally:
+            proc.terminate()
+            proc.wait(timeout=10)
+            proc.stdout.close()
+            proc.stderr.close()
+            os.unlink(token_path)
+            shutil.rmtree(state_dir, ignore_errors=True)
+
+
 class MalformedRequestTest(unittest.TestCase):
     """Issue #1502: malformed input returns 400 JSON, never a drop.
 

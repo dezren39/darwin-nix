@@ -679,7 +679,7 @@ run_tmpdir_sweep() {
 if [ "$ONLY_UNKNOWN_SCRATCH" = "1" ]; then
   echo "🗒️  --only-unknown-scratch: running just the name-blind catch-all"
   sweep_unknown_large_scratch "$CALLER_USER_HOME/.local/share/opencode/tmp"
-  for _vf_t in /private/var/folders/*/*/T; do
+  for _vf_t in "$VAR_FOLDERS_ROOT"/*/*/T; do
     [ -d "$_vf_t" ] || continue
     sweep_unknown_large_scratch "$_vf_t"
   done
@@ -1346,7 +1346,7 @@ done
 # earlier (scope-independent, alongside SHORT_SCRATCH_GLOBS) so
 # --only-unknown-scratch can call them without running anything above first.
 sweep_unknown_large_scratch "$CALLER_USER_HOME/.local/share/opencode/tmp"
-for _vf_t in /private/var/folders/*/*/T; do
+for _vf_t in "$VAR_FOLDERS_ROOT"/*/*/T; do
   [ -d "$_vf_t" ] || continue
   sweep_unknown_large_scratch "$_vf_t"
 done

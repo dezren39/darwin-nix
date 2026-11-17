@@ -1508,7 +1508,19 @@ ACTIVE_ARTIFACT_STALE_HOURS="${ACTIVE_ARTIFACT_STALE_HOURS:-8}"
 # worktree's .venv: its only file inside the window was its own marker.
 artifact_is_prunable() {
   local path="$1"
-  [ -n "$(find "$path" -type f -not -name "$SPOTLIGHT_MARKER" -mmin "-$((ACTIVE_ARTIFACT_STALE_HOURS * 60))" -print -quit 2>/dev/null)" ] && return 1
+  # Fail closed on a failed freshness scan (#1861): an empty result is
+  # only evidence of staleness when find actually ran. Its exit status
+  # used to be discarded, so a failed scan (bad path, partial traversal)
+  # read as "no fresh files" and the caller deleted the artifact. Same
+  # fail-closed shape as the #1853 scratch sweep. (Plain assignment, not
+  # local: local would mask the substitution exit status.)
+  local fresh
+  fresh="$(find "$path" -type f -not -name "$SPOTLIGHT_MARKER" -mmin "-$((ACTIVE_ARTIFACT_STALE_HOURS * 60))" -print -quit 2>/dev/null)"
+  if [ $? -ne 0 ]; then
+    echo "  warning: freshness scan failed for $path; keeping artifact (fail closed)" >&2
+    return 1
+  fi
+  [ -n "$fresh" ] && return 1
   [ -n "$(lsof +D "$path" 2>/dev/null | head -1)" ] && return 1
   return 0
 }

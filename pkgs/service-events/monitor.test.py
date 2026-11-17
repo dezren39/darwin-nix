@@ -71,6 +71,35 @@ def _rotate_probes():
         with open(plain + ".1") as fh:
             check("rotate normal log: .1 holds old contents", fh.read() == payload)
 
+        # #1833: an append landing after the copy completes but before
+        # truncation must survive in the rotated file, not vanish from
+        # both files. Deterministic: wrap shutil.copyfile so the marker
+        # is appended (O_APPEND, via "a") the instant the copy returns.
+        raced = os.path.join(d, "raced.log")
+        with open(raced, "w") as fh:
+            fh.write(payload)
+        marker = "CONCURRENT-APPEND\n"
+        real_copyfile = _event.shutil.copyfile
+
+        def copy_then_append(src, dst):
+            real_copyfile(src, dst)
+            with open(src, "a") as fh:
+                fh.write(marker)
+
+        _event.shutil.copyfile = copy_then_append
+        try:
+            rotated = _event.rotate(raced, 100, 3, copy_truncate=True)
+        finally:
+            _event.shutil.copyfile = real_copyfile
+        check(
+            "rotate raced append: returns archived size",
+            rotated == len(payload) + len(marker),
+            f"got {rotated}",
+        )
+        check("rotate raced append: original emptied", os.path.getsize(raced) == 0)
+        with open(raced + ".1") as fh:
+            check("rotate raced append: marker preserved in .1", fh.read() == payload + marker)
+
         # Symlinked .1 slot: the slot link is replaced, its target untouched.
         plain2 = os.path.join(d, "plain2.log")
         with open(plain2, "w") as fh:

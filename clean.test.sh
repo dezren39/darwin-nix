@@ -236,6 +236,10 @@ esac
 REAL_STAT="$(command -v stat)"
 SHIM_DIR="$TMP_ROOT/bsd-shim"
 mkdir -p "$SHIM_DIR"
+LSOF_STUB_DIR="$TMP_ROOT/lsof-stub"
+mkdir -p "$LSOF_STUB_DIR"
+printf '#!/bin/sh\nexit 1\n' > "$LSOF_STUB_DIR/lsof"
+chmod +x "$LSOF_STUB_DIR/lsof"
 # Executed by name via PATH, so the shebang must name a real interpreter: /usr/bin/env does not exist in the nix build sandbox (#1099). Resolved bash works in both sandbox and direct runs.
 echo "#!$(command -v bash)" > "$SHIM_DIR/stat"
 cat >> "$SHIM_DIR/stat" <<'SHIM_EOF'
@@ -282,9 +286,9 @@ dd if=/dev/zero of="$UENTRY/blob" bs=1024 count=1536 2>/dev/null
 touch -d '2020-01-02 03:04:05' "$UENTRY"
 for mode in bsd gnu; do
   if [ "$mode" = "bsd" ]; then
-    OUT="$(REAL_STAT="$REAL_STAT" PATH="$SHIM_DIR:$PATH" UNKNOWN_SCRATCH_MIN_MB=1 UNKNOWN_SCRATCH_STALE_DAYS=1 bash "$SCRIPT" --only-unknown-scratch 2>"$TMP_ROOT/err")"; STATUS=$?
+    OUT="$(REAL_STAT="$REAL_STAT" PATH="$LSOF_STUB_DIR:$SHIM_DIR:$PATH" UNKNOWN_SCRATCH_MIN_MB=1 UNKNOWN_SCRATCH_STALE_DAYS=1 bash "$SCRIPT" --only-unknown-scratch 2>"$TMP_ROOT/err")"; STATUS=$?
   else
-    OUT="$(UNKNOWN_SCRATCH_MIN_MB=1 UNKNOWN_SCRATCH_STALE_DAYS=1 bash "$SCRIPT" --only-unknown-scratch 2>"$TMP_ROOT/err")"; STATUS=$?
+    OUT="$(PATH="$LSOF_STUB_DIR:$PATH" UNKNOWN_SCRATCH_MIN_MB=1 UNKNOWN_SCRATCH_STALE_DAYS=1 bash "$SCRIPT" --only-unknown-scratch 2>"$TMP_ROOT/err")"; STATUS=$?
   fi
   ERR="$(cat "$TMP_ROOT/err")"
   [ "$STATUS" -eq 0 ] || fail "unknown-scratch ($mode stat) exited $STATUS (stderr: $ERR)"
@@ -1015,8 +1019,11 @@ mkdir -p "$AP_DIR/bin-fail" "$AP_DIR/bin-ok" "$AP_DIR/bin-open" \
   "$AP_DIR/stale/node_modules" "$AP_DIR/fresh/node_modules"
 touch -t 200001010000 "$AP_DIR/stale/node_modules/pkg.js"
 touch "$AP_DIR/fresh/node_modules/pkg.js"
-sed -n '/^artifact_is_prunable() {/,/^}/p' "$SCRIPT" > "$AP_DIR/fn.sh"
+{ sed -n '/^dir_has_open_handles() {/,/^}/p' "$SCRIPT"
+  sed -n '/^artifact_is_prunable() {/,/^}/p' "$SCRIPT"; } > "$AP_DIR/fn.sh"
 [ -s "$AP_DIR/fn.sh" ] || fail "could not extract artifact_is_prunable from clean.sh"
+grep -q 'dir_has_open_handles' "$AP_DIR/fn.sh" \
+  || fail "could not extract dir_has_open_handles from clean.sh (#1803)"
 grep -q 'freshness scan failed' "$AP_DIR/fn.sh" \
   || fail "extracted artifact_is_prunable has no fail-closed scan guard to test"
 SPOTLIGHT_MARKER=".metadata_never_index"
@@ -1081,6 +1088,89 @@ else
 fi
 PATH="$AP_OLD_PATH"
 rm -rf "$AP_DIR"
+
+# ─── #1803: postgres sweep fails closed when lsof cannot run ──────
+# sweep_ad_hoc_postgres_dirs read empty lsof output as "not held", so
+# an lsof that never ran (missing from PATH, or erroring) silently
+# disabled the in-use guard and stale-looking LIVE postgres data dirs
+# were deleted. Extract the real sweep + its dir_has_open_handles
+# helper and drive four PATH-stub scenarios against a stale PG_VERSION
+# fixture. Oracle: the del recorder + the "cannot verify" note --
+# missing/erroring lsof keeps, a holder keeps, a working lsof with no
+# holder still removes. Mutation check: reverting the sweep to the raw
+# lsof test makes the missing/erroring cases record a deletion.
+PG_DIR="$TMP_ROOT/lsof-fail-closed"
+mkdir -p "$PG_DIR/base/pgdata" "$PG_DIR/bin-missing" \
+  "$PG_DIR/bin-error" "$PG_DIR/bin-held" "$PG_DIR/bin-idle"
+touch "$PG_DIR/base/pgdata/PG_VERSION"
+touch -t 200001010000 "$PG_DIR/base/pgdata/PG_VERSION"
+{ sed -n '/^dir_has_open_handles() {/,/^}/p' "$SCRIPT"
+  sed -n '/^sweep_ad_hoc_postgres_dirs() {/,/^}/p' "$SCRIPT"; } > "$PG_DIR/fn.sh"
+grep -q 'sweep_ad_hoc_postgres_dirs' "$PG_DIR/fn.sh" \
+  || fail "could not extract sweep_ad_hoc_postgres_dirs from clean.sh (#1803)"
+grep -q 'dir_has_open_handles' "$PG_DIR/fn.sh" \
+  || fail "extracted sweep has no dir_has_open_handles helper to test (#1803)"
+# bin-missing gets the real find/dirname and NO lsof at all.
+ln -s "$(command -v find)" "$PG_DIR/bin-missing/find"
+ln -s "$(command -v dirname)" "$PG_DIR/bin-missing/dirname"
+cat > "$PG_DIR/bin-error/lsof" <<'STUB'
+#!/bin/sh
+exit 2
+STUB
+cat > "$PG_DIR/bin-held/lsof" <<'STUB'
+#!/bin/sh
+echo "postgres 4242 user 9r DIR 1,5 0 0 /fixture"
+exit 0
+STUB
+cat > "$PG_DIR/bin-idle/lsof" <<'STUB'
+#!/bin/sh
+exit 1
+STUB
+chmod +x "$PG_DIR/bin-error/lsof" "$PG_DIR/bin-held/lsof" "$PG_DIR/bin-idle/lsof"
+
+pg_run() { # pg_run <PATH> -- runs the extracted sweep in a subshell
+  (
+    # shellcheck disable=SC2034 # consumed by the sourced sweep
+    DRY_RUN=0; PG_SCRATCH_STALE_HOURS=8
+    # shellcheck disable=SC2034 # consumed by the sourced sweep
+    SPOTLIGHT_MARKER=".metadata_never_index"; CALLER_USER_HOME="$HOME"
+    PATH="$1"
+    del() { printf '%s\n' "$1" >> "$PG_DIR/deleted"; }
+    . "$PG_DIR/fn.sh"
+    sweep_ad_hoc_postgres_dirs "$PG_DIR/base"
+  )
+}
+
+: > "$PG_DIR/deleted"
+OUT="$(pg_run "$PG_DIR/bin-missing" 2>&1 || true)"
+[ ! -s "$PG_DIR/deleted" ] \
+  || fail "lsof missing: postgres sweep deleted a data dir it could not verify (#1803)"
+case "$OUT" in
+  *"keeping (cannot verify open handles; lsof unavailable)"*) echo "ok: lsof missing keeps the postgres data dir with a cannot-verify note" ;;
+  *) fail "lsof missing: no cannot-verify note (got: $OUT)" ;;
+esac
+
+: > "$PG_DIR/deleted"
+OUT="$(pg_run "$PG_DIR/bin-error:$PATH" 2>&1 || true)"
+[ ! -s "$PG_DIR/deleted" ] \
+  || fail "lsof erroring: postgres sweep deleted a data dir it could not verify (#1803)"
+case "$OUT" in
+  *"keeping (cannot verify open handles; lsof unavailable)"*) echo "ok: lsof erroring keeps the postgres data dir with a cannot-verify note" ;;
+  *) fail "lsof erroring: no cannot-verify note (got: $OUT)" ;;
+esac
+
+: > "$PG_DIR/deleted"
+OUT="$(pg_run "$PG_DIR/bin-held:$PATH" 2>&1 || true)"
+[ ! -s "$PG_DIR/deleted" ] \
+  || fail "lsof reporting a holder: postgres sweep deleted a held data dir (#1803)"
+echo "ok: lsof reporting a holder keeps the postgres data dir"
+
+: > "$PG_DIR/deleted"
+OUT="$(pg_run "$PG_DIR/bin-idle:$PATH" 2>&1 || true)"
+grep -q "^$PG_DIR/base/pgdata$" "$PG_DIR/deleted" \
+  || fail "working lsof with no holder: postgres sweep no longer removes an idle data dir (deleted: $(cat "$PG_DIR/deleted"); out: $OUT)"
+echo "ok: working lsof with no holder still removes the idle postgres data dir"
+rm -rf "$PG_DIR"
 
 # ─── #1904: del() must not skip dangling symlinks ─────────────────────
 # del() gated every deletion on [ -e "$p" ], which is false for a
@@ -1161,6 +1251,12 @@ for fn in sweep_unknown_large_scratch sweep_short_lived_scratch \
   fi
 done
 sed -n '/^del() {/,/^}/p' "$SCRIPT" > "$SW_DIR/del.sh"
+awk '/^dir_has_open_handles\(\) \{/,/^\}/' "$SCRIPT" > "$SW_DIR/dir_has_open_handles.sh"
+grep -q 'dir_has_open_handles' "$SW_DIR/dir_has_open_handles.sh" \
+  || fail "could not extract dir_has_open_handles from clean.sh (#1803)"
+mkdir -p "$SW_DIR/no-holder-bin"
+printf '#!/bin/sh\nexit 1\n' > "$SW_DIR/no-holder-bin/lsof"
+chmod +x "$SW_DIR/no-holder-bin/lsof"
 
 # sweep_short_lived_scratch: a stale dangling link matching a scratch
 # glob is removed on a real run; a fresh one is kept by the age gate.
@@ -1229,7 +1325,9 @@ sed -n '/^del() {/,/^}/p' "$SCRIPT" > "$SW_DIR/del.sh"
   unknown_scratch_is_known() { return 1; }
   stat_birth_time() { echo unknown; }
   stat_mtime_time() { echo unknown; }
+  PATH="$SW_DIR/no-holder-bin:$PATH"
   . "$SW_DIR/del.sh"
+  . "$SW_DIR/dir_has_open_handles.sh"
   . "$SW_DIR/sweep_unknown_large_scratch.sh"
   mkdir -p "$SW_DIR/unknown"
   ln -s "$SW_DIR/no-such-target" "$SW_DIR/unknown/mystery-link"

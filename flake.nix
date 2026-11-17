@@ -1091,6 +1091,28 @@ rec {
               bash ./opencode-tmp-guard.test.sh
               touch $out
             '';
+        # #1828: context7-login must scope its success check to Context7's
+        # own token file (md5 of the server URL), not any recent *token*
+        # file under ~/.mcp-auth. The test extracts the real predicate
+        # from the justfile and drives it against fixture auth dirs.
+        context7-login-tests =
+          pkgs.runCommandLocal "context7-login-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.coreutils
+                pkgs.findutils
+                pkgs.gnugrep
+                pkgs.gnused
+              ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/justfile $src/context7-login.test.sh ./
+              chmod u+w ./context7-login.test.sh
+              bash ./context7-login.test.sh
+              touch $out
+            '';
         # #1432: exercise the real OpenChamber deploy activation body with a
         # missing-after-poll password, unchanged-password control, and real
         # password-rotation fixture. The missing path must fail before key

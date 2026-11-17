@@ -35,17 +35,29 @@ context7-login:
     bin=/run/current-system/sw/bin/mcp-remote
     [ -x "$bin" ] || { echo "mcp-remote missing; it comes from pkgs/npm-mcp-servers via just switch" >&2; exit 1; }
     auth="$HOME/.mcp-auth"
+    # mcp-remote stores each server's tokens in ~/.mcp-auth/mcp-remote-v1/
+    # under an MD5 hash of the server URL (docs/mcp.md: the URL is the
+    # identity). Scope the success check below to Context7's own token
+    # file: a recent token for any other server must not read as a
+    # Context7 sign-in (#1828).
+    url="https://mcp.context7.com/mcp"
+    if command -v md5sum >/dev/null 2>&1; then
+        url_hash=$(printf %s "$url" | md5sum | cut -d ' ' -f 1)
+    else
+        url_hash=$(md5 -q -s "$url")
+    fi
+    token_name="${url_hash}_tokens.json"
     echo "Starting mcp-remote; a browser window will open for Context7 (Clerk)."
     echo "Complete the sign-in, then this returns automatically."
     # mcp-remote is a stdio MCP server: it exits the moment stdin closes, which
     # would abort the OAuth callback. Hold stdin open with a FIFO instead.
     fifo=$(mktemp -u); mkfifo "$fifo"
     exec 3<>"$fifo"; rm -f "$fifo"
-    "$bin" https://mcp.context7.com/mcp <&3 >/dev/null 2>&1 &
+    "$bin" "$url" <&3 >/dev/null 2>&1 &
     pid=$!
     trap 'kill "$pid" 2>/dev/null || true; exec 3>&-' EXIT
     for _ in $(seq 1 120); do
-        if find "$auth" -name '*token*' -newermt '-10 minutes' 2>/dev/null | grep -q .; then
+        if find "$auth" -name "$token_name" -newermt '-10 minutes' 2>/dev/null | grep -q .; then
             echo "Authenticated. Credentials cached under $auth."
             echo "Pick it up now with: mcpx restart context7"
             exit 0

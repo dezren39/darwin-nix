@@ -365,6 +365,43 @@ grep -q "missing Odd|Name.app" <<<"$out_v2" || fail "V: absent delimiter-named a
 grep -q "brew reinstall --cask alpha" <<<"$out_v2" || fail "V: alpha not listed as would-reinstall when its delimiter-named app is absent"
 [[ $failures -eq $start ]] && ok "V: absent Odd|Name.app is broken, naming the whole app"
 
+# ─── Bash 3.2 compatibility (#1886) ────
+# brew-repair targets stock macOS /bin/bash 3.2, but used the Bash 4
+# mapfile builtin and declare -A associative arrays. Two guards pin
+# the replacement (the #1834 shape): a static scan rejects Bash 4-only
+# constructs in the script, and a runtime run under a BASH_ENV mask
+# that makes mapfile/readarray fail exercises the read loop and the
+# parallel-array token maps (rename scenario: both maps and the seen
+# list all carry the verdict).
+start=$failures
+BREW_REPAIR_SCAN_PATTERN='(^|[[:space:];])mapfile[[:space:]]|(^|[[:space:];])readarray[[:space:]]|declare +-[a-zA-Z]*[Ag]([[:space:]]|$)|(^|[[:space:];])(local|declare)[[:space:]]+-[a-zA-Z]*n([[:space:]]|=|$)'
+if grep -nE "$BREW_REPAIR_SCAN_PATTERN" "$SCRIPT" > "$TMP_ROOT/bash4-scan.out"; then
+  fail "W: Bash 4-only construct(s) in brew-repair.sh: $(cat "$TMP_ROOT/bash4-scan.out")"
+else
+  ok "W: no Bash 4-only constructs in brew-repair.sh (#1886)"
+fi
+printf 'mapfile -t X < f\ndeclare -A M\n' > "$TMP_ROOT/bash4-probe.sh"
+if grep -qE "$BREW_REPAIR_SCAN_PATTERN" "$TMP_ROOT/bash4-probe.sh"; then
+  ok "W: Bash 4 scan catches mapfile and declare -A probes (#1886)"
+else
+  fail "W: Bash 4 scan does not catch mapfile/declare -A probes (#1886)"
+fi
+cat > "$TMP_ROOT/no-bash4.bash" <<'EOF'
+mapfile() {
+  echo "mapfile is unavailable in this compatibility harness" >&2
+  return 127
+}
+readarray() {
+  echo "readarray is unavailable in this compatibility harness" >&2
+  return 127
+}
+EOF
+out_w="$(BASH_ENV="$TMP_ROOT/no-bash4.bash" BREW_STUB_MODE=rename run_brew_repair -n)"
+rc_w=$?
+[[ $rc_w -eq 0 ]] || fail "W: masked rename run exited $rc_w"
+grep -q "All cask apps are healthy!" <<<"$out_w" || fail "W: masked rename run lost the healthy verdict"
+[[ $failures -eq $start ]] && ok "W: rename scenario passes with Bash 4 builtins masked (#1886)"
+
 if [[ $failures -gt 0 ]]; then
   echo "$failures failure(s)" >&2
   exit 1

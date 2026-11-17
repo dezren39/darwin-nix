@@ -38,6 +38,7 @@ import os
 import shutil
 import socket
 import sys
+import tempfile
 
 HOME = os.path.expanduser("~")
 DRY_RUN = "--dry-run" in sys.argv
@@ -188,9 +189,21 @@ def ensure_browser(name, user_data_dir):
 
     dest = os.path.realpath(local_state) if os.path.islink(local_state) else local_state
     dest_dir = os.path.dirname(dest)
-    tmp = os.path.join(dest_dir, f".{os.path.basename(dest)}.browser-remote-debug.tmp")
     encoded = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # Unique temp file per invocation (#1880, as in mcp-clients.py
+    # #1844): a deterministic sibling name collides when two
+    # invocations write the same Local State concurrently (overlapping
+    # Home Manager activations, or a manual run during a switch) --
+    # one writer renames the shared temp path and the other then fails
+    # on a file it no longer owns, reporting a successful configuration
+    # as failed. mkstemp gives each writer its own temp file in the
+    # destination directory (mode 0600, as before), and the cleanup
+    # below only ever unlinks this writer's own path.
+    fd, tmp = tempfile.mkstemp(
+        prefix=f".{os.path.basename(dest)}.browser-remote-debug-",
+        suffix=".tmp",
+        dir=dest_dir or ".",
+    )
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(encoded)

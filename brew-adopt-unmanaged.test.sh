@@ -227,7 +227,33 @@ check "onedrive unreadable: diagnostic names the plist" out_has "could not be re
 check "onedrive unreadable: plist path named" out_has "OneDrive.app/Contents/Info.plist"
 check "onedrive unreadable: no bundle handoff logged" out_has -v "brew bundle will install the vendored pkg"
 
-# 10. No apps at all (fresh machine): both skip cleanly.
+# 10. OneDrive present, installed version known, but the vendored cask
+# version is unreadable: fail closed (#1899, distinct from test 9's
+# installed-version-unknown). Two shapes: file missing, and file present
+# with no version stanza.
+reset_state
+echo drewry.pope >"$tmp/state/chrome_owner"
+touch "$tmp/state/receipt_google-chrome"
+rm "$tmp/taps/dezren39/homebrew-local/Casks/onedrive.rb"
+run
+check "onedrive vendored missing: exit 1" test $rc -eq 1
+check "onedrive vendored missing: diagnostic names the vendored file" out_has "vendored cask version could not be read"
+check "onedrive vendored missing: remedy printed" out_has "restore or fix homebrew-local/Casks/onedrive.rb"
+check "onedrive vendored missing: no bundle handoff logged" out_has -v "brew bundle will install the vendored pkg"
+
+reset_state
+echo drewry.pope >"$tmp/state/chrome_owner"
+touch "$tmp/state/receipt_google-chrome"
+cat >"$tmp/taps/dezren39/homebrew-local/Casks/onedrive.rb" <<'RB'
+cask "onedrive" do
+end
+RB
+run
+check "onedrive vendored unparsable: exit 1" test $rc -eq 1
+check "onedrive vendored unparsable: diagnostic names the vendored file" out_has "vendored cask version could not be read"
+check "onedrive vendored unparsable: no bundle handoff logged" out_has -v "brew bundle will install the vendored pkg"
+
+# 11. No apps at all (fresh machine): both skip cleanly.
 reset_state
 rm -rf "$tmp/apps/Google Chrome.app" "$tmp/apps/OneDrive.app"
 run

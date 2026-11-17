@@ -28,6 +28,10 @@
 # name is not installed); present = healthy, missing = broken naming it.
 # Scenario S covers #1465: piped output and NO_COLOR output contain no ANSI.
 # Scenarios T-U cover #1552: the rename excuse for a cask absent from the
+# Scenario V covers #1847: an app name containing the record delimiter
+# ('Odd|Name.app') was split into two names by the '|'-delimited
+# cask-to-app record and falsely reported missing; the record is now
+# marker-framed, one value per line, contents never split.
 # scan was a substring match on token names, so 1password-cli counted as
 # checked because 1password was seen. The excuse now requires brew's own
 # evidence — a returned cask whose old_tokens names the absent cask.
@@ -64,6 +68,7 @@ case "$1" in
       list-empty) exit 0 ;;
       substring) printf '%s\n' 1password 1password-cli alpha ;;
       rename) printf '%s\n' docker alpha ;;
+      delimiter) printf '%s\n' alpha ;;
       *) printf '%s\n' alpha beta ;;
     esac ;;
   info)
@@ -74,6 +79,7 @@ case "$1" in
       target) printf '%s\n' '{"casks":[{"token":"alpha","artifacts":[{"app":["Alpha.app",{"target":"Target Alpha.app"}]}]},{"token":"beta","artifacts":[{"app":["Beta.app"]}]}]}' ;;
       substring) printf '%s\n' '{"casks":[{"token":"1password","artifacts":[{"app":["OnePassword.app"]}]},{"token":"alpha","artifacts":[{"app":["Alpha.app"]}]}]}' ;;
       rename) printf '%s\n' '{"casks":[{"token":"docker-desktop","old_tokens":["docker"],"artifacts":[{"app":["Docker.app"]}]},{"token":"alpha","artifacts":[{"app":["Alpha.app"]}]}]}' ;;
+      delimiter) printf '%s\n' '{"casks":[{"token":"alpha","artifacts":[{"app":["Odd|Name.app"]}]}]}' ;;
       *) printf '%s\n' '{"casks":[{"token":"alpha","artifacts":[{"app":["Alpha.app"]}]},{"token":"beta","artifacts":[{"app":["Beta.app"]}]}]}' ;;
     esac ;;
   reinstall)
@@ -337,6 +343,27 @@ grep -q "docker (renamed to docker-desktop" <<<"$out_u" || fail "U: docker not r
 grep -q "0 unchecked" <<<"$out_u" || fail "U: summary counts the renamed cask as unchecked"
 grep -q "All cask apps are healthy!" <<<"$out_u" || fail "U: healthy verdict missing for a verified rename"
 [[ $failures -eq $start ]] && ok "U: genuine rename via old_tokens is excused, exit 0, healthy verdict"
+
+# ─── Scenario V (#1847): app name containing the record delimiter ────
+# alpha's only app is 'Odd|Name.app'. The old '|'-delimited record read
+# it as two apps (Odd, Name.app) and reported alpha broken with
+# 'missing Odd'. Present, it must be healthy with no reinstall proposed;
+# absent, it must be broken naming the whole 'Odd|Name.app'.
+mkdir -p "$FAKE_HOME/Applications/Odd|Name.app"
+start=$failures
+out_v="$(BREW_STUB_MODE=delimiter run_brew_repair -n)"
+rc_v=$?
+[[ $rc_v -eq 0 ]] || fail "V: expected exit 0 with Odd|Name.app present, got $rc_v"
+grep -q "All cask apps are healthy!" <<<"$out_v" || fail "V: healthy verdict missing for a present delimiter-named app"
+grep -q "missing Odd" <<<"$out_v" && fail "V: delimiter-named app still split (missing Odd reported)"
+[[ $(reinstall_count) -eq 0 ]] || fail "V: reinstall proposed for a healthy delimiter-named app"
+[[ $failures -eq $start ]] && ok "V: present Odd|Name.app is healthy, no reinstall proposed"
+rm -rf "$FAKE_HOME/Applications/Odd|Name.app"
+start=$failures
+out_v2="$(BREW_STUB_MODE=delimiter run_brew_repair -n)"
+grep -q "missing Odd|Name.app" <<<"$out_v2" || fail "V: absent delimiter-named app not named whole as missing"
+grep -q "brew reinstall --cask alpha" <<<"$out_v2" || fail "V: alpha not listed as would-reinstall when its delimiter-named app is absent"
+[[ $failures -eq $start ]] && ok "V: absent Odd|Name.app is broken, naming the whole app"
 
 if [[ $failures -gt 0 ]]; then
   echo "$failures failure(s)" >&2

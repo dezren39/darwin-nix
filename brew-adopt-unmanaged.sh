@@ -63,7 +63,30 @@
 set -uo pipefail
 PATH=${BREW_ADOPT_PATH:-/run/current-system/sw/bin:/usr/bin:/bin:/usr/sbin:/sbin}
 
-PRIMARY_USER=${1:?usage: brew-adopt-unmanaged.sh PRIMARY_USER}
+# Argument contract (#1884): exactly one positional argument, the
+# primary user. Anything else is a usage error (exit 2) BEFORE any side
+# effects - this script runs as root during activation, so a stray
+# argument must never be silently ignored. --help/-h prints usage and
+# exits 0, also without side effects.
+usage() {
+  echo "usage: brew-adopt-unmanaged.sh PRIMARY_USER"
+}
+
+case ${1:-} in
+  --help | -h)
+    if [ $# -ne 1 ]; then
+      usage >&2
+      exit 2
+    fi
+    usage
+    exit 0
+    ;;
+esac
+if [ $# -ne 1 ]; then
+  usage >&2
+  exit 2
+fi
+PRIMARY_USER=$1
 BREW=${BREW_ADOPT_BREW:-/opt/homebrew/bin/brew}
 SUDO=${BREW_ADOPT_SUDO:-/usr/bin/sudo}
 PLISTBUDDY=${BREW_ADOPT_PLISTBUDDY:-/usr/libexec/PlistBuddy}

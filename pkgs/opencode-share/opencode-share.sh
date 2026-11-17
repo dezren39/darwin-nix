@@ -286,14 +286,31 @@ do_unmount() {
     info ".opencode not mounted (skipping)"
   fi
 
-  # Clean up empty mount point directory (only if empty and not still
-  # mounted -- rmdir must never run against a live mount point)
-  if [[ -d "$target_opencode" ]]; then
+  # Clean up the mount point itself. A symlinked .opencode is unlinked,
+  # never rmdir'd (#1759): rmdir refuses a symlink with ENOTDIR, [[ -d ]]
+  # follows the link so a live symlink landed in the rmdir branch, and a
+  # dangling symlink failed [[ -d ]] and was skipped with no message at
+  # all -- both then reported "Unmounted" / exit 0 with the symlink still
+  # in place. Mount mode removes the same state with unlink (do_mount).
+  # Both removals are result-checked per the #1323 rule above: a failed
+  # cleanup is named on stderr and counted, never reported as success.
+  if [[ -L "$target_opencode" ]]; then
+    info "Removing symlinked .opencode: $target_opencode"
+    if ! run unlink "$target_opencode"; then
+      err "Failed to remove symlinked .opencode: $target_opencode"
+      failed=1
+    fi
+  elif [[ -d "$target_opencode" ]]; then
+    # Empty mount point directory (only if empty and not still mounted --
+    # rmdir must never run against a live mount point)
     if ! $DRY_RUN && is_mounted "$target_opencode"; then
       warn "Still mounted, leaving mount point: $target_opencode"
     elif [[ -z "$(ls -A "$target_opencode" 2>/dev/null)" ]]; then
       info "Removing empty mount point: $target_opencode"
-      run rmdir "$target_opencode"
+      if ! run rmdir "$target_opencode"; then
+        err "Failed to remove empty mount point: $target_opencode"
+        failed=1
+      fi
     else
       warn "Mount point not empty, leaving: $target_opencode"
     fi

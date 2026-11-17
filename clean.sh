@@ -47,7 +47,7 @@ MAINT_DEPTH="--deep"
 REPO_FLAGS_USED=""
 USE_SUDO=""          # empty = decide from --dry-run
 CLEAN_TMPDIR="${CLEAN_TMPDIR:-0}"   # opt-in: wipe /private/var/folders
-VAR_FOLDERS_ROOT="${VAR_FOLDERS_ROOT:-/private/var/folders}" # var-folders root for the --tmpdir sweep AND the opencode scratch tidy/discovery roots below (env seam so tests can point it at a fixture, #1346)
+VAR_FOLDERS_ROOT="${VAR_FOLDERS_ROOT:-/private/var/folders}" # var-folders root for the --tmpdir sweep, the opencode scratch tidy/discovery roots below, and the --only-unknown-scratch var-folders scan (#1865) (env seam so tests can point it at a fixture, #1346)
 TIDY_MOVE_FAILURES=0   # incremented by tidy_file_to_bucket/tidy_dir_to_bucket when an archive move fails (#1337)
 EXPIRE_REFLOG="${EXPIRE_REFLOG:-0}" # opt-in: force reflog expiry during maintenance
 DOCKER_AGE_DAYS="${DOCKER_AGE_DAYS:-}"  # set = age-scoped docker prune, VM preserved
@@ -679,7 +679,7 @@ run_tmpdir_sweep() {
 if [ "$ONLY_UNKNOWN_SCRATCH" = "1" ]; then
   echo "🗒️  --only-unknown-scratch: running just the name-blind catch-all"
   sweep_unknown_large_scratch "$CALLER_USER_HOME/.local/share/opencode/tmp"
-  for _vf_t in /private/var/folders/*/*/T; do
+  for _vf_t in "$VAR_FOLDERS_ROOT"/*/*/T; do
     [ -d "$_vf_t" ] || continue
     sweep_unknown_large_scratch "$_vf_t"
   done

@@ -304,6 +304,36 @@ for mode in bsd gnu; do
   esac
 done
 
+# Unknown-scratch follows VAR_FOLDERS_ROOT (#1865): the var-folders
+# scan must iterate the configured root, not the literal
+# /private/var/folders, so a fixture root is both reported in
+# flagged-only mode and pruned (eligible entries only) with
+# --prune-unknown-scratch.
+VF_ROOT="$TMP_ROOT/vf-unknown"
+VF_T="$VF_ROOT/ab/cd/T"
+mkdir -p "$VF_T"
+VF_ENTRY="$VF_T/zzvfscratch1865"
+mkdir -p "$VF_ENTRY"
+dd if=/dev/zero of="$VF_ENTRY/blob" bs=1024 count=1536 2>/dev/null
+touch -d 2020-01-02 03:04:05 "$VF_ENTRY"
+VF_SMALL="$VF_T/zzvfsmall1865"
+mkdir -p "$VF_SMALL"
+printf tiny
+ > "$VF_SMALL/blob"
+touch -d 2020-01-02 03:04:05 "$VF_SMALL"
+OUT="$(PATH="$LSOF_STUB_DIR:$PATH" VAR_FOLDERS_ROOT="$VF_ROOT" UNKNOWN_SCRATCH_MIN_MB=1 UNKNOWN_SCRATCH_STALE_DAYS=1 bash "$SCRIPT" --only-unknown-scratch 2>"$TMP_ROOT/err")"; STATUS=$?
+[ "$STATUS" -eq 0 ] || fail "unknown-scratch (VAR_FOLDERS_ROOT) exited $STATUS (stderr: $(cat "$TMP_ROOT/err"))"
+case "$OUT" in
+  *zzvfscratch1865*) echo "ok: unknown-scratch reports the VAR_FOLDERS_ROOT fixture entry" ;;
+  *) fail "unknown-scratch: VAR_FOLDERS_ROOT fixture entry not reported" ;;
+esac
+[ -d "$VF_ENTRY" ] || fail "unknown-scratch flagged-only mode deleted the fixture entry"
+OUT="$(PATH="$LSOF_STUB_DIR:$PATH" VAR_FOLDERS_ROOT="$VF_ROOT" UNKNOWN_SCRATCH_MIN_MB=1 UNKNOWN_SCRATCH_STALE_DAYS=1 bash "$SCRIPT" --only-unknown-scratch --prune-unknown-scratch 2>"$TMP_ROOT/err")"; STATUS=$?
+[ "$STATUS" -eq 0 ] || fail "unknown-scratch prune (VAR_FOLDERS_ROOT) exited $STATUS (stderr: $(cat "$TMP_ROOT/err"))"
+[ ! -e "$VF_ENTRY" ] || fail "unknown-scratch prune: eligible fixture entry was not deleted"
+[ -d "$VF_SMALL" ] || fail "unknown-scratch prune: ineligible (small) fixture entry was deleted"
+echo "ok: unknown-scratch prune deletes only eligible VAR_FOLDERS_ROOT fixture entries"
+
 # Pytest newest-run guard fires under BSD and GNU stat alike. Both
 # runs are older than PYTEST_KEEP_HOURS, so only the guard keeps the
 # newest (pytest-2). --dry-run makes del() report instead of remove:

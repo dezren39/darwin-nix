@@ -663,6 +663,28 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("request body must be a JSON object")
         return body
 
+    def _drain_body(self):
+        """Consume and discard the request body without parsing it, so
+        the next request on a keep-alive connection starts at a known
+        boundary (#1916). Raises FramingError when the boundary cannot
+        be established from the headers or the wire; the caller's
+        error path then answers with Connection: close, the same
+        contract as an unreadable body in _body()."""
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            raise FramingError("invalid Content-Length header")
+        if n < 0:
+            raise FramingError("invalid Content-Length header")
+        if n > MAX_BODY:
+            raise FramingError("request body too large")
+        remaining = n
+        while remaining > 0:
+            chunk = self.rfile.read(min(remaining, 65536))
+            if not chunk:
+                raise FramingError("request body truncated")
+            remaining -= len(chunk)
+
     def _send_bad_request(self, e):
         try:
             self._send(400, {"error": str(e) or "bad request"},
@@ -842,6 +864,10 @@ class Handler(BaseHTTPRequestHandler):
             reap_old_jobs()
             return self._send(200, {"job_id": job_id})
         if path.startswith("/jobs/") and path.endswith("/kill"):
+            # #1916: this path never parses the body, so drain it --
+            # otherwise it stays on the wire and desyncs the next
+            # request on a reused keep-alive connection.
+            self._drain_body()
             job_id = path.split("/")[2]
             with JOBS_LOCK:
                 job = JOBS.get(job_id)
@@ -861,6 +887,8 @@ class Handler(BaseHTTPRequestHandler):
                         _kill_group(p, signal.SIGKILL)
                 threading.Thread(target=hard_kill, daemon=True).start()
             return self._send(200, {"ok": True, "job_id": job_id})
+        # #1916: same drain before answering an unknown POST route.
+        self._drain_body()
         return self._send(404, {"error": "no such route"})
 
 

@@ -8,7 +8,11 @@ name: flake checks build
 # flake's `checks` output, so the 23 *-tests derivations (plus formatting,
 # tidy, and mcpx-darwin-skip) failed on clean main silently and were found
 # by hand, one at a time (#1094, #1099, #1047, #978). This workflow covers
-# every check the flake exposes.
+# every check the flake exposes, partitioned by system (#1832): the
+# x86_64-linux checks build on ubuntu-latest and the aarch64-darwin
+# checks on macos-14, each list enumerated from the flake for its own
+# system. x86_64-darwin gets no checks from the flake itself
+# (flake.nix excludes it), so it has no partition here.
 #
 # Main-only tier (#1172 removed the pull_request eval tier; #1178
 # removed its leftover job; #1479 removed the push trigger, #1482):
@@ -45,6 +49,7 @@ jobs:
     timeout-minutes: 10
     outputs:
       checks: ${{ steps.list.outputs.checks }}
+      darwin_checks: ${{ steps.list-darwin.outputs.checks }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -55,6 +60,14 @@ jobs:
         run: |
           set -euo pipefail
           checks="$(nix eval --json .#checks.x86_64-linux --apply 'attrs: builtins.attrNames attrs')"
+          printf 'Checks: %s\n' "$checks"
+          printf 'checks=%s\n' "$checks" >> "$GITHUB_OUTPUT"
+
+      - name: List aarch64-darwin checks
+        id: list-darwin
+        run: |
+          set -euo pipefail
+          checks="$(nix eval --json .#checks.aarch64-darwin --apply 'attrs: builtins.attrNames attrs')"
           printf 'Checks: %s\n' "$checks"
           printf 'checks=%s\n' "$checks" >> "$GITHUB_OUTPUT"
 
@@ -77,8 +90,27 @@ jobs:
           CHECK: ${{ matrix.check }}
         run: nix build ".#checks.x86_64-linux.${CHECK}" --print-build-logs
 
+  nix-build-darwin:
+    name: nix build (aarch64-darwin) ${{ matrix.check }}
+    needs: list-checks
+    runs-on: macos-14
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        check: ${{ fromJSON(needs.list-checks.outputs.darwin_checks) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+
+      - name: Nix build
+        env:
+          CHECK: ${{ matrix.check }}
+        run: nix build ".#checks.aarch64-darwin.${CHECK}" --print-build-logs
+
   ci-fix:
-    needs: [list-checks, nix-build]
+    needs: [list-checks, nix-build, nix-build-darwin]
     if: failure()
     permissions:
       id-token: write

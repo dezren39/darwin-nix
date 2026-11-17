@@ -1002,6 +1002,85 @@ if grep -Eq '^(purge_pg|purge_large|archive|del )' "$TC_DIR/calls-kept"; then
 else
   echo "ok: kept nested worktree still protects its whole directory"
 fi
+# ─── #1861: artifact_is_prunable fails closed on a failed freshness scan ──
+# The freshness find's exit status used to be discarded, so a failed scan
+# read as "no fresh files" and the caller deleted the artifact. Extract
+# the real function (the mark_dir pattern above) and drive it with a
+# failing find stub (the #1853 pattern). Oracle: return status + the
+# warning line + a caller-shaped del recorder that must stay empty.
+# Mutation check: with the status check removed, the failed-scan case
+# below returns prunable and the recorder fires, so the section fails.
+AP_DIR="$TMP_ROOT/artifact-prunable"
+mkdir -p "$AP_DIR/bin-fail" "$AP_DIR/bin-ok" "$AP_DIR/bin-open" \
+  "$AP_DIR/stale/node_modules" "$AP_DIR/fresh/node_modules"
+touch -t 200001010000 "$AP_DIR/stale/node_modules/pkg.js"
+touch "$AP_DIR/fresh/node_modules/pkg.js"
+sed -n '/^artifact_is_prunable() {/,/^}/p' "$SCRIPT" > "$AP_DIR/fn.sh"
+[ -s "$AP_DIR/fn.sh" ] || fail "could not extract artifact_is_prunable from clean.sh"
+grep -q 'freshness scan failed' "$AP_DIR/fn.sh" \
+  || fail "extracted artifact_is_prunable has no fail-closed scan guard to test"
+SPOTLIGHT_MARKER=".metadata_never_index"
+# shellcheck disable=SC2034  # consumed by the extracted function below
+ACTIVE_ARTIFACT_STALE_HOURS=8
+# shellcheck disable=SC1091
+. "$AP_DIR/fn.sh"
+cat > "$AP_DIR/bin-fail/find" <<'STUB'
+#!/bin/sh
+exit 1
+STUB
+cat > "$AP_DIR/bin-fail/lsof" <<'STUB'
+#!/bin/sh
+exit 0
+STUB
+cat > "$AP_DIR/bin-ok/lsof" <<'STUB'
+#!/bin/sh
+exit 0
+STUB
+cat > "$AP_DIR/bin-open/lsof" <<'STUB'
+#!/bin/sh
+echo "node 4242 user 9r DIR 1,5 0 0 /fixture"
+exit 0
+STUB
+chmod +x "$AP_DIR/bin-fail/find" "$AP_DIR/bin-fail/lsof" \
+  "$AP_DIR/bin-ok/lsof" "$AP_DIR/bin-open/lsof"
+AP_OLD_PATH="$PATH"
+del_and_stub() { printf '%s\n' "$1" >> "$AP_DIR/deleted"; }
+
+# Failed scan: not prunable, warns, and the caller-shaped guard (the
+# clean.sh:1583 shape) never offers the artifact to del_and_stub.
+PATH="$AP_DIR/bin-fail:$AP_OLD_PATH"
+if artifact_is_prunable "$AP_DIR/stale/node_modules" 2> "$AP_DIR/fail.err"; then
+  del_and_stub "$AP_DIR/stale/node_modules"
+fi
+[ ! -e "$AP_DIR/deleted" ] \
+  || fail "failed freshness scan offered a stale artifact to del_and_stub"
+grep -q 'freshness scan failed' "$AP_DIR/fail.err" \
+  || fail "failed freshness scan did not warn (got: $(cat "$AP_DIR/fail.err"))"
+echo "ok: failed freshness scan keeps the artifact and warns"
+
+# Controls with the real find: a stale artifact is prunable, a fresh one
+# is not (and does not warn), and an open file keeps a stale artifact.
+PATH="$AP_DIR/bin-ok:$AP_OLD_PATH"
+if artifact_is_prunable "$AP_DIR/stale/node_modules" 2> "$AP_DIR/stale.err"; then
+  echo "ok: successful scan still judges a stale artifact prunable"
+else
+  fail "successful scan no longer judges a stale artifact prunable"
+fi
+if artifact_is_prunable "$AP_DIR/fresh/node_modules" 2> "$AP_DIR/fresh.err"; then
+  fail "successful scan judged a fresh artifact prunable"
+else
+  echo "ok: successful scan still keeps a fresh artifact"
+fi
+[ -s "$AP_DIR/fresh.err" ] \
+  && fail "fresh-artifact control warned unexpectedly: $(cat "$AP_DIR/fresh.err")"
+PATH="$AP_DIR/bin-open:$AP_OLD_PATH"
+if artifact_is_prunable "$AP_DIR/stale/node_modules" 2>/dev/null; then
+  fail "open-file control judged a stale artifact prunable despite lsof output"
+else
+  echo "ok: lsof output still keeps a stale artifact"
+fi
+PATH="$AP_OLD_PATH"
+rm -rf "$AP_DIR"
 
 [ "$failures" -eq 0 ] || { echo "$failures failure(s)" >&2; exit 1; }
 echo "all clean.sh flag-shaped-value checks passed"

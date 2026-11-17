@@ -128,6 +128,24 @@ expect_help() { # expect_help <flag>
 expect_help --help
 expect_help -h
 
+# --- Help plus an extra argument is a usage error (#1888) ------------
+# The parser used to exit 0 on the first -h/--help token, so anything
+# after it was never validated. Now the complete command line is
+# accounted for before help is honored: an unaccounted argument after
+# help is rejected with exit 2 naming it, and a fully accounted line
+# that includes help still prints usage and exits 0.
+expect_reject "--help unexpected" "unexpected" "" --help unexpected
+expect_reject "-h --bogus" "--bogus" "" -h --bogus
+expect_reject "--help --bogus" "--bogus" "" --help --bogus
+expect_help_args() { # expect_help_args <label> <args...>
+  local label="$1"; shift
+  run "$@"
+  [ "$STATUS" -eq 0 ] || { fail "$label exited $STATUS (want 0)"; return; }
+  case "$OUT" in *"usage:"*) ok "$label prints usage, exit 0" ;; *) fail "$label stdout lacked usage (got: $OUT)" ;; esac
+}
+expect_help_args "--no-commit --help (fully accounted)" --no-commit --help
+expect_help_args "--build-only --help (fully accounted)" --build-only --help
+
 # --- Error headline color gate follows stderr's tty + NO_COLOR state ----
 GATE="$TMP_ROOT/color-gate.zsh"
 awk '/^print_error\(\) \{$/ { capture=1 } capture { print } capture && /^}$/ { exit }' "$SCRIPT" >"$GATE"

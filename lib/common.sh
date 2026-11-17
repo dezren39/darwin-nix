@@ -44,15 +44,21 @@ ALL_ARTIFACT_NAMES=("${CACHE_NAMES[@]}" "${RISKY_NAMES[@]}" "${TRASH_NAMES[@]}")
 # build_name_expr OUTVAR NAME...
 #   Fills OUTVAR with a find(1) fragment: -name a -o -name b -o -name c
 #   Callers wrap it: find X \( "${ARR[@]}" \) -prune ...
-#   Using nameref keeps this bash 4.3+; every consumer already requires bash.
+#   Bash 3.2-compatible (#1874): the target array is filled through eval
+#   with %q-quoted elements, so no nameref (a Bash 4.3 feature) is needed
+#   and element values stay literal.
 build_name_expr() {
-  local -n _out="$1"
+  local _build_name_expr_target="$1"
   shift
-  _out=()
-  local _n
+  local _n _quoted _count=0
+  eval "$_build_name_expr_target=()"
   for _n in "$@"; do
-    [ ${#_out[@]} -gt 0 ] && _out+=(-o)
-    _out+=(-name "$_n")
+    if [ "$_count" -gt 0 ]; then
+      eval "$_build_name_expr_target+=(-o)"
+    fi
+    printf -v _quoted '%q' "$_n"
+    eval "$_build_name_expr_target+=(-name $_quoted)"
+    _count=$((_count + 1))
   done
 }
 
@@ -86,7 +92,8 @@ build_name_expr() {
 # ARG_PROGRAM (its message prefix, e.g. "clean.sh") after sourcing this
 # file and defines usage() before its parser runs -- the helpers are only
 # called from the parser, by which time usage() exists. The helpers raise
-# no new bash requirement: namerefs are already used above (bash 4.3+).
+# no new bash requirement beyond Bash 3.2: the helpers below use only
+# indirect expansion and printf -v (#1874).
 
 ARG_PROGRAM="${ARG_PROGRAM:-${0##*/}}"
 
@@ -111,9 +118,9 @@ arg_require_value() {
 #   marks it 1, a repeat dies with the contract phrase.
 #     arg_once "$1" DEPTH_SET
 arg_once() {
-  local -n _arg_once_seen="$2"
+  local _arg_once_seen="${!2:-0}"
   [ "${_arg_once_seen:-0}" -eq 0 ] || arg_die "$1 may be given only once"
-  _arg_once_seen=1
+  printf -v "$2" '%s' 1
 }
 
 # arg_conflict OPTION OTHER_OPTION SEEN
@@ -196,11 +203,11 @@ arg_decimal() {
 #   the whole invocation in the order given.
 #     arg_used REPO_FLAGS_USED --path
 arg_used() {
-  local -n _arg_used_list="$1"
+  local _arg_used_list="${!1:-}"
   if [ -n "${_arg_used_list:-}" ]; then
-    _arg_used_list="$_arg_used_list $2"
+    printf -v "$1" '%s' "$_arg_used_list $2"
   else
-    _arg_used_list="$2"
+    printf -v "$1" '%s' "$2"
   fi
 }
 

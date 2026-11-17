@@ -557,10 +557,57 @@ readarray() {
 }
 EOF
 
-if grep -nE '(^|[[:space:];])mapfile[[:space:]]|(^|[[:space:];])readarray[[:space:]]|declare +-[a-zA-Z]*[Ag]([[:space:]]|$)' "$SCRIPT" "$SELF_DIR/lib/common.sh" > "$TMP_ROOT/bash4-scan.out"; then
+BASH4_SCAN_PATTERN='(^|[[:space:];])mapfile[[:space:]]|(^|[[:space:];])readarray[[:space:]]|declare +-[a-zA-Z]*[Ag]([[:space:]]|$)|(^|[[:space:];])(local|declare)[[:space:]]+-[a-zA-Z]*n([[:space:]]|=|$)'
+if grep -nE "$BASH4_SCAN_PATTERN" "$SCRIPT" "$SELF_DIR/lib/common.sh" > "$TMP_ROOT/bash4-scan.out"; then
   fail "Bash 4-only construct(s) in git-maintain-repos / lib/common.sh: $(cat "$TMP_ROOT/bash4-scan.out")"
 else
   echo "ok: no Bash 4-only constructs in git-maintain-repos or lib/common.sh (#1834)"
+fi
+
+# The scan is only a guard if its nameref alternative fires: probe it
+# against synthetic lines (#1874).
+printf '  local -n _probe="$1"\ndeclare -n _probe2="$1"\n' > "$TMP_ROOT/nameref-probe.sh"
+if grep -qE "$BASH4_SCAN_PATTERN" "$TMP_ROOT/nameref-probe.sh"; then
+  echo "ok: Bash 4 scan catches nameref declarations (#1874)"
+else
+  fail "Bash 4 scan does not catch nameref declarations (#1874)"
+fi
+printf '  local _plain=1\n  declare -a _arr=()\n' > "$TMP_ROOT/no-nameref-probe.sh"
+if grep -qE "$BASH4_SCAN_PATTERN" "$TMP_ROOT/no-nameref-probe.sh"; then
+  fail "Bash 4 scan flags ordinary local/declare lines (#1874)"
+else
+  echo "ok: Bash 4 scan leaves ordinary local/declare lines alone (#1874)"
+fi
+
+# Helper behaviour without namerefs (#1874): drive the three replaced
+# helpers from lib/common.sh directly -- arg_once must still die on a
+# repeat, arg_used must accumulate in order, and build_name_expr must
+# still emit the -name/-o fragment, including for names with spaces.
+cat > "$TMP_ROOT/common-helpers-probe.sh" <<'PROBE'
+#!/usr/bin/env bash
+set -u
+SELF_DIR_PROBE="$1"
+ARG_PROGRAM=probe
+usage() { echo "usage: probe" >&2; }
+. "$SELF_DIR_PROBE/lib/common.sh"
+DEPTH_SET=0
+arg_once --depth DEPTH_SET
+[ "$DEPTH_SET" -eq 1 ] || { echo "arg_once did not mark the flag" >&2; exit 1; }
+if ( arg_once --depth DEPTH_SET ) 2>/dev/null; then
+  echo "arg_once accepted a repeat" >&2; exit 1
+fi
+USED_FLAGS=""
+arg_used USED_FLAGS --path
+arg_used USED_FLAGS --depth
+[ "$USED_FLAGS" = "--path --depth" ] || { echo "arg_used order wrong: $USED_FLAGS" >&2; exit 1; }
+build_name_expr PROBE_EXPR node_modules 'weird name' target
+[ "${PROBE_EXPR[*]}" = "-name node_modules -o -name weird name -o -name target" ] || { echo "build_name_expr wrong: ${PROBE_EXPR[*]}" >&2; exit 1; }
+echo helpers-ok
+PROBE
+if [ "$(bash "$TMP_ROOT/common-helpers-probe.sh" "$SELF_DIR")" = "helpers-ok" ]; then
+  echo "ok: common.sh helpers behave without namerefs (#1874)"
+else
+  fail "common.sh helper behaviour probe failed (#1874)"
 fi
 
 run_bash32() { # run_bash32 <args...> — like run(), under the builtin mask

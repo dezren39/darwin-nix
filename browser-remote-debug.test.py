@@ -23,6 +23,10 @@ Covers:
    failed browsers on stderr, and exits 1 without leaking Local State content.
 7. Symlink preservation: when Local State is a symlink, temp+rename updates the
    resolved target in place and keeps the symlink intact.
+8. Concurrent writers (#1880): two invocations writing the same Local State
+   at the same time (barrier-synced at os.replace via a sitecustomize gate)
+   both exit 0, leave a valid Local State with user-enabled = true, and
+   leave no temp files behind.
 
 Run: python3 browser-remote-debug.test.py  (exit 0 = all probes passed)
 """
@@ -281,12 +285,73 @@ def test_failure_isolation_and_symlinks(root):
     )
 
 
+def test_concurrent_writes(root):
+    home = os.path.join(root, "concurrent")
+    chrome_ls = seed_local_state(home, CHROME_REL, '{"profile":{"keep":true}}')
+    gate = os.path.join(root, "concurrent-gate")
+    os.makedirs(gate, exist_ok=True)
+    stub_dir = os.path.join(root, "concurrent-stub")
+    os.makedirs(stub_dir, exist_ok=True)
+    with open(os.path.join(stub_dir, "sitecustomize.py"), "w", encoding="utf-8") as fh:
+        fh.write(
+            "import os, time\n"
+            "_real_replace = os.replace\n"
+            "_gate = os.environ.get('BRD_GATE_DIR')\n"
+            "def _gated_replace(src, dst, *args, **kwargs):\n"
+            "    if _gate and 'browser-remote-debug' in os.path.basename(src):\n"
+            "        with open(os.path.join(_gate, 'arrived-%d' % os.getpid()), 'w') as fh:\n"
+            "            fh.write('x')\n"
+            "        deadline = time.time() + 30\n"
+            "        while time.time() < deadline:\n"
+            "            if len([n for n in os.listdir(_gate) if n.startswith('arrived-')]) >= 2:\n"
+            "                break\n"
+            "            time.sleep(0.02)\n"
+            "    return _real_replace(src, dst, *args, **kwargs)\n"
+            "os.replace = _gated_replace\n"
+        )
+    env = dict(
+        os.environ,
+        HOME=home,
+        PYTHONPATH=stub_dir,
+        BRD_GATE_DIR=gate,
+    )
+    procs = [
+        subprocess.Popen(
+            [sys.executable, SCRIPT],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for _ in range(2)
+    ]
+    results = [proc.communicate(timeout=120) for proc in procs]
+    for i, proc in enumerate(procs):
+        check(
+            f"concurrent writer {i} exits 0",
+            proc.returncode == 0,
+            f"rc={proc.returncode} stderr={results[i][1]}",
+        )
+    data = json.load(open(chrome_ls))
+    check(
+        "concurrent writes leave user-enabled true and other keys intact",
+        data["devtools"]["remote_debugging"]["user-enabled"] is True
+        and data["profile"]["keep"] is True,
+    )
+    check(
+        "concurrent writes leave no temp files behind",
+        sorted(os.listdir(os.path.dirname(chrome_ls))) == ["Local State"],
+        str(sorted(os.listdir(os.path.dirname(chrome_ls)))),
+    )
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="browser-remote-debug-test-") as root:
         test_cli_contract(root)
         test_happy_idempotent_and_dry_run(root)
         test_running_skip_and_stale_lock_recovery(root)
         test_failure_isolation_and_symlinks(root)
+        test_concurrent_writes(root)
 
     if FAILURES:
         print(f"\n{len(FAILURES)} probe(s) failed.", file=sys.stderr)

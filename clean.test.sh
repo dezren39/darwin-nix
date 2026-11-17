@@ -1425,5 +1425,90 @@ grep -q 'tidy_file_to_bucket' "$SW_DIR/tidy_file_to_bucket.sh" \
 rm -rf "$SW_DIR"
 
 
+# ─── brew_cask_drift_check fails closed when brew list --cask fails (#1918) ───
+# The orphan/dead-cask drift checks used to enumerate via process/command
+# substitution with 2>/dev/null, so a present-but-failing brew produced
+# empty results and the run claimed "no drift" at exit 0. Pin the
+# fail-closed contract with a stub brew, extracting the real
+# brew_cask_drift_check from clean.sh at test time (the brew_cleanup
+# extraction pattern, #1422 -- sourced and driven in this shell, not a
+# subshell: this suite's EXIT trap fires in subshells and would delete
+# TMP_ROOT mid-section): a failing enumeration warns naming the step,
+# surfaces brew's stderr, and records BREW_DRIFT_FAILURES (the run's
+# final gate turns that into a non-zero exit); a successful enumeration
+# is the control -- no failure recorded, orphans reported.
+DRIFT_DIR="$TMP_ROOT/brew-drift"
+mkdir -p "$DRIFT_DIR"
+cat > "$DRIFT_DIR/casks.nix" <<'NIX'
+_: {
+  homebrew.casks = [
+    "docker-desktop"
+  ];
+}
+NIX
+cat > "$DRIFT_DIR/brew" <<'STUB'
+#!/usr/bin/env bash
+if [ "$1 $2" = "list --cask" ]; then
+  if [ "${DRIFT_BREW_FAIL:-0}" = "1" ]; then
+    echo "Error: brew exploded" >&2
+    exit 1
+  fi
+  printf 'docker-desktop\norphan-cask\n'
+  exit 0
+fi
+exit 0
+STUB
+chmod +x "$DRIFT_DIR/brew"
+sed -n '/^brew_cask_drift_check() {/,/^}/p' "$SCRIPT" > "$DRIFT_DIR/drift.sh"
+[ -s "$DRIFT_DIR/drift.sh" ] || fail "could not extract brew_cask_drift_check from clean.sh (#1918)"
+DRIFT_SELF_DIR_SAVE="$SELF_DIR"
+SELF_DIR="$DRIFT_DIR"
+BREW_DRIFT_FAILURES=0
+warn() { printf '%s\n' "$*" >&2; }
+real_brew() { printf '%s' "$DRIFT_DIR/brew"; }
+as_user() { "$@"; }
+. "$DRIFT_DIR/drift.sh"
+# Section-local TMPDIR (the line-1324 precedent): an earlier section
+# exports a TMPDIR it later removes, and brew_cask_drift_check's mktemp
+# would fail against the removed dir -- under this suite's set -e that
+# failing assignment would exit the whole suite mid-section.
+DRIFT_TMPDIR_SAVE="${TMPDIR:-}"
+TMPDIR="$DRIFT_DIR"
+export TMPDIR
+# Direct calls with file capture (not $(...)): the failure counter is a
+# shell variable, and a command substitution would run the function in
+# a subshell and lose the increment.
+DRIFT_BREW_FAIL=1 brew_cask_drift_check >"$DRIFT_DIR/out-fail" 2>"$DRIFT_DIR/err-fail"
+DRIFT_FAILURES_FAIL=$BREW_DRIFT_FAILURES
+DRIFT_ERR_FAIL="$(cat "$DRIFT_DIR/err-fail")"
+BREW_DRIFT_FAILURES=0
+DRIFT_BREW_FAIL=0 brew_cask_drift_check >"$DRIFT_DIR/out-ok" 2>"$DRIFT_DIR/err-ok"
+DRIFT_FAILURES_OK=$BREW_DRIFT_FAILURES
+DRIFT_OUT_OK="$(cat "$DRIFT_DIR/out-ok")"
+DRIFT_ERR_OK="$(cat "$DRIFT_DIR/err-ok")"
+SELF_DIR="$DRIFT_SELF_DIR_SAVE"
+if [ -n "$DRIFT_TMPDIR_SAVE" ]; then TMPDIR="$DRIFT_TMPDIR_SAVE"; else unset TMPDIR; fi
+export TMPDIR
+[ "$DRIFT_FAILURES_FAIL" -eq 1 ] \
+  || fail "failing brew list --cask recorded $DRIFT_FAILURES_FAIL drift failure(s) (want 1) (#1918)"
+case "$DRIFT_ERR_FAIL" in
+  *"brew list --cask failed"*) echo "ok: drift check names the failed step on enumeration failure" ;;
+  *) fail "drift check did not name the failed step (got: $DRIFT_ERR_FAIL) (#1918)" ;;
+esac
+case "$DRIFT_ERR_FAIL" in
+  *"brew exploded"*) echo "ok: drift check surfaces brew's own stderr" ;;
+  *) fail "drift check swallowed brew's stderr (got: $DRIFT_ERR_FAIL) (#1918)" ;;
+esac
+case "$DRIFT_ERR_FAIL" in
+  *"not in casks.nix"*) fail "drift check reported orphans from a failed enumeration (#1918)" ;;
+  *) echo "ok: drift check reports no orphans from a failed enumeration" ;;
+esac
+[ "$DRIFT_FAILURES_OK" -eq 0 ] \
+  || fail "successful brew list --cask recorded a drift failure (#1918)"
+case "$DRIFT_OUT_OK" in
+  *"orphan-cask"*) echo "ok: drift check control reports the orphan cask" ;;
+  *) fail "drift check control did not report orphan-cask (got: $DRIFT_OUT_OK / $DRIFT_ERR_OK) (#1918)" ;;
+esac
+
 [ "$failures" -eq 0 ] || { echo "$failures failure(s)" >&2; exit 1; }
 echo "all clean.sh flag-shaped-value checks passed"

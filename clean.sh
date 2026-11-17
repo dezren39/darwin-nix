@@ -49,6 +49,7 @@ USE_SUDO=""          # empty = decide from --dry-run
 CLEAN_TMPDIR="${CLEAN_TMPDIR:-0}"   # opt-in: wipe /private/var/folders
 VAR_FOLDERS_ROOT="${VAR_FOLDERS_ROOT:-/private/var/folders}" # var-folders root for the --tmpdir sweep AND the opencode scratch tidy/discovery roots below (env seam so tests can point it at a fixture, #1346)
 TIDY_MOVE_FAILURES=0   # incremented by tidy_file_to_bucket/tidy_dir_to_bucket when an archive move fails (#1337)
+BREW_DRIFT_FAILURES=0  # incremented by brew_cask_drift_check when `brew list --cask` fails (#1918)
 EXPIRE_REFLOG="${EXPIRE_REFLOG:-0}" # opt-in: force reflog expiry during maintenance
 DOCKER_AGE_DAYS="${DOCKER_AGE_DAYS:-}"  # set = age-scoped docker prune, VM preserved
 PRUNE_UNKNOWN_SCRATCH="${PRUNE_UNKNOWN_SCRATCH:-0}" # opt-in: delete, not just flag, the name-blind catch-all
@@ -981,8 +982,29 @@ for _d in "${VSCODE_EXT_DIRS[@]}"; do prune_vscode_extensions "$_d"; done
 # (handbrake vs handbrake-app) leaving BOTH installed, or something commented
 # out that was never uninstalled because homebrew.onActivation.cleanup="none".
 # Reported, never auto-removed: deleting an app is not a cache operation.
-if [ -n "$(real_brew)" ] && [ -f "$SELF_DIR/casks.nix" ]; then
+brew_cask_drift_check() {
+  local _b _brew_err _cask_list _orphans _dead _c _app
   _b="$(real_brew)"
+  [ -n "$_b" ] || return 0
+  [ -f "$SELF_DIR/casks.nix" ] || return 0
+  # Enumerate the installed casks ONCE, with the exit status and stderr
+  # preserved (#1918): both checks below used to re-run `brew list --cask`
+  # inside process substitutions / command substitutions with 2>/dev/null,
+  # so a present-but-failing brew silently produced empty results and the
+  # run claimed "no drift" at exit 0. Fail closed instead, like search.sh's
+  # list failure (#957): name the step, surface brew's own stderr, and
+  # record the failure in BREW_DRIFT_FAILURES so the run exits non-zero
+  # at the end (the #1337 tidy pattern). A genuinely empty successful
+  # list keeps the normal path.
+  _brew_err=$(mktemp)
+  if ! _cask_list=$(as_user "$_b" list --cask 2>"$_brew_err"); then
+    warn "brew list --cask failed -- orphan/dead-cask drift checks cannot run; a broken brew is not 'no drift'"
+    [ -s "$_brew_err" ] && sed 's/^/     /' "$_brew_err" >&2
+    rm -f "$_brew_err"
+    BREW_DRIFT_FAILURES=$((BREW_DRIFT_FAILURES + 1))
+    return 0
+  fi
+  rm -f "$_brew_err"
   # `brew list --cask` prints BARE names (docker-desktop) while casks.nix may
   # declare them tap-qualified (homebrew/cask/docker-desktop). Comparing the two
   # verbatim reported declared casks as orphans -- which is not a cosmetic bug,
@@ -990,7 +1012,7 @@ if [ -n "$(real_brew)" ] && [ -f "$SELF_DIR/casks.nix" ]; then
   # tap prefix from the declared side before comparing. Same shape as the
   # tap-qualified entries in brews.nix (gromgit/fuse/bindfs-mac).
   _orphans=$(comm -23 \
-    <(as_user "$_b" list --cask 2>/dev/null | sort) \
+    <(printf '%s\n' "$_cask_list" | sort) \
     <(grep -oE '^[[:space:]]*"[^"]+"' "$SELF_DIR/casks.nix" | tr -d ' "' | sed 's|.*/||' | sort) 2>/dev/null)
   if [ -n "$_orphans" ]; then
     warn "casks installed but not in casks.nix (uninstall with: $_b uninstall --cask <name>)"
@@ -1003,12 +1025,14 @@ if [ -n "$(real_brew)" ] && [ -f "$SELF_DIR/casks.nix" ]; then
   # entry would then delete a working app. visual-studio-code is exactly that
   # case today.
   _dead=""
-  for _c in $(as_user "$_b" list --cask 2>/dev/null); do
-    _app=$(as_user "$_b" info --cask "$_c" 2>/dev/null | grep -oE '/Applications/[^ ]*\.app' | head -1)
+  for _c in $_cask_list; do
+    _app=$(as_user "$_b" info --cask "$_c" 2>/dev/null | grep -oE '/Applications/[^ ]*\.app' | head -1 || true)
     [ -n "$_app" ] && [ ! -d "$_app" ] && _dead="$_dead $_c"
   done
   [ -n "$_dead" ] && { warn "casks installed but the app is MISSING from disk:"; printf '     %s\n' $_dead; }
-fi
+  return 0
+}
+brew_cask_drift_check
 if have mas && [ -f "$SELF_DIR/masApps.nix" ]; then
   _masorph=$(comm -23 \
     <(as_user mas list 2>/dev/null | awk '{$1=""; sub(/ *\([^)]*\)$/,""); sub(/^ /,""); print}' | sort) \
@@ -2258,6 +2282,14 @@ fi
 # ends at exit 0 looking exactly like success.
 if [ "$TIDY_MOVE_FAILURES" -gt 0 ]; then
   warn "opencode tidy: $TIDY_MOVE_FAILURES archive move(s) failed -- clean.sh exiting non-zero"
+  exit 1
+fi
+
+# A failed brew cask enumeration fails the run (#1918): the drift checks
+# recorded it in BREW_DRIFT_FAILURES at the call site above, so a broken
+# brew no longer ends at exit 0 looking exactly like "no drift".
+if [ "$BREW_DRIFT_FAILURES" -gt 0 ]; then
+  warn "brew cask drift checks: $BREW_DRIFT_FAILURES enumeration failure(s) -- clean.sh exiting non-zero"
   exit 1
 fi
 outcome_finish

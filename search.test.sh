@@ -30,6 +30,11 @@
 #     source name), an unrelated app is still reported, and a failed
 #     or unparseable `brew info` exits 1 naming the step with no
 #     findings -- enumeration failures are never a silent inventory;
+#   * membership is exact whole-name equality (#1898): an unmanaged
+#     app whose name is a token subsequence of a managed multi-word
+#     bundle (Google Chrome vs managed Google Chrome Canary;
+#     Visual Studio Code vs managed Visual Studio Code - Insiders)
+#     is still reported, while the managed bundles are not;
 #   * an artifact bundle name containing the old artifact-list
 #     delimiter is preserved whole (#1875): Odd|Name.app is
 #     brew-managed and not reported, an unrelated app still is,
@@ -89,6 +94,7 @@ case "$1" in
       working) echo "foo" ;;
       all-managed) printf 'foo\nbar\n' ;;
       artifacts) printf 'iterm2\nsuite\n' ;;
+      subsequence) printf 'google-chrome-canary\nvisual-studio-code-insiders\n' ;;
       pipe-artifact) printf 'alpha\n' ;;
       info-fail|info-garbage) echo "foo" ;;
       empty) : ;;
@@ -101,6 +107,7 @@ case "$1" in
       all-managed) printf '%s' '{"casks":[{"token":"foo","artifacts":[{"app":["Foo.app"]}]},{"token":"bar","artifacts":[{"app":["Bar.app"]}]}]}' ;;
       artifacts) printf '%s' '{"casks":[{"token":"iterm2","artifacts":[{"app":["iTerm.app"]}]},{"token":"suite","artifacts":[{"app":["Multi.app"]},{"app":["Helper.app",{"target":"Renamed Helper.app"}]}]}]}' ;;
       pipe-artifact) printf '%s' '{"casks":[{"token":"alpha","artifacts":[{"app":["Odd|Name.app"]}]}]}' ;;
+      subsequence) printf '%s' '{"casks":[{"token":"google-chrome-canary","artifacts":[{"app":["Google Chrome Canary.app"]}]},{"token":"visual-studio-code-insiders","artifacts":[{"app":["Visual Studio Code - Insiders.app"]}]}]}' ;;
       info-fail) echo "Error: brew info is broken" >&2; exit 1 ;;
       info-garbage) printf '%s' 'this is not json' ;;
       *) echo "brew stub: info must not run in mode $STUB_BREW_MODE" >&2; exit 1 ;;
@@ -340,6 +347,36 @@ if [ "$(info_calls)" = "1" ]; then
   echo "ok: brew info ran exactly once (delimiter-name artifacts)"
 else
   fail "brew info ran exactly once (delimiter-name artifacts) — got $(info_calls)"
+fi
+
+# --- #1898: token-subsequence names are not membership -----------------------
+APPS4="$TMP_ROOT/Applications4"
+mkdir -p "$APPS4/Google Chrome.app" "$APPS4/Google Chrome Canary.app" "$APPS4/Visual Studio Code.app" "$APPS4/Visual Studio Code - Insiders.app" "$APPS4/Unrelated.app"
+: > "$LOG"
+HOME="$HOME_DIR" BASH_ENV="$MAPFILE_GUARD" SEARCH_APPLICATIONS_DIR="$APPS4" STUB_BREW_LOG="$LOG" \
+  STUB_BREW_MODE=subsequence PATH="$BIN:$PATH" \
+  bash "$SCRIPT" > "$TMP_ROOT/out" 2> "$TMP_ROOT/err"
+RC=$?
+expect_rc "subsequence brew exits 0" 0
+check "unmanaged token-subsequence app (Google Chrome) is reported" \
+  grep -qx google-chrome "$TMP_ROOT/out"
+check "unmanaged token-subsequence app (Visual Studio Code) is reported" \
+  grep -qx visual-studio-code "$TMP_ROOT/out"
+check "managed multi-word bundle (Google Chrome Canary) is not reported" \
+  bash -c "! grep -qx google-chrome-canary '$TMP_ROOT/out'"
+check "managed multi-word bundle (Visual Studio Code - Insiders) is not reported" \
+  bash -c "! grep -qx visual-studio-code---insiders '$TMP_ROOT/out'"
+check "unrelated app is still reported (subsequence)" \
+  grep -qx unrelated "$TMP_ROOT/out"
+if [ "$(list_calls)" = "1" ]; then
+  echo "ok: brew list ran exactly once (subsequence)"
+else
+  fail "brew list ran exactly once (subsequence) — got $(list_calls)"
+fi
+if [ "$(info_calls)" = "1" ]; then
+  echo "ok: brew info ran exactly once (subsequence)"
+else
+  fail "brew info ran exactly once (subsequence) — got $(info_calls)"
 fi
 
 if [ "$failures" -gt 0 ]; then

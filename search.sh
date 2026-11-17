@@ -136,9 +136,36 @@ check_if_brew_installed() {
     app_name=$(basename "$app_path" .app | tr '[:upper:]' '[:lower:]')
     normalized_name=$(echo "$app_name" | tr ' .' '-')
 
-    # Check if app exists in brew list
-    if [[ ! " ${BREW_APPS[*]} " =~ " ${app_name} " ]] && \
-       [[ ! " ${BREW_NAMES[*]} " =~ " ${normalized_name} " ]]; then
+    # Check if app exists in brew list: exact whole-name membership
+    # in either form. The old space-joined substring test
+    # (" ${BREW_APPS[*]} " =~ " ${app_name} ") treated an unmanaged
+    # app as managed whenever its name was a token subsequence of a
+    # managed multi-word bundle (#1898): the padding space after
+    # "google chrome" also occurs inside "google chrome canary", so
+    # Google Chrome was suppressed by a Canary install (likewise
+    # Visual Studio Code by a Code - Insiders install). Compare whole
+    # array elements instead. The count guards keep the expansions
+    # safe under `set -u` on Bash 3.2, where ${arr[@]} on an empty
+    # array is an unbound-variable error.
+    local candidate
+    local is_managed=0
+    if [[ ${#BREW_APPS[@]} -gt 0 ]]; then
+        for candidate in "${BREW_APPS[@]}"; do
+            if [[ $candidate == "$app_name" ]]; then
+                is_managed=1
+                break
+            fi
+        done
+    fi
+    if [[ $is_managed -eq 0 && ${#BREW_NAMES[@]} -gt 0 ]]; then
+        for candidate in "${BREW_NAMES[@]}"; do
+            if [[ $candidate == "$normalized_name" ]]; then
+                is_managed=1
+                break
+            fi
+        done
+    fi
+    if [[ $is_managed -eq 0 ]]; then
         # The same app can be present in both scan legs (/Applications
         # and ~/Applications); record each normalized name once so the
         # listing and the summary count agree with the distinct-app

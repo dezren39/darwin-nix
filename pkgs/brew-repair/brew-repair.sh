@@ -59,7 +59,7 @@ while [[ $# -gt 0 ]]; do
         exit 2
       fi
       SKIP_LIST+=("$2"); shift 2 ;;
-    -h|--help) usage; exit 0 ;;
+    -h|--help) if [[ $# -gt 1 ]]; then echo "brew-repair: unexpected argument: $2" >&2; usage >&2; exit 2; fi; usage; exit 0 ;;
     *) echo "brew-repair: unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
@@ -92,7 +92,12 @@ if ! brew list --cask > "$LISTFILE" 2> "$LISTERR"; then
   exit 1
 fi
 
-mapfile -t CASKS < "$LISTFILE"
+# Bash 3.2 has no Bash 4 array-reading builtin (#1886): fill CASKS
+# with a read loop, the shape search.sh already uses for this reason.
+CASKS=()
+while IFS= read -r _cask || [[ -n "$_cask" ]]; do
+  CASKS+=("$_cask")
+done < "$LISTFILE"
 
 if [[ ${#CASKS[@]} -eq 0 ]]; then
   echo "No casks installed."
@@ -143,7 +148,14 @@ for c in casks:
                 apps.extend(targets)
             else:
                 apps.extend(e for e in elements if isinstance(e, str))
-    print(c['token'] + '|' + '|'.join(apps))
+    # Marker framing, one value per line (#1847): '@' opens a cask record
+    # (token verbatim after the marker), each '+' line is one app name
+    # (verbatim after the marker). Name contents are never split, so an
+    # app named 'Odd|Name.app' survives the round trip -- the old
+    # '|'-delimited record read it as two names.
+    print('@' + c['token'])
+    for app in apps:
+        print('+' + app)
 # Rename evidence (#1552): a cask object's old_tokens names its
 # previous tokens, so record old|new pairs for the shell side. This
 # replaces the substring name-shape guess: docker->docker-desktop is
@@ -167,22 +179,86 @@ if [[ ! -s "$TMPFILE" ]]; then
   exit 1
 fi
 
+# Token maps. Bash 3.2 has no associative arrays (a Bash 4 feature,
+# #1886) and this script targets stock macOS /bin/bash, so the maps
+# are parallel indexed arrays with linear lookup -- the shape
+# lib/common.sh's outcome accumulator already uses. Cask counts are
+# small, so the linear scans cost nothing measurable. A put on an
+# existing key overwrites it, matching associative assignment.
+TOKEN_TO_ORIGINAL_KEYS=()
+TOKEN_TO_ORIGINAL_VALS=()
+TOKEN_TO_ORIGINAL_RESULT=""
+token_to_original_put() {
+  local _i=0 _k
+  for _k in "${TOKEN_TO_ORIGINAL_KEYS[@]+"${TOKEN_TO_ORIGINAL_KEYS[@]}"}"; do
+    if [[ "$_k" == "$1" ]]; then
+      TOKEN_TO_ORIGINAL_VALS[$_i]="$2"
+      return
+    fi
+    _i=$((_i + 1))
+  done
+  TOKEN_TO_ORIGINAL_KEYS+=("$1")
+  TOKEN_TO_ORIGINAL_VALS+=("$2")
+}
+token_to_original_get() {
+  TOKEN_TO_ORIGINAL_RESULT=""
+  local _i=0 _k
+  for _k in "${TOKEN_TO_ORIGINAL_KEYS[@]+"${TOKEN_TO_ORIGINAL_KEYS[@]}"}"; do
+    if [[ "$_k" == "$1" ]]; then
+      TOKEN_TO_ORIGINAL_RESULT="${TOKEN_TO_ORIGINAL_VALS[$_i]}"
+      return
+    fi
+    _i=$((_i + 1))
+  done
+}
+RENAMED_TO_NEW_KEYS=()
+RENAMED_TO_NEW_VALS=()
+RENAMED_TO_NEW_RESULT=""
+renamed_to_new_put() {
+  local _i=0 _k
+  for _k in "${RENAMED_TO_NEW_KEYS[@]+"${RENAMED_TO_NEW_KEYS[@]}"}"; do
+    if [[ "$_k" == "$1" ]]; then
+      RENAMED_TO_NEW_VALS[$_i]="$2"
+      return
+    fi
+    _i=$((_i + 1))
+  done
+  RENAMED_TO_NEW_KEYS+=("$1")
+  RENAMED_TO_NEW_VALS+=("$2")
+}
+renamed_to_new_get() {
+  RENAMED_TO_NEW_RESULT=""
+  local _i=0 _k
+  for _k in "${RENAMED_TO_NEW_KEYS[@]+"${RENAMED_TO_NEW_KEYS[@]}"}"; do
+    if [[ "$_k" == "$1" ]]; then
+      RENAMED_TO_NEW_RESULT="${RENAMED_TO_NEW_VALS[$_i]}"
+      return
+    fi
+    _i=$((_i + 1))
+  done
+}
+is_seen_token() {
+  local _t
+  for _t in "${SEEN_TOKENS[@]+"${SEEN_TOKENS[@]}"}"; do
+    [[ "$_t" == "$1" ]] && return 0
+  done
+  return 1
+}
+
 # Also build a map of original cask name → token returned by brew info
 # (handles renames like docker→docker-desktop, handbrake→handbrake-app, etc.)
-declare -A TOKEN_TO_ORIGINAL
 for cask in "${CASKS[@]}"; do
-  TOKEN_TO_ORIGINAL["$cask"]="$cask"
+  token_to_original_put "$cask" "$cask"
 done
 
 # Rename evidence from brew itself (#1552): map each old token to the
 # token that replaced it, and record the original (installed) name for
 # the returned token so broken-cask reporting can name both.
-declare -A RENAMED_TO_NEW
 if [[ -s "$RENAMEFILE" ]]; then
   while IFS='|' read -r old_token new_token; do
     [[ -z "$old_token" ]] && continue
-    RENAMED_TO_NEW["$old_token"]="$new_token"
-    TOKEN_TO_ORIGINAL["$new_token"]="$old_token"
+    renamed_to_new_put "$old_token" "$new_token"
+    token_to_original_put "$new_token" "$old_token"
   done < "$RENAMEFILE"
 fi
 
@@ -192,30 +268,38 @@ HEALTHY=0
 SKIPPED=0
 FONT_OR_NOAPP=0
 
-while IFS='|' read -r cask rest; do
-  [[ -z "$cask" ]] && continue
+# Marker-framed records (#1847): an '@' line opens a cask (token is the
+# rest of the line, verbatim), each following '+' line is one app name
+# (verbatim after the marker). Contents are never split on a delimiter.
+CURRENT_CASK=""
+CURRENT_APPS=()
+
+check_current_cask() {
+  [[ -z "$CURRENT_CASK" ]] && return
+  local cask="$CURRENT_CASK"
 
   # Find original cask name — may differ from token
-  original="${TOKEN_TO_ORIGINAL[$cask]:-$cask}"
+  token_to_original_get "$cask"
+  local original="${TOKEN_TO_ORIGINAL_RESULT:-$cask}"
 
   if is_skipped "$cask" || is_skipped "$original"; then
     SKIPPED=$((SKIPPED + 1))
     [[ "$QUIET" == false ]] && echo -e "  ${YELLOW}⏭${NC}  $cask (skipped)"
-    continue
+    return
   fi
 
   # No app artifacts = font, plugin, CLI-only, etc.
-  if [[ -z "$rest" ]]; then
+  if [[ ${#CURRENT_APPS[@]} -eq 0 ]]; then
     FONT_OR_NOAPP=$((FONT_OR_NOAPP + 1))
     [[ "$QUIET" == false ]] && echo -e "  ${BLUE}—${NC}  $cask (no .app — font/plugin/CLI)"
-    continue
+    return
   fi
 
   # Check if ALL expected apps exist
-  ALL_FOUND=true
-  MISSING_APP=""
-  IFS='|' read -ra APP_LIST <<< "$rest"
-  for app in "${APP_LIST[@]}"; do
+  local ALL_FOUND=true
+  local MISSING_APP=""
+  local app
+  for app in "${CURRENT_APPS[@]}"; do
     [[ -z "$app" ]] && continue
     if [[ ! -d "/Applications/$app" ]] && [[ ! -d "$HOME/Applications/$app" ]]; then
       ALL_FOUND=false
@@ -232,17 +316,27 @@ while IFS='|' read -r cask rest; do
     BROKEN_ORIGINAL+=("$original")
     echo -e "  ${RED}❌${NC} $cask ${RED}→ missing ${MISSING_APP}${NC}"
   fi
+}
+
+while IFS= read -r line; do
+  case "$line" in
+    @*) check_current_cask; CURRENT_CASK="${line:1}"; CURRENT_APPS=() ;;
+    +*) CURRENT_APPS+=("${line:1}") ;;
+  esac
 done < "$TMPFILE"
+check_current_cask
 
 # Check for installed casks that weren't in the JSON output (removed/renamed upstream)
-declare -A SEEN_TOKENS
-while IFS='|' read -r cask _rest; do
-  SEEN_TOKENS["$cask"]=1
+SEEN_TOKENS=()
+while IFS= read -r line; do
+  case "$line" in
+    @*) SEEN_TOKENS+=("${line:1}") ;;
+  esac
 done < "$TMPFILE"
 
 UNCHECKED=0
 for cask in "${CASKS[@]}"; do
-  if [[ -z "${SEEN_TOKENS[$cask]:-}" ]]; then
+  if ! is_seen_token "$cask"; then
     # This cask wasn't in JSON output — it may have been renamed or
     # removed upstream. A rename excuse needs brew's own evidence: a
     # returned cask listing this cask in old_tokens (#1552). A name
@@ -251,8 +345,9 @@ for cask in "${CASKS[@]}"; do
     # pairs share the same substring/prefix shape — so the old
     # substring match excused a cask that was never verified and
     # folded it into the healthy verdict.
-    if [[ -n "${RENAMED_TO_NEW[$cask]:-}" ]]; then
-      [[ "$QUIET" == false ]] && echo -e "  ℹ️  $cask (renamed to ${RENAMED_TO_NEW[$cask]} — verified under its new token)"
+    renamed_to_new_get "$cask"
+    if [[ -n "$RENAMED_TO_NEW_RESULT" ]]; then
+      [[ "$QUIET" == false ]] && echo -e "  ℹ️  $cask (renamed to $RENAMED_TO_NEW_RESULT — verified under its new token)"
     elif ! is_skipped "$cask"; then
       # Absent from a *successful* scan: not verified, so it counts as
       # unchecked and must not fold into a "healthy" verdict (#926).

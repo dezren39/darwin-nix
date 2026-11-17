@@ -96,13 +96,15 @@ let
     EOF
 
     # Working files only for repos changed in the last 14 days, so abandoned
-    # ones (test fixtures, finished scratch clones) still age out.
+    # ones (test fixtures, finished scratch clones) still age out. Both
+    # traversals prune node_modules (#1843), like the repo-discovery scan
+    # above: dependency trees are neither probed nor kept alive.
     refreshed=0
     while IFS= read -r g; do
       [ -n "$g" ] || continue
       r=''${g%/.git}
-      [ -n "$(/usr/bin/find "$r" -mtime -14 -print 2>/dev/null | /usr/bin/head -1)" ] || continue
-      /usr/bin/find "$r" -exec /usr/bin/touch -a -h {} + 2>/dev/null
+      [ -n "$(/usr/bin/find "$r" -name node_modules -prune -o -mtime -14 -print 2>/dev/null | /usr/bin/head -1)" ] || continue
+      /usr/bin/find "$r" -name node_modules -prune -o -exec /usr/bin/touch -a -h {} + 2>/dev/null
       refreshed=$((refreshed + 1))
     done <<EOF
     $repos

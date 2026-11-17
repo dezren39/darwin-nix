@@ -60,12 +60,23 @@ run_patch() { # sets OUT, STATUS
   STATUS=$?
 }
 
+run_patch_with_write_failure() { # $1 is css or js; sets OUT, STATUS
+  OUT="$(VSCODE_INSIDERS_APP_DIR="$APP" PATCH_WRITE_FAIL_FOR="$1" bash "$SCRIPT" 2>&1)"
+  STATUS=$?
+}
+
 mtime() { stat -c %y "$1" 2>/dev/null || stat -f %m "$1"; }
+mode() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
 
 # ─── All targets present: every patch applies, exit 0 ─────────────────
 make_fixture
+chmod 640 "$CSS"
+chmod 604 "$JS"
 run_patch
 [ "$STATUS" -eq 0 ] || fail "all-targets run exited $STATUS (want 0; got: $OUT)"
+[ "$(mode "$CSS")" = 640 ] && [ "$(mode "$JS")" = 604 ] \
+  && echo "ok: atomic writes preserved file modes" \
+  || fail "atomic write changed CSS/JS file modes"
 grep -qF 'display:none!important;height:0!important' "$CSS" \
   && echo "ok: Patch 1 applied" || fail "Patch 1 replacement not in CSS"
 grep -qF 'height:0px!important' "$CSS" \
@@ -83,6 +94,29 @@ run_patch
 [ "$(mtime "$CSS")" = "$CSS_MT" ] && [ "$(mtime "$JS")" = "$JS_MT" ] \
   && echo "ok: second run rewrote neither file (mtimes unchanged)" \
   || fail "second run rewrote a file whose content did not change"
+
+# ─── Failed writes leave their target byte-identical and clean temp files ─
+make_fixture
+CSS_SUM="$(sha256sum "$CSS")"
+run_patch_with_write_failure css
+[ "$STATUS" -ne 0 ] || fail "injected CSS write failure exited 0"
+[ "$(sha256sum "$CSS")" = "$CSS_SUM" ] \
+  && echo "ok: failed CSS write preserved original bytes" \
+  || fail "failed CSS write changed the original bytes"
+[ -z "$(find "$WB" -maxdepth 1 -name '.patch-vscode-insiders-*' -print -quit)" ] \
+  && echo "ok: failed CSS write cleaned up temporary file" \
+  || fail "failed CSS write left a temporary file"
+
+make_fixture
+JS_SUM="$(sha256sum "$JS")"
+run_patch_with_write_failure js
+[ "$STATUS" -ne 0 ] || fail "injected JS write failure exited 0"
+[ "$(sha256sum "$JS")" = "$JS_SUM" ] \
+  && echo "ok: failed JS write preserved original bytes" \
+  || fail "failed JS write changed the original bytes"
+[ -z "$(find "$WB" -maxdepth 1 -name '.patch-vscode-insiders-*' -print -quit)" ] \
+  && echo "ok: failed JS write cleaned up temporary file" \
+  || fail "failed JS write left a temporary file"
 
 # ─── Unrelated content: exit 1 naming Patch 1, Patch 2 and Patch 5 ────
 printf 'body{color:red}\n' >"$CSS"

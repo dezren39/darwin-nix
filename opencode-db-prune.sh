@@ -231,7 +231,7 @@ while [ $# -gt 0 ]; do
     --from) arg_require_value "$1" "${2:-}"; arg_once "$1" FROM_SET; FROM="$2"; FROM_SET=1; shift 2 ;;
     --batch) arg_require_value "$1" "${2:-}"; arg_once "$1" BATCH_SET; BATCH="$2"; BATCH_SET=1; shift 2 ;;
     -y|--yes) ASSUME_YES=1; shift ;;
-    -h|--help) usage; exit 0 ;;
+    -h|--help) if [[ $# -gt 1 ]]; then arg_die "unexpected argument: $2"; fi; usage; exit 0 ;;
     *) arg_die "unknown option: $1 (try --help)" ;;
   esac
 done

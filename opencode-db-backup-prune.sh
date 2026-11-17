@@ -71,7 +71,7 @@ while [ $# -gt 0 ]; do
     --db-dir) arg_require_value "$1" "${2:-}"; arg_once "$1" DB_DIR_SET; DB_DIR="$2"; DB_DIR_SET=1; shift 2 ;;
     --apply) arg_conflict --apply --dry-run "$DRY_RUN_SET"; APPLY=1; APPLY_SET=1; shift ;;
     --dry-run) arg_conflict --apply --dry-run "$APPLY_SET"; APPLY=0; DRY_RUN_SET=1; shift ;;
-    -h|--help) usage; exit 0 ;;
+    -h|--help) if [[ $# -gt 1 ]]; then arg_die "unexpected argument: $2"; fi; usage; exit 0 ;;
     *) arg_die "unknown option: $1" ;;
   esac
 done

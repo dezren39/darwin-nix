@@ -29,7 +29,7 @@ usage() {
 # and exits 0.
 if [[ $# -gt 0 ]]; then
     case "$1" in
-        -h|--help) usage; exit 0 ;;
+        -h|--help) if [[ $# -gt 1 ]]; then echo "full-clean: unexpected argument: $2" >&2; usage >&2; exit 2; fi; usage; exit 0 ;;
         *) echo "full-clean: unknown argument: $1" >&2; usage >&2; exit 2 ;;
     esac
 fi
@@ -50,14 +50,30 @@ step() {
 # ---------------------------------------------------------------------------
 step "Checking for running opencode processes"
 # ---------------------------------------------------------------------------
-if pgrep -f '(^|/)opencode($| )' >/dev/null 2>&1; then
-  pgrep -lf '(^|/)opencode($| )' | cut -c1-100 | head -10
-  echo
-  echo "opencode is still running. Stop it first:" >&2
-  echo "  pkill -f opencode && sleep 5 && pgrep -lf opencode" >&2
-  exit 1
-fi
-echo "none running"
+# pgrep exit codes: 0 = match found, 1 = no match, >1 = operational
+# error (e.g. 2 = bad pattern/options). An error is NOT proof that no
+# opencode is running (#1860): treating it as "none running" would run
+# the destructive switch/prune/vacuum/GC sequence while opencode may
+# still be active, defeating this guard. Fail closed on any error.
+pgrep_rc=0
+pgrep -f '(^|/)opencode($| )' >/dev/null 2>&1 || pgrep_rc=$?
+case "$pgrep_rc" in
+  0)
+    pgrep -lf '(^|/)opencode($| )' | cut -c1-100 | head -10
+    echo
+    echo "opencode is still running. Stop it first:" >&2
+    echo "  pkill -f opencode && sleep 5 && pgrep -lf opencode" >&2
+    exit 1
+    ;;
+  1)
+    echo "none running"
+    ;;
+  *)
+    echo "full-clean: pgrep failed with exit $pgrep_rc while checking for running opencode processes" >&2
+    echo "cannot verify opencode is stopped; aborting before any step" >&2
+    exit 2
+    ;;
+esac
 
 # ---------------------------------------------------------------------------
 step "Switching darwin configuration"

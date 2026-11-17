@@ -23,7 +23,22 @@
 #   * an unknown argument -> exit 2 naming it, usage on stderr, and
 #     no brew call at all; --help -> usage, exit 0, no brew call (#1158);
 #   * a missing first-leg directory -> a "does not exist" notice,
-#     exit 0, no raw find error, and the ~/Applications leg still runs (#1255).
+#     exit 0, no raw find error, and the ~/Applications leg still runs (#1255);
+#   * cask app artifacts, not tokens, decide what is managed (#1779):
+#     `iterm2` manages iTerm.app, a multi-artifact cask manages every
+#     artifact, a `target` rename manages the target bundle (not the
+#     source name), an unrelated app is still reported, and a failed
+#     or unparseable `brew info` exits 1 naming the step with no
+#     findings -- enumeration failures are never a silent inventory;
+#   * membership is exact whole-name equality (#1898): an unmanaged
+#     app whose name is a token subsequence of a managed multi-word
+#     bundle (Google Chrome vs managed Google Chrome Canary;
+#     Visual Studio Code vs managed Visual Studio Code - Insiders)
+#     is still reported, while the managed bundles are not;
+#   * an artifact bundle name containing the old artifact-list
+#     delimiter is preserved whole (#1875): Odd|Name.app is
+#     brew-managed and not reported, an unrelated app still is,
+#     and `brew info` still runs exactly once.
 # The first leg's /Applications is redirected with the script's
 # SEARCH_APPLICATIONS_DIR seam (#983); the second leg uses the
 # scratch HOME's ~/Applications. Stubs use #!/bin/sh: the nix build
@@ -78,8 +93,24 @@ case "$1" in
     case "$STUB_BREW_MODE" in
       working) echo "foo" ;;
       all-managed) printf 'foo\nbar\n' ;;
+      artifacts) printf 'iterm2\nsuite\n' ;;
+      subsequence) printf 'google-chrome-canary\nvisual-studio-code-insiders\n' ;;
+      pipe-artifact) printf 'alpha\n' ;;
+      info-fail|info-garbage) echo "foo" ;;
       empty) : ;;
       failing) echo "Error: brew is broken" >&2; exit 1 ;;
+    esac
+    ;;
+  info)
+    case "$STUB_BREW_MODE" in
+      working) printf '%s' '{"casks":[{"token":"foo","artifacts":[{"app":["Foo.app"]}]}]}' ;;
+      all-managed) printf '%s' '{"casks":[{"token":"foo","artifacts":[{"app":["Foo.app"]}]},{"token":"bar","artifacts":[{"app":["Bar.app"]}]}]}' ;;
+      artifacts) printf '%s' '{"casks":[{"token":"iterm2","artifacts":[{"app":["iTerm.app"]}]},{"token":"suite","artifacts":[{"app":["Multi.app"]},{"app":["Helper.app",{"target":"Renamed Helper.app"}]}]}]}' ;;
+      pipe-artifact) printf '%s' '{"casks":[{"token":"alpha","artifacts":[{"app":["Odd|Name.app"]}]}]}' ;;
+      subsequence) printf '%s' '{"casks":[{"token":"google-chrome-canary","artifacts":[{"app":["Google Chrome Canary.app"]}]},{"token":"visual-studio-code-insiders","artifacts":[{"app":["Visual Studio Code - Insiders.app"]}]}]}' ;;
+      info-fail) echo "Error: brew info is broken" >&2; exit 1 ;;
+      info-garbage) printf '%s' 'this is not json' ;;
+      *) echo "brew stub: info must not run in mode $STUB_BREW_MODE" >&2; exit 1 ;;
     esac
     ;;
   *)
@@ -114,6 +145,7 @@ expect_rc() { # expect_rc <desc> <want>
   fi
 }
 list_calls() { grep -c '^list$' "$LOG" || true; }
+info_calls() { grep -c '^info$' "$LOG" || true; }
 search_calls() { grep -c '^search$' "$LOG" || true; }
 
 # --- working brew: foo is a cask, bar is not --------------------------------
@@ -137,9 +169,17 @@ if [ "$(search_calls)" = "0" ]; then
 else
   fail "no brew search calls (working) -- got $(search_calls)"
 fi
-printf 'Checking %s...\nbar\nChecking ~/Applications...\nbar\n' "$APPS" > "$TMP_ROOT/expected"
-check "working brew report byte-identical to the pre-#1617 output" \
+printf 'Checking %s...\nbar\nChecking ~/Applications...\nFound 1 app(s) not installed via Homebrew.\n' "$APPS" > "$TMP_ROOT/expected"
+check "working brew report includes summary after #1617 cleanup" \
   cmp -s "$TMP_ROOT/expected" "$TMP_ROOT/out"
+# --- #1897: the same app in both scan legs is listed and counted once ------
+# (The working fixture puts Bar.app in both $APPS and ~/Applications; the
+# pinned report above already shows bar once with a count of 1.)
+if [ "$(grep -c '^bar$' "$TMP_ROOT/out")" = "1" ]; then
+  echo "ok: app present in both legs is listed once (#1897)"
+else
+  fail "app present in both legs is listed once (#1897) — got $(grep -c '^bar$' "$TMP_ROOT/out") bar lines"
+fi
 
 # --- no unmatched apps: make the empty result explicit -----------------------
 run_search all-managed
@@ -158,6 +198,11 @@ if [ "$(list_calls)" = "1" ]; then
   echo "ok: brew list ran exactly once (empty)"
 else
   fail "brew list ran exactly once (empty) — got $(list_calls)"
+fi
+if [ "$(info_calls)" = "0" ]; then
+  echo "ok: brew info does not run for an empty cask list"
+else
+  fail "brew info does not run for an empty cask list — got $(info_calls)"
 fi
 
 # --- failing brew list: loud exit 1, no findings -----------------------------
@@ -224,6 +269,56 @@ else
   fail "brew list ran exactly once (missing dir) — got $(list_calls)"
 fi
 
+# --- #1779: artifacts, not tokens, decide what is managed -------------------
+APPS2="$TMP_ROOT/Applications2"
+mkdir -p "$APPS2/iTerm.app" "$APPS2/Multi.app" "$APPS2/Renamed Helper.app" "$APPS2/Unrelated.app"
+: > "$LOG"
+HOME="$HOME_DIR" BASH_ENV="$MAPFILE_GUARD" SEARCH_APPLICATIONS_DIR="$APPS2" STUB_BREW_LOG="$LOG" \
+  STUB_BREW_MODE=artifacts PATH="$BIN:$PATH" \
+  bash "$SCRIPT" > "$TMP_ROOT/out" 2> "$TMP_ROOT/err"
+RC=$?
+expect_rc "artifact-matching brew exits 0" 0
+check "renamed bundle iTerm.app (cask iterm2) is not reported" \
+  bash -c "! grep -qx iterm '$TMP_ROOT/out'"
+check "first artifact of a multi-artifact cask (Multi.app) is not reported" \
+  bash -c "! grep -qx multi '$TMP_ROOT/out'"
+check "target-renamed artifact (Renamed Helper.app) is not reported" \
+  bash -c "! grep -qx renamed-helper '$TMP_ROOT/out'"
+check "artifact source name replaced by its target (Helper.app) is not resurrected" \
+  bash -c "! grep -qx helper '$TMP_ROOT/out'"
+check "unrelated app is still reported (artifacts)" \
+  grep -qx unrelated "$TMP_ROOT/out"
+check "second leg still reports its non-cask app (artifacts)" \
+  grep -qx bar "$TMP_ROOT/out"
+if [ "$(list_calls)" = "1" ]; then
+  echo "ok: brew list ran exactly once (artifacts)"
+else
+  fail "brew list ran exactly once (artifacts) — got $(list_calls)"
+fi
+if [ "$(info_calls)" = "1" ]; then
+  echo "ok: brew info ran exactly once (artifacts)"
+else
+  fail "brew info ran exactly once (artifacts) — got $(info_calls)"
+fi
+
+# --- #1779: a failed brew info is a loud enumeration failure ------------------
+run_search info-fail
+expect_rc "failing brew info exits 1" 1
+check "failing brew info names the step on stderr" \
+  grep -q "brew info" "$TMP_ROOT/err"
+check "failing brew info surfaces brew's own stderr" \
+  grep -q "brew info is broken" "$TMP_ROOT/err"
+check "failing brew info reports no findings" \
+  bash -c "! grep -qx -e foo -e bar '$TMP_ROOT/out'"
+
+# --- #1779: unparseable brew info is a loud enumeration failure ---------------
+run_search info-garbage
+expect_rc "unparseable brew info exits 1" 1
+check "unparseable brew info names the step on stderr" \
+  grep -q "brew info" "$TMP_ROOT/err"
+check "unparseable brew info reports no findings" \
+  bash -c "! grep -qx -e foo -e bar '$TMP_ROOT/out'"
+
 # --- missing brew: same exit-1 path ------------------------------------------
 run_search missing
 expect_rc "missing brew exits 1" 1
@@ -231,6 +326,58 @@ check "missing brew names the step on stderr" \
   grep -q "brew list --cask" "$TMP_ROOT/err"
 check "missing brew reports no findings" \
   bash -c "! grep -qx -e foo -e bar '$TMP_ROOT/out'"
+
+
+# --- #1875: a bundle name containing the old delimiter is preserved ---------
+APPS3="$TMP_ROOT/Applications3"
+mkdir -p "$APPS3/Odd|Name.app" "$APPS3/Unrelated.app"
+: > "$LOG"
+HOME="$HOME_DIR" BASH_ENV="$MAPFILE_GUARD" SEARCH_APPLICATIONS_DIR="$APPS3" STUB_BREW_LOG="$LOG"   STUB_BREW_MODE=pipe-artifact PATH="$BIN:$PATH"   bash "$SCRIPT" > "$TMP_ROOT/out" 2> "$TMP_ROOT/err"
+RC=$?
+expect_rc "delimiter-name artifact brew exits 0" 0
+check "delimiter-containing artifact (Odd|Name.app) is not reported under its full name"   bash -c "! grep -qx 'odd|name' '$TMP_ROOT/out'"
+check "delimiter-containing artifact (Odd|Name.app) is not reported under a split fragment"   bash -c "! grep -qx odd '$TMP_ROOT/out'"
+check "unrelated app is still reported (delimiter-name artifacts)"   grep -qx unrelated "$TMP_ROOT/out"
+if [ "$(list_calls)" = "1" ]; then
+  echo "ok: brew list ran exactly once (delimiter-name artifacts)"
+else
+  fail "brew list ran exactly once (delimiter-name artifacts) — got $(list_calls)"
+fi
+if [ "$(info_calls)" = "1" ]; then
+  echo "ok: brew info ran exactly once (delimiter-name artifacts)"
+else
+  fail "brew info ran exactly once (delimiter-name artifacts) — got $(info_calls)"
+fi
+
+# --- #1898: token-subsequence names are not membership -----------------------
+APPS4="$TMP_ROOT/Applications4"
+mkdir -p "$APPS4/Google Chrome.app" "$APPS4/Google Chrome Canary.app" "$APPS4/Visual Studio Code.app" "$APPS4/Visual Studio Code - Insiders.app" "$APPS4/Unrelated.app"
+: > "$LOG"
+HOME="$HOME_DIR" BASH_ENV="$MAPFILE_GUARD" SEARCH_APPLICATIONS_DIR="$APPS4" STUB_BREW_LOG="$LOG" \
+  STUB_BREW_MODE=subsequence PATH="$BIN:$PATH" \
+  bash "$SCRIPT" > "$TMP_ROOT/out" 2> "$TMP_ROOT/err"
+RC=$?
+expect_rc "subsequence brew exits 0" 0
+check "unmanaged token-subsequence app (Google Chrome) is reported" \
+  grep -qx google-chrome "$TMP_ROOT/out"
+check "unmanaged token-subsequence app (Visual Studio Code) is reported" \
+  grep -qx visual-studio-code "$TMP_ROOT/out"
+check "managed multi-word bundle (Google Chrome Canary) is not reported" \
+  bash -c "! grep -qx google-chrome-canary '$TMP_ROOT/out'"
+check "managed multi-word bundle (Visual Studio Code - Insiders) is not reported" \
+  bash -c "! grep -qx visual-studio-code---insiders '$TMP_ROOT/out'"
+check "unrelated app is still reported (subsequence)" \
+  grep -qx unrelated "$TMP_ROOT/out"
+if [ "$(list_calls)" = "1" ]; then
+  echo "ok: brew list ran exactly once (subsequence)"
+else
+  fail "brew list ran exactly once (subsequence) — got $(list_calls)"
+fi
+if [ "$(info_calls)" = "1" ]; then
+  echo "ok: brew info ran exactly once (subsequence)"
+else
+  fail "brew info ran exactly once (subsequence) — got $(info_calls)"
+fi
 
 if [ "$failures" -gt 0 ]; then
   echo "$failures failure(s)" >&2

@@ -286,14 +286,31 @@ do_unmount() {
     info ".opencode not mounted (skipping)"
   fi
 
-  # Clean up empty mount point directory (only if empty and not still
-  # mounted -- rmdir must never run against a live mount point)
-  if [[ -d "$target_opencode" ]]; then
+  # Clean up the mount point itself. A symlinked .opencode is unlinked,
+  # never rmdir'd (#1759): rmdir refuses a symlink with ENOTDIR, [[ -d ]]
+  # follows the link so a live symlink landed in the rmdir branch, and a
+  # dangling symlink failed [[ -d ]] and was skipped with no message at
+  # all -- both then reported "Unmounted" / exit 0 with the symlink still
+  # in place. Mount mode removes the same state with unlink (do_mount).
+  # Both removals are result-checked per the #1323 rule above: a failed
+  # cleanup is named on stderr and counted, never reported as success.
+  if [[ -L "$target_opencode" ]]; then
+    info "Removing symlinked .opencode: $target_opencode"
+    if ! run unlink "$target_opencode"; then
+      err "Failed to remove symlinked .opencode: $target_opencode"
+      failed=1
+    fi
+  elif [[ -d "$target_opencode" ]]; then
+    # Empty mount point directory (only if empty and not still mounted --
+    # rmdir must never run against a live mount point)
     if ! $DRY_RUN && is_mounted "$target_opencode"; then
       warn "Still mounted, leaving mount point: $target_opencode"
     elif [[ -z "$(ls -A "$target_opencode" 2>/dev/null)" ]]; then
       info "Removing empty mount point: $target_opencode"
-      run rmdir "$target_opencode"
+      if ! run rmdir "$target_opencode"; then
+        err "Failed to remove empty mount point: $target_opencode"
+        failed=1
+      fi
     else
       warn "Mount point not empty, leaving: $target_opencode"
     fi
@@ -350,6 +367,38 @@ do_status() {
     info "plans/:   no project-local plans directory"
   fi
 }
+
+# ─── Help/version are sole-argument only (#1894) ─────────────────────
+# The house argument contract (#1830): --help/-h/--version print and
+# exit 0 only when they are the SOLE argument. With anything after
+# them, the trailing argument is unaccounted: name it, usage, exit 1 —
+# the same shape as the unknown-option branch below. A help/version
+# flag reached later in the parse loop (after other arguments were
+# consumed) is rejected by the loop cases for the same reason.
+if [[ $# -gt 0 ]]; then
+  case "$1" in
+    --help | -h)
+      if [[ $# -gt 1 ]]; then
+        err "unknown argument: $2"
+        echo ""
+        usage
+        exit 1
+      fi
+      usage
+      exit 0
+      ;;
+    --version)
+      if [[ $# -gt 1 ]]; then
+        err "unknown argument: $2"
+        echo ""
+        usage
+        exit 1
+      fi
+      echo "$PROG $VERSION"
+      exit 0
+      ;;
+  esac
+fi
 
 # ─── Parse arguments ─────────────────────────────────────────────────────────
 
@@ -411,13 +460,14 @@ while [[ $# -gt 0 ]]; do
       DRY_RUN=true
       shift
       ;;
-    --help | -h)
+    --help | -h | --version)
+      # Sole-argument help/version was handled before the loop (#1894);
+      # reaching this case means other arguments were already consumed,
+      # so the flag is not the sole argument: usage error, exit 1.
+      err "$1 must be the sole argument"
+      echo ""
       usage
-      exit 0
-      ;;
-    --version)
-      echo "$PROG $VERSION"
-      exit 0
+      exit 1
       ;;
     --)
       shift

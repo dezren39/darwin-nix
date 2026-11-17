@@ -174,6 +174,34 @@ else
   counts_ok "$db" || fail "row counts after --auto-vacuum swap are not 500/500/500/10"
   ok_if_clean "$before" "--auto-vacuum bakes INCREMENTAL (2) into the swapped DB, counts preserved"
 fi
+# --- freelist 0 + --auto-vacuum still applies the pragma (#1920). ------
+# The nothing-to-reclaim early exit used to swallow --auto-vacuum: the
+# run exited 0 with auto_vacuum still NONE. The pragma only persists
+# when set in the same connection as a VACUUM (#1088), so the script
+# now vacuums anyway when the flag is set. The no-flag run on the same
+# fixture must keep the early exit (and change nothing).
+before=$failures
+db="$fx/freelist0.db"
+sqlite3 "$db" "CREATE TABLE session(id TEXT); CREATE TABLE message(id TEXT); CREATE TABLE part(id TEXT); CREATE TABLE event(id TEXT); INSERT INTO session VALUES('a'); INSERT INTO message VALUES('a'); INSERT INTO part VALUES('a'); INSERT INTO event VALUES('a');"
+[ "$(freelist_of "$db")" = "0" ] || fail "freelist-0 fixture actually has a nonzero freelist"
+out="$(bash "$VACUUM" --db "$db" -y 2>&1)"; rc=$?
+if [ "$rc" -ne 0 ]; then
+  fail "freelist-0 no-flag run exited $rc: $out"
+else
+  printf '%s' "$out" | grep -q 'Nothing to reclaim' || fail "freelist-0 no-flag run lost the early exit: $out"
+  [ "$(sqlite3 "$db" 'PRAGMA auto_vacuum;')" = "0" ] || fail "freelist-0 no-flag run changed auto_vacuum"
+  [ ! -e "${db}.old" ] || fail "freelist-0 no-flag run swapped the DB"
+fi
+out="$(bash "$VACUUM" --db "$db" -y --auto-vacuum 2>&1)"; rc=$?
+if [ "$rc" -ne 0 ]; then
+  fail "freelist-0 --auto-vacuum run exited $rc: $out"
+else
+  av="$(sqlite3 "$db" 'PRAGMA auto_vacuum;')"
+  [ "$av" = "2" ] || fail "freelist-0 --auto-vacuum left auto_vacuum at $av, expected 2 (INCREMENTAL)"
+  [ "$(count_of "$db" session)" = "1" ] && [ "$(count_of "$db" event)" = "1" ] || fail "freelist-0 --auto-vacuum run changed row counts"
+  ok_if_clean "$before" "freelist 0: no-flag run early-exits unchanged; --auto-vacuum vacuums and bakes INCREMENTAL (2)"
+fi
+
 
 # --- Failed row-count queries abort before the swap (#1386). ----------
 # The verify loop used to turn a failed COUNT(*) on the original into

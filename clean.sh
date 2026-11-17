@@ -49,6 +49,7 @@ USE_SUDO=""          # empty = decide from --dry-run
 CLEAN_TMPDIR="${CLEAN_TMPDIR:-0}"   # opt-in: wipe /private/var/folders
 VAR_FOLDERS_ROOT="${VAR_FOLDERS_ROOT:-/private/var/folders}" # var-folders root for the --tmpdir sweep AND the opencode scratch tidy/discovery roots below (env seam so tests can point it at a fixture, #1346)
 TIDY_MOVE_FAILURES=0   # incremented by tidy_file_to_bucket/tidy_dir_to_bucket when an archive move fails (#1337)
+BREW_DRIFT_FAILURES=0  # incremented by brew_cask_drift_check when `brew list --cask` fails (#1918)
 EXPIRE_REFLOG="${EXPIRE_REFLOG:-0}" # opt-in: force reflog expiry during maintenance
 DOCKER_AGE_DAYS="${DOCKER_AGE_DAYS:-}"  # set = age-scoped docker prune, VM preserved
 PRUNE_UNKNOWN_SCRATCH="${PRUNE_UNKNOWN_SCRATCH:-0}" # opt-in: delete, not just flag, the name-blind catch-all
@@ -251,7 +252,7 @@ while [ $# -gt 0 ]; do
     --no-git-maintenance|--no-maintenance|--no-git) { DO_MAINTENANCE=0; arg_used REPO_FLAGS_USED "$1"; } ;;
     --quick)          { MAINT_DEPTH="--quick"; arg_used REPO_FLAGS_USED --quick; } ;;
     --dry-run)        DRY_RUN=1 ;;
-    -h|--help)        usage; exit 0 ;;
+    -h|--help)        { if [[ $# -gt 1 ]]; then arg_die "unexpected argument: $2"; fi; usage; exit 0; } ;;
     -*)               echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
     *)                { [ -n "$1" ] || arg_die "empty positional argument (target must not be empty)"; [ "$TARGET_SET" -eq 0 ] || arg_die "unexpected argument: $1 (target already set to $TARGET_PATH)"; TARGET_PATH="$1"; TARGET_SET=1; } ;;
   esac
@@ -446,7 +447,7 @@ run() {
 del() {
   local p
   for p in "$@"; do
-    [ -e "$p" ] || continue
+    [ -e "$p" ] || [ -L "$p" ] || continue
     if [ "$DRY_RUN" = "1" ]; then echo "  would delete: ${p/#$HOME/\~}"; continue; fi
     chmod -R u+w "$p" 2>/dev/null
     rm -rf "$p" 2>/dev/null || warn "could not fully remove $p"
@@ -454,6 +455,24 @@ del() {
 }
 # have CMD -- true if runnable. Missing tools are informational, never fatal.
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# dir_has_open_handles <path> -- three-outcome open-handle guard (#1803):
+#   0 = held (lsof printed at least one holder)
+#   1 = not held (lsof ran and reported no holder)
+#   2 = unknown (lsof is unavailable, or failed in a way that is not its
+#       no-match exit) -- callers must fail CLOSED (keep) on unknown: an
+#       lsof that cannot run used to read as "nothing has it open" at
+#       five deletion sites, silently disabling the in-use guard.
+# lsof exits 1 when nothing matches, so nonzero alone is NOT unknown:
+# unknown is decided by the command -v check plus exits other than 0/1.
+dir_has_open_handles() {
+  local path="$1" out rc
+  command -v lsof >/dev/null 2>&1 || return 2
+  out="$(lsof +D "$path" 2>/dev/null)"; rc=$?
+  [ -n "$out" ] && return 0
+  if [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ]; then return 1; fi
+  return 2
+}
 
 # ---------------------------------------------------------------------------
 # Privilege handling
@@ -597,11 +616,11 @@ unknown_scratch_is_known() {
   return 1
 }
 sweep_unknown_large_scratch() {
-  local base="$1" entry name size_kb size_mb age_cutoff_min created modified status
+  local base="$1" entry name size_kb size_mb age_cutoff_min created modified status handles_rc
   [ -d "$base" ] || return 0
   age_cutoff_min=$((UNKNOWN_SCRATCH_STALE_DAYS * 1440))
   for entry in "$base"/*; do
-    [ -e "$entry" ] || continue
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
     name="${entry##*/}"
     [ "$name" = "opencode" ] && continue   # owned by the git-aware tidy pass, not this
     unknown_scratch_is_known "$name" && continue
@@ -609,7 +628,9 @@ sweep_unknown_large_scratch() {
     size_mb=$((size_kb / 1024))
     [ "$size_mb" -ge "$UNKNOWN_SCRATCH_MIN_MB" ] || continue
     [ -n "$(find "$entry" -maxdepth 0 -mmin "-${age_cutoff_min}" -print 2>/dev/null)" ] && continue  # too fresh
-    [ -n "$(lsof +D "$entry" 2>/dev/null | head -1)" ] && continue  # something has it open
+    dir_has_open_handles "$entry"; handles_rc=$?
+    [ "$handles_rc" -eq 0 ] && continue  # something has it open
+    if [ "$handles_rc" -eq 2 ]; then echo "  keeping (cannot verify open handles; lsof unavailable): ${entry/#$CALLER_USER_HOME/\~}"; continue; fi
     created="$(stat_birth_time "$entry")"
     modified="$(stat_mtime_time "$entry")"
     if [ "$PRUNE_UNKNOWN_SCRATCH" = "1" ]; then
@@ -659,7 +680,7 @@ run_tmpdir_sweep() {
 if [ "$ONLY_UNKNOWN_SCRATCH" = "1" ]; then
   echo "🗒️  --only-unknown-scratch: running just the name-blind catch-all"
   sweep_unknown_large_scratch "$CALLER_USER_HOME/.local/share/opencode/tmp"
-  for _vf_t in /private/var/folders/*/*/T; do
+  for _vf_t in "$VAR_FOLDERS_ROOT"/*/*/T; do
     [ -d "$_vf_t" ] || continue
     sweep_unknown_large_scratch "$_vf_t"
   done
@@ -961,8 +982,29 @@ for _d in "${VSCODE_EXT_DIRS[@]}"; do prune_vscode_extensions "$_d"; done
 # (handbrake vs handbrake-app) leaving BOTH installed, or something commented
 # out that was never uninstalled because homebrew.onActivation.cleanup="none".
 # Reported, never auto-removed: deleting an app is not a cache operation.
-if [ -n "$(real_brew)" ] && [ -f "$SELF_DIR/casks.nix" ]; then
+brew_cask_drift_check() {
+  local _b _brew_err _cask_list _orphans _dead _c _app
   _b="$(real_brew)"
+  [ -n "$_b" ] || return 0
+  [ -f "$SELF_DIR/casks.nix" ] || return 0
+  # Enumerate the installed casks ONCE, with the exit status and stderr
+  # preserved (#1918): both checks below used to re-run `brew list --cask`
+  # inside process substitutions / command substitutions with 2>/dev/null,
+  # so a present-but-failing brew silently produced empty results and the
+  # run claimed "no drift" at exit 0. Fail closed instead, like search.sh's
+  # list failure (#957): name the step, surface brew's own stderr, and
+  # record the failure in BREW_DRIFT_FAILURES so the run exits non-zero
+  # at the end (the #1337 tidy pattern). A genuinely empty successful
+  # list keeps the normal path.
+  _brew_err=$(mktemp)
+  if ! _cask_list=$(as_user "$_b" list --cask 2>"$_brew_err"); then
+    warn "brew list --cask failed -- orphan/dead-cask drift checks cannot run; a broken brew is not 'no drift'"
+    [ -s "$_brew_err" ] && sed 's/^/     /' "$_brew_err" >&2
+    rm -f "$_brew_err"
+    BREW_DRIFT_FAILURES=$((BREW_DRIFT_FAILURES + 1))
+    return 0
+  fi
+  rm -f "$_brew_err"
   # `brew list --cask` prints BARE names (docker-desktop) while casks.nix may
   # declare them tap-qualified (homebrew/cask/docker-desktop). Comparing the two
   # verbatim reported declared casks as orphans -- which is not a cosmetic bug,
@@ -970,7 +1012,7 @@ if [ -n "$(real_brew)" ] && [ -f "$SELF_DIR/casks.nix" ]; then
   # tap prefix from the declared side before comparing. Same shape as the
   # tap-qualified entries in brews.nix (gromgit/fuse/bindfs-mac).
   _orphans=$(comm -23 \
-    <(as_user "$_b" list --cask 2>/dev/null | sort) \
+    <(printf '%s\n' "$_cask_list" | sort) \
     <(grep -oE '^[[:space:]]*"[^"]+"' "$SELF_DIR/casks.nix" | tr -d ' "' | sed 's|.*/||' | sort) 2>/dev/null)
   if [ -n "$_orphans" ]; then
     warn "casks installed but not in casks.nix (uninstall with: $_b uninstall --cask <name>)"
@@ -983,12 +1025,14 @@ if [ -n "$(real_brew)" ] && [ -f "$SELF_DIR/casks.nix" ]; then
   # entry would then delete a working app. visual-studio-code is exactly that
   # case today.
   _dead=""
-  for _c in $(as_user "$_b" list --cask 2>/dev/null); do
-    _app=$(as_user "$_b" info --cask "$_c" 2>/dev/null | grep -oE '/Applications/[^ ]*\.app' | head -1)
+  for _c in $_cask_list; do
+    _app=$(as_user "$_b" info --cask "$_c" 2>/dev/null | grep -oE '/Applications/[^ ]*\.app' | head -1 || true)
     [ -n "$_app" ] && [ ! -d "$_app" ] && _dead="$_dead $_c"
   done
   [ -n "$_dead" ] && { warn "casks installed but the app is MISSING from disk:"; printf '     %s\n' $_dead; }
-fi
+  return 0
+}
+brew_cask_drift_check
 if have mas && [ -f "$SELF_DIR/masApps.nix" ]; then
   _masorph=$(comm -23 \
     <(as_user mas list 2>/dev/null | awk '{$1=""; sub(/ *\([^)]*\)$/,""); sub(/^ /,""); print}' | sort) \
@@ -1051,9 +1095,11 @@ fi
 # directory nobody has touched pins its whole closure in /nix/store. Dropping
 # the root lets the next nix-collect-garbage reclaim it.
 echo "🧽 Stale flake GC roots (>${CACHE_STALE_DAYS}d)"
-gcroot_dir=/nix/var/nix/gcroots/auto
-if [ -d "$gcroot_dir" ]; then
-  freed=0
+sweep_stale_flake_gc_roots() {
+  local gcroot_dir="${1:-/nix/var/nix/gcroots/auto}"
+  [ -d "$gcroot_dir" ] || return 0
+  local freed=0
+  local link target owner_dir fresh fresh_status
   while IFS= read -r link; do
     target="$(readlink "$link" 2>/dev/null)" || continue
     [ -n "$target" ] || continue
@@ -1080,14 +1126,24 @@ if [ -d "$gcroot_dir" ]; then
     esac
     case "$target" in
       */.direnv/*|*/result|*/result-*)
-        if [ -z "$(find "$owner_dir" -maxdepth 2 -type f -mtime "-${CACHE_STALE_DAYS}" -print -quit 2>/dev/null)" ]; then
+        # Check the find status separately from its output (#1859): a
+        # failed scan (I/O or permission error) also yields empty output,
+        # and treating that as staleness would delete both the GC-root
+        # link and the result symlink without freshness evidence. Warn
+        # and preserve both paths on scan failure.
+        fresh="$(find "$owner_dir" -maxdepth 2 -type f -mtime "-${CACHE_STALE_DAYS}" -print -quit 2>/dev/null)"
+        fresh_status=$?
+        if [ "$fresh_status" -ne 0 ]; then
+          warn "flake GC root freshness scan failed for $owner_dir; preserving $link and $target"
+        elif [ -z "$fresh" ]; then
           del "$link" "$target"; freed=$((freed + 1))
         fi
         ;;
     esac
   done < <(find "$gcroot_dir" -maxdepth 1 -type l 2>/dev/null)
   info "flake GC roots released: $freed"
-fi
+}
+sweep_stale_flake_gc_roots
 
 # nix garbage collection runs LAST of the nix work, deliberately: expiring
 # tarball-cache refs and releasing stale flake GC roots above is what makes
@@ -1267,12 +1323,22 @@ sweep_short_lived_scratch() {
   local base="$1" removed=0
   [ -d "$base" ] || return 0
   local -A fresh=()
-  local f entry name g match
+  local f entry name g match fresh_list
+  if ! fresh_list=$(mktemp "${TMPDIR:-/tmp}/clean-short-scratch.XXXXXX"); then
+    warn "short-lived scratch ($base): cannot create freshness-scan file; skipping this base"
+    return 0
+  fi
+  if ! find "$base" -maxdepth 1 -mindepth 1 -mmin "-$((SHORT_SCRATCH_STALE_HOURS * 60))" -print0 > "$fresh_list" 2>/dev/null; then
+    rm -f "$fresh_list"
+    warn "short-lived scratch ($base): freshness scan failed; skipping this base"
+    return 0
+  fi
   while IFS= read -r -d '' f; do
     fresh["${f##*/}"]=1
-  done < <(find "$base" -maxdepth 1 -mindepth 1 -mmin "-$((SHORT_SCRATCH_STALE_HOURS * 60))" -print0 2>/dev/null)
+  done < "$fresh_list"
+  rm -f "$fresh_list"
   for entry in "$base"/*; do
-    [ -e "$entry" ] || continue
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
     name="${entry##*/}"
     short_scratch_is_kept "$name" && continue
     [ -n "${fresh[$name]:-}" ] && continue   # touched inside the window: keep
@@ -1304,7 +1370,7 @@ done
 # earlier (scope-independent, alongside SHORT_SCRATCH_GLOBS) so
 # --only-unknown-scratch can call them without running anything above first.
 sweep_unknown_large_scratch "$CALLER_USER_HOME/.local/share/opencode/tmp"
-for _vf_t in /private/var/folders/*/*/T; do
+for _vf_t in "$VAR_FOLDERS_ROOT"/*/*/T; do
   [ -d "$_vf_t" ] || continue
   sweep_unknown_large_scratch "$_vf_t"
 done
@@ -1326,15 +1392,19 @@ done
 # match costs nothing.
 PG_SCRATCH_STALE_HOURS="${PG_SCRATCH_STALE_HOURS:-8}"
 sweep_ad_hoc_postgres_dirs() {
-  local base="$1" marker pgdir
+  local base="$1" marker pgdir handles_rc
   [ -d "$base" ] || return 0
   while IFS= read -r marker; do
     pgdir="$(dirname "$marker")"
     case "$pgdir" in "$base/opencode"/*) continue ;; esac # owned by the tidy pass, not here
-    if [ -z "$(find "$pgdir" -type f -not -name "$SPOTLIGHT_MARKER" -mmin "-$((PG_SCRATCH_STALE_HOURS * 60))" -print -quit 2>/dev/null)" ] &&
-       [ -z "$(lsof +D "$pgdir" 2>/dev/null | head -1)" ]; then
-      if [ "$DRY_RUN" = "1" ]; then echo "  would remove (postgres data dir, idle >${PG_SCRATCH_STALE_HOURS}h): ${pgdir/#$CALLER_USER_HOME/\~}"
-      else echo "  removing (postgres data dir, idle >${PG_SCRATCH_STALE_HOURS}h): ${pgdir/#$CALLER_USER_HOME/\~}"; del "$pgdir"; fi
+    if [ -z "$(find "$pgdir" -type f -not -name "$SPOTLIGHT_MARKER" -mmin "-$((PG_SCRATCH_STALE_HOURS * 60))" -print -quit 2>/dev/null)" ]; then
+      dir_has_open_handles "$pgdir"; handles_rc=$?
+      if [ "$handles_rc" -eq 2 ]; then
+        echo "  keeping (cannot verify open handles; lsof unavailable): ${pgdir/#$CALLER_USER_HOME/\~}"
+      elif [ "$handles_rc" -eq 1 ]; then
+        if [ "$DRY_RUN" = "1" ]; then echo "  would remove (postgres data dir, idle >${PG_SCRATCH_STALE_HOURS}h): ${pgdir/#$CALLER_USER_HOME/\~}"
+        else echo "  removing (postgres data dir, idle >${PG_SCRATCH_STALE_HOURS}h): ${pgdir/#$CALLER_USER_HOME/\~}"; del "$pgdir"; fi
+      fi
     fi
   done < <(find "$base" -maxdepth 2 -name PG_VERSION -type f 2>/dev/null)
 }
@@ -1497,9 +1567,26 @@ ACTIVE_ARTIFACT_STALE_HOURS="${ACTIVE_ARTIFACT_STALE_HOURS:-8}"
 # bookkeeping file clean.sh itself left behind. Verified against a real
 # worktree's .venv: its only file inside the window was its own marker.
 artifact_is_prunable() {
-  local path="$1"
-  [ -n "$(find "$path" -type f -not -name "$SPOTLIGHT_MARKER" -mmin "-$((ACTIVE_ARTIFACT_STALE_HOURS * 60))" -print -quit 2>/dev/null)" ] && return 1
-  [ -n "$(lsof +D "$path" 2>/dev/null | head -1)" ] && return 1
+  local path="$1" handles_rc
+  # Fail closed on a failed freshness scan (#1861): an empty result is
+  # only evidence of staleness when find actually ran. Its exit status
+  # used to be discarded, so a failed scan (bad path, partial traversal)
+  # read as "no fresh files" and the caller deleted the artifact. Same
+  # fail-closed shape as the #1853 scratch sweep. (Plain assignment, not
+  # local: local would mask the substitution exit status.)
+  local fresh
+  fresh="$(find "$path" -type f -not -name "$SPOTLIGHT_MARKER" -mmin "-$((ACTIVE_ARTIFACT_STALE_HOURS * 60))" -print -quit 2>/dev/null)"
+  if [ $? -ne 0 ]; then
+    echo "  warning: freshness scan failed for $path; keeping artifact (fail closed)" >&2
+    return 1
+  fi
+  [ -n "$fresh" ] && return 1
+  dir_has_open_handles "$path"; handles_rc=$?
+  [ "$handles_rc" -eq 0 ] && return 1
+  if [ "$handles_rc" -eq 2 ]; then
+    echo "  warning: cannot verify open handles for $path (lsof unavailable); keeping artifact (fail closed)" >&2
+    return 1
+  fi
   return 0
 }
 
@@ -1546,7 +1633,36 @@ del_and_stub() {
 }
 
 MARKED=0; TRASHED=0; PRUNED=0; SKIPPED_TRACKED=0; NONGIT=0
-declare -A IDLE_CACHE=()
+# IDLE_CACHE maps a repo/parent path to its idle verdict (idle|active).
+# Parallel indexed arrays rather than an associative array: that
+# declaration needs Bash 4+, but the supported entrypoints (./clean.sh via its
+# /usr/bin/env bash shebang, just clean) can resolve to the Bash 3.2
+# macOS ships at /bin/bash (#1829). Lookup is linear; the cache holds
+# one entry per distinct repo/parent in a single walk, so it stays tiny.
+IDLE_CACHE_KEYS=()
+IDLE_CACHE_VALUES=()
+idle_cache_get() { # idle_cache_get <path> - sets IDLE_CACHE_VALUE; returns 1 on a miss
+  local _i
+  IDLE_CACHE_VALUE=""
+  for (( _i = 0; _i < ${#IDLE_CACHE_KEYS[@]}; _i++ )); do
+    if [ "${IDLE_CACHE_KEYS[$_i]}" = "$1" ]; then
+      IDLE_CACHE_VALUE="${IDLE_CACHE_VALUES[$_i]}"
+      return 0
+    fi
+  done
+  return 1
+}
+idle_cache_set() { # idle_cache_set <path> <idle|active>
+  local _i
+  for (( _i = 0; _i < ${#IDLE_CACHE_KEYS[@]}; _i++ )); do
+    if [ "${IDLE_CACHE_KEYS[$_i]}" = "$1" ]; then
+      IDLE_CACHE_VALUES[$_i]="$2"
+      return 0
+    fi
+  done
+  IDLE_CACHE_KEYS+=("$1")
+  IDLE_CACHE_VALUES+=("$2")
+}
 
 echo "🗑  .trash, artifacts, Spotlight markers"
 while IFS=$'\t' read -r tag reason status path; do
@@ -1565,10 +1681,11 @@ while IFS=$'\t' read -r tag reason status path; do
         case "$path" in "$r"/*) [ ${#r} -gt ${#owner_repo} ] && owner_repo="$r" ;; esac
       done < "$OWNERS_FILE"
       if [ -n "$owner_repo" ]; then
-        if [ -z "${IDLE_CACHE[$owner_repo]:-}" ]; then
-          if repo_is_idle "$owner_repo"; then IDLE_CACHE[$owner_repo]=idle; else IDLE_CACHE[$owner_repo]=active; fi
+        if ! idle_cache_get "$owner_repo"; then
+          if repo_is_idle "$owner_repo"; then idle_cache_set "$owner_repo" idle; else idle_cache_set "$owner_repo" active; fi
+          idle_cache_get "$owner_repo"
         fi
-        if [ "${IDLE_CACHE[$owner_repo]}" = "idle" ]; then
+        if [ "$IDLE_CACHE_VALUE" = "idle" ]; then
           del_and_stub "$path"; PRUNED=$((PRUNED + 1))
         elif artifact_is_prunable "$path"; then
           # Repo is dirty or recently touched, but THIS artifact (not source)
@@ -1585,14 +1702,15 @@ while IFS=$'\t' read -r tag reason status path; do
         # forever, so a .venv outside a repo could not be reclaimed at all.
         # Judged against its own parent, using the same staleness window.
         parent="$(dirname "$path")"
-        if [ -z "${IDLE_CACHE[$parent]:-}" ]; then
+        if ! idle_cache_get "$parent"; then
           if [ -z "$(find "$parent" \
                \( "${CACHE_EXPR[@]}" -o "${RISK_EXPR[@]}" -o -name .git -o -name .worktrees \) -prune -o \
                -type f -mtime "-${ARTIFACT_STALE_DAYS}" -print -quit 2>/dev/null)" ]; then
-            IDLE_CACHE[$parent]=idle
-          else IDLE_CACHE[$parent]=active; fi
+            idle_cache_set "$parent" idle
+          else idle_cache_set "$parent" active; fi
+          idle_cache_get "$parent"
         fi
-        if [ "${IDLE_CACHE[$parent]}" = "idle" ]; then
+        if [ "$IDLE_CACHE_VALUE" = "idle" ]; then
           del_and_stub "$path"; PRUNED=$((PRUNED + 1)); NONGIT=$((NONGIT + 1))
         else
           mark_dir "$path"
@@ -1645,11 +1763,15 @@ while IFS= read -r _owner; do
   while IFS= read -r _marker; do
     _pgdir="$(dirname "$_marker")"
     [ -d "$_pgdir" ] || continue
-    if [ -z "$(find "$_pgdir" -type f -not -name "$SPOTLIGHT_MARKER" -mmin "-$((PG_SCRATCH_STALE_HOURS * 60))" -print -quit 2>/dev/null)" ] &&
-       [ -z "$(lsof +D "$_pgdir" 2>/dev/null | head -1)" ]; then
-      if [ "$DRY_RUN" = "1" ]; then echo "  would remove (postgres data dir in repo, idle >${PG_SCRATCH_STALE_HOURS}h): ${_pgdir/#$CALLER_USER_HOME/\~}"
-      else echo "  removing (postgres data dir in repo, idle >${PG_SCRATCH_STALE_HOURS}h): ${_pgdir/#$CALLER_USER_HOME/\~}"; del "$_pgdir"; fi
-      _repo_pg_removed=$((_repo_pg_removed + 1))
+    if [ -z "$(find "$_pgdir" -type f -not -name "$SPOTLIGHT_MARKER" -mmin "-$((PG_SCRATCH_STALE_HOURS * 60))" -print -quit 2>/dev/null)" ]; then
+      dir_has_open_handles "$_pgdir"; _handles_rc=$?
+      if [ "$_handles_rc" -eq 2 ]; then
+        echo "  keeping (cannot verify open handles; lsof unavailable): ${_pgdir/#$CALLER_USER_HOME/\~}"
+      elif [ "$_handles_rc" -eq 1 ]; then
+        if [ "$DRY_RUN" = "1" ]; then echo "  would remove (postgres data dir in repo, idle >${PG_SCRATCH_STALE_HOURS}h): ${_pgdir/#$CALLER_USER_HOME/\~}"
+        else echo "  removing (postgres data dir in repo, idle >${PG_SCRATCH_STALE_HOURS}h): ${_pgdir/#$CALLER_USER_HOME/\~}"; del "$_pgdir"; fi
+        _repo_pg_removed=$((_repo_pg_removed + 1))
+      fi
     fi
   done < <(find "$_owner" \( -type d \( -name .git -o -name node_modules -o -name .worktrees \) -prune \) -o -name PG_VERSION -type f -print 2>/dev/null)
 done < "$OWNERS_FILE"
@@ -1725,7 +1847,7 @@ clean_opencode_scratch_dir() {
   local base="$1" days="$2" label="$3" n=0 freed_kb=0 entry k
   [ -d "$base" ] || return 0
   for entry in "$base"/*; do
-    [ -e "$entry" ] || continue
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
     if opencode_entry_is_idle "$entry" "$days"; then
       k="$(du -sk "$entry" 2>/dev/null | cut -f1)"
       if [ "$DRY_RUN" = "1" ]; then echo "  would remove: ${entry/#$CALLER_USER_HOME/\~} ($(( ${k:-0} / 1024 )) MB)"
@@ -1753,7 +1875,7 @@ clean_opencode_root_scratch() {
   local base="$1" days="$2" n=0 freed_kb=0 entry name p skip k
   [ -d "$base" ] || return 0
   for entry in "$base"/*; do
-    [ -e "$entry" ] || continue
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
     name="$(basename "$entry")"
     skip=0
     for p in "${OPENCODE_ROOT_PROTECTED[@]}"; do [ "$name" = "$p" ] && skip=1 && break; done
@@ -1824,7 +1946,7 @@ tidy_dir_has_recent_file() {
 # of what the dir is named (pgdata, pgm2, heron-once-pg's data dir, ...) or
 # how big it got -- a much more reliable signal than name or size alone.
 tidy_purge_postgres_dirs() {
-  local root="$1" marker pgdir
+  local root="$1" marker pgdir handles_rc
   while IFS= read -r marker; do
     [ -n "$marker" ] || continue
     pgdir="$(dirname "$marker")"
@@ -1833,8 +1955,13 @@ tidy_purge_postgres_dirs() {
     # recent-file gate does not protect an idle-but-running server, which
     # can write nothing for >OPENCODE_TIDY_PROTECT_DAYS while still
     # holding its data dir open.
-    if [ -n "$(lsof +D "$pgdir" 2>/dev/null | head -1)" ]; then
+    dir_has_open_handles "$pgdir"; handles_rc=$?
+    if [ "$handles_rc" -eq 0 ]; then
       echo "  keeping (postgres data dir in use): ${pgdir/#$CALLER_USER_HOME/\~}"
+      continue
+    fi
+    if [ "$handles_rc" -eq 2 ]; then
+      echo "  keeping (cannot verify open handles; lsof unavailable): ${pgdir/#$CALLER_USER_HOME/\~}"
       continue
     fi
     if [ "$DRY_RUN" = "1" ]; then echo "  would remove (postgres data dir): ${pgdir/#$CALLER_USER_HOME/\~}"
@@ -1850,7 +1977,7 @@ tidy_purge_postgres_dirs() {
 tidy_purge_large_entries() {
   local root="$1" limit_kb=$(( OPENCODE_TIDY_LARGE_MB * 1024 )) entry k
   for entry in "$root"/*; do
-    [ -e "$entry" ] || continue
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
     k="$(du -sk "$entry" 2>/dev/null | cut -f1)"
     if [ "${k:-0}" -ge "$limit_kb" ]; then
       if [ "$DRY_RUN" = "1" ]; then echo "  would remove (>${OPENCODE_TIDY_LARGE_MB}MB): ${entry/#$CALLER_USER_HOME/\~} ($(( k / 1024 )) MB)"
@@ -1902,8 +2029,18 @@ tidy_dir_to_bucket() {
 }
 
 tidy_classify_and_place() {
-  local dir="$1" bucket_root="$2" g wt kept_worktree="" idle_worktrees=()
+  local dir="$1" bucket_root="$2" g wt kept_worktree="" idle_worktrees=() inventory
   tidy_dir_has_recent_file "$dir" && return 0   # rule 2, tidy's own protect window
+
+  # The nested-worktree inventory decides whether anything below may be
+  # purged or archived, so its failure must be observable (#1863): a find
+  # that fails -- wholly or partially -- is NOT an empty inventory. On
+  # failure, warn and skip every purge/removal/archive action for this
+  # directory; an undiscovered worktree must never be treated as scratch.
+  if ! inventory="$(find "$dir" -mindepth 1 -name .git -print 2>/dev/null)"; then
+    warn "tidy: nested-worktree discovery failed for $dir; skipping purge/archive for safety"
+    return 0
+  fi
 
   # Rule 3, worktree-bearing case: a nested worktree's own kept/idle status
   # is judged by OPENCODE_WORKTREE_STALE_DAYS (the same gate the top-level
@@ -1920,7 +2057,7 @@ tidy_classify_and_place() {
     else
       kept_worktree="$wt"; break
     fi
-  done < <(find "$dir" -mindepth 1 -name .git -print 2>/dev/null)
+  done <<< "$inventory"
 
   if [ -n "$kept_worktree" ]; then
     return 0   # a kept worktree inside: leave this entire directory alone
@@ -1943,7 +2080,7 @@ tidy_opencode_loose_files() {
   local base="$1" bucket_root="$2" entry name
   [ -d "$base" ] || return 0
   for entry in "$base"/*; do
-    [ -e "$entry" ] || continue
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
     [ "$entry" = "$bucket_root" ] && continue
     name="$(basename "$entry")"
     if [ -f "$entry" ]; then
@@ -1952,6 +2089,11 @@ tidy_opencode_loose_files() {
     elif [ -d "$entry" ]; then
       [ -e "$entry/.git" ] && continue           # rule 1
       tidy_classify_and_place "$entry" "$bucket_root"
+    elif [ -L "$entry" ]; then
+      # Dangling symlink (#1915): [ -f ] and [ -d ] are both false for
+      # one, so without this branch it was neither filed away nor
+      # removed. File it away like a loose file (mv keeps the link).
+      tidy_file_to_bucket "$entry" "$bucket_root"
     fi
   done
 }
@@ -2140,6 +2282,14 @@ fi
 # ends at exit 0 looking exactly like success.
 if [ "$TIDY_MOVE_FAILURES" -gt 0 ]; then
   warn "opencode tidy: $TIDY_MOVE_FAILURES archive move(s) failed -- clean.sh exiting non-zero"
+  exit 1
+fi
+
+# A failed brew cask enumeration fails the run (#1918): the drift checks
+# recorded it in BREW_DRIFT_FAILURES at the call site above, so a broken
+# brew no longer ends at exit 0 looking exactly like "no drift".
+if [ "$BREW_DRIFT_FAILURES" -gt 0 ]; then
+  warn "brew cask drift checks: $BREW_DRIFT_FAILURES enumeration failure(s) -- clean.sh exiting non-zero"
   exit 1
 fi
 outcome_finish

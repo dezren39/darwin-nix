@@ -23,6 +23,7 @@ import os
 import re
 import shutil
 import sys
+import tempfile
 
 HOME = os.path.expanduser("~")
 MCPX = "/run/current-system/sw/bin/mcpx"
@@ -66,11 +67,24 @@ def write(path, text, what):
     # stays intact. An unresolvable or unwritable target raises here
     # and is reported through the #906 per-client failure path.
     dest = os.path.realpath(path) if os.path.islink(path) else path
-    tmp = f"{dest}.mcp-clients.tmp"
-    with open(tmp, "w") as fh:
-        fh.write(text)
-    shutil.copymode(dest, tmp)
-    os.replace(tmp, dest)
+    fd, tmp = tempfile.mkstemp(
+        prefix=f".{os.path.basename(dest)}.mcp-clients-",
+        suffix=".tmp",
+        dir=os.path.dirname(dest) or ".",
+        text=True,
+    )
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(text)
+        shutil.copymode(dest, tmp)
+        os.replace(tmp, dest)
+        tmp = None
+    finally:
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except FileNotFoundError:
+                pass
 
 
 def json_client(path, entry):

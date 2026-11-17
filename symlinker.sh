@@ -1,6 +1,30 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
+# symlinker-bash-guard:start (#1836)
+# ─── Bash version contract ───────────────────────────────────────────────────
+# This script uses associative arrays (declare -A), which need Bash 4+.
+# Stock macOS ships Bash 3.2 as /bin/bash and the #!/usr/bin/env bash
+# shebang resolves to it there, so without this guard the script died
+# mid-run with an opaque declare error after doing partial work. Refuse
+# early, by name, with the supported invocation paths instead. The
+# supported contract is Bash 4+: the packaged wrapper (pkgs/symlinker,
+# `nix run .#symlinker`) always runs a modern Bash, and
+# `just link-git-dirs` resolves one explicitly.
+symlinker_require_bash() {
+    local major="${1:-0}"
+    if [[ -z "${BASH_VERSION:-}" || "$major" -lt 4 ]]; then
+        echo "symlinker: requires Bash 4 or newer (found: ${BASH_VERSION:-not bash}) — associative arrays (declare -A) are not available in Bash 3.2" >&2
+        echo "symlinker: run it one of these ways instead:" >&2
+        echo "  nix run .#symlinker -- [args]                    # packaged wrapper (modern Bash, pinned)" >&2
+        echo "  /opt/homebrew/bin/bash ./symlinker.sh [args]     # Homebrew Bash on macOS" >&2
+        echo "  nix develop --command ./symlinker.sh [args]      # inside the flake dev shell" >&2
+        exit 2
+    fi
+}
+symlinker_require_bash "${BASH_VERSINFO[0]:-}"
+# symlinker-bash-guard:end
+
 RUN_TIMESTAMP="$(date +%s)"
 
 # ─── Record original command ─────────────────────────────────────────────────
@@ -328,7 +352,14 @@ while [[ $# -gt 0 ]]; do
       done
       [[ ${#FILTER_MATCH[@]} -gt $before ]] || { echo "Error: --match requires at least one value" >&2; exit 1; }
       ;;
-    -h|--help)           usage; exit 0 ;;
+    -h|--help)
+      if [[ $# -gt 1 ]]; then
+        echo "Error: Unknown argument: $2" >&2
+        echo >&2
+        usage >&2
+        exit 2
+      fi
+      usage; exit 0 ;;
     *)
       echo "Error: Unknown argument: $1" >&2
       echo >&2
@@ -1360,17 +1391,27 @@ if $DRY_RUN; then
     for i in "${!conflict_links[@]}"; do
       lnk="${conflict_links[$i]}"
       tgt="${conflict_targets[$i]}"
-      log "mv $(disp "$lnk") $(disp "$lnk")${BACKUP_SUFFIX}"
-      done_backed_up_orig+=("$lnk")
-      done_backed_up_bak+=("${lnk}${BACKUP_SUFFIX}")
-      log "ln -s $(disp "$tgt") $(disp "$lnk")"
-      done_linked_links+=("$lnk")
-      done_linked_targets+=("$tgt")
+      if [[ -e "${lnk}${BACKUP_SUFFIX}" || -L "${lnk}${BACKUP_SUFFIX}" ]]; then
+        log "REFUSE mv $(disp "$lnk") $(disp "$lnk")${BACKUP_SUFFIX}: backup destination already exists"
+      else
+        log "mv $(disp "$lnk") $(disp "$lnk")${BACKUP_SUFFIX}"
+        done_backed_up_orig+=("$lnk")
+        done_backed_up_bak+=("${lnk}${BACKUP_SUFFIX}")
+        log "ln -s $(disp "$tgt") $(disp "$lnk")"
+        done_linked_links+=("$lnk")
+        done_linked_targets+=("$tgt")
+      fi
     done
     if $SKIP_BACKUP; then
       for i in "${!conflict_links[@]}"; do
         lnk="${conflict_links[$i]}"
         bak="${lnk}${BACKUP_SUFFIX}"
+        # A destination the loop above refused (occupied by a previous
+        # backup, #1908) was never backed up by this run, so there is
+        # nothing of ours to delete: do not simulate deleting it.
+        if [[ -e "$bak" || -L "$bak" ]]; then
+          continue
+        fi
         log "rm -rf $(disp "$lnk")${BACKUP_SUFFIX}"
         done_deleted_paths+=("$bak")
       done
@@ -1420,6 +1461,17 @@ else
       lnk="${conflict_links[$i]}"
       tgt="${conflict_targets[$i]}"
       bak="${lnk}${BACKUP_SUFFIX}"
+
+      # Refuse to overwrite an occupied backup destination (#1811): with a
+      # fixed --backup-suffix the destination may already hold a previous
+      # backup, and mv would silently destroy it.
+      if [[ -e "$bak" || -L "$bak" ]]; then
+        done_error_paths+=("$lnk")
+        done_error_msgs+=("backup destination already exists: $bak (refusing to overwrite)")
+        EXIT_CODE=1
+        if $STRICT; then break; fi
+        continue
+      fi
 
       # Back up the conflict
       err_msg=""

@@ -128,11 +128,36 @@ check "rebuild.sh --bogus prints usage on stderr" \
   grep -q "Usage: rebuild.sh" "$TMP_ROOT/err"
 expect_no_steps "rebuild.sh --bogus"
 
+# --- rebuild.sh: help followed by an extra argument (#1830) -------------------
+# The complete argument list is validated before help is honored: a help
+# flag plus anything else is a usage error naming the extra argument.
+: > "$LOG"
+run_script "$REBUILD_WORK" rebuild.sh --help unexpected
+expect_rc "rebuild.sh --help unexpected exits 2" 2
+check "rebuild.sh --help unexpected names the extra argument on stderr" \
+  grep -q -- "unexpected" "$TMP_ROOT/err"
+check "rebuild.sh --help unexpected prints usage on stderr" \
+  grep -q "Usage: rebuild.sh" "$TMP_ROOT/err"
+expect_no_steps "rebuild.sh --help unexpected"
+
+: > "$LOG"
+run_script "$REBUILD_WORK" rebuild.sh -h --bogus
+expect_rc "rebuild.sh -h --bogus exits 2" 2
+check "rebuild.sh -h --bogus names the extra argument on stderr" \
+  grep -q -- "--bogus" "$TMP_ROOT/err"
+check "rebuild.sh -h --bogus prints usage on stderr" \
+  grep -q "Usage: rebuild.sh" "$TMP_ROOT/err"
+expect_no_steps "rebuild.sh -h --bogus"
+
 # --- rebuild.sh: no-argument control ------------------------------------------
 : > "$LOG"
 run_script "$REBUILD_WORK" rebuild.sh
 expect_rc "rebuild.sh no argument exits 0" 0
-check "rebuild.sh no argument runs git add" grep -q "^git add \.$" "$LOG"
+if grep -q "^git " "$LOG"; then
+  fail "rebuild.sh no argument must not run git (a053a8e) — log: $(cat "$LOG")"
+else
+  echo "ok: rebuild.sh no argument runs no git command"
+fi
 check "rebuild.sh no argument runs nix flake update" \
   grep -q "^nix .* flake update$" "$LOG"
 check "rebuild.sh no argument runs ./simple-rebuild.sh" \
@@ -169,6 +194,67 @@ check "backup-zed.sh no argument lists installed extensions sorted" \
   grep -qx "ext-a" "$BACKUP_WORK/.zed/installed.txt"
 check "backup-zed.sh no argument lists ext-b" \
   grep -qx "ext-b" "$BACKUP_WORK/.zed/installed.txt"
+
+
+# --- backup-zed.sh: snapshot coherence on failure (#1787) ----------------------
+# Seed a prior snapshot, then break one stage at a time: every failure
+# must preserve all three prior outputs and exit nonzero, and the
+# success path must publish all three new outputs with no temp files
+# left behind.
+ZED_OUT="$BACKUP_WORK/.zed"
+ZED_SETTINGS_SRC="$HOME_DIR/.config/zed/settings.json"
+ZED_INDEX_SRC="$HOME_DIR/Library/Application Support/Zed/extensions/index.json"
+ZED_INSTALLED_SRC="$HOME_DIR/Library/Application Support/Zed/extensions/installed"
+
+seed_prior_snapshot() {
+  echo 'OLD settings' > "$ZED_OUT/settings.json"
+  echo 'OLD index' > "$ZED_OUT/index.json"
+  echo 'old-ext' > "$ZED_OUT/installed.txt"
+}
+check_prior_snapshot() { # check_prior_snapshot <desc-prefix>
+  check "$1: settings preserved" grep -qx 'OLD settings' "$ZED_OUT/settings.json"
+  check "$1: index preserved" grep -qx 'OLD index' "$ZED_OUT/index.json"
+  check "$1: installed list preserved" grep -qx 'old-ext' "$ZED_OUT/installed.txt"
+}
+check_no_zed_leftovers() { # check_no_zed_leftovers <desc>
+  check "$1" test "$(ls -A "$ZED_OUT" | LC_ALL=C sort | tr '\n' ' ')" = "index.json installed.txt settings.json "
+}
+
+# Missing source index: settings source is NEW, the index copy fails.
+seed_prior_snapshot
+echo 'NEW settings' > "$ZED_SETTINGS_SRC"
+mv "$ZED_INDEX_SRC" "$ZED_INDEX_SRC.away"
+run_script "$BACKUP_WORK" backup-zed.sh
+expect_rc "backup-zed.sh missing index exits nonzero" 1
+check "backup-zed.sh missing index names the index source on stderr" \
+  grep -q "extensions index source" "$TMP_ROOT/err"
+check_prior_snapshot "backup-zed.sh missing index"
+check_no_zed_leftovers "backup-zed.sh missing index leaves no temp files"
+mv "$ZED_INDEX_SRC.away" "$ZED_INDEX_SRC"
+echo 'NEW index' > "$ZED_INDEX_SRC"
+
+# Failed enumeration: the installed-extensions dir is gone, find fails.
+mv "$ZED_INSTALLED_SRC" "$ZED_INSTALLED_SRC.away"
+run_script "$BACKUP_WORK" backup-zed.sh
+expect_rc "backup-zed.sh failed enumeration exits nonzero" 1
+check "backup-zed.sh failed enumeration names the enumeration on stderr" \
+  grep -q "cannot enumerate installed extensions" "$TMP_ROOT/err"
+check_prior_snapshot "backup-zed.sh failed enumeration"
+check_no_zed_leftovers "backup-zed.sh failed enumeration leaves no temp files"
+mv "$ZED_INSTALLED_SRC.away" "$ZED_INSTALLED_SRC"
+
+# Success: all three outputs publish the new backup, temps cleaned up.
+run_script "$BACKUP_WORK" backup-zed.sh
+expect_rc "backup-zed.sh success exits 0" 0
+check "backup-zed.sh success publishes new settings" \
+  grep -qx 'NEW settings' "$ZED_OUT/settings.json"
+check "backup-zed.sh success publishes new index" \
+  grep -qx 'NEW index' "$ZED_OUT/index.json"
+check "backup-zed.sh success publishes new installed list" \
+  grep -qx "ext-a" "$ZED_OUT/installed.txt"
+check "backup-zed.sh success installed list has ext-b" \
+  grep -qx "ext-b" "$ZED_OUT/installed.txt"
+check_no_zed_leftovers "backup-zed.sh success leaves no temp files"
 
 if [ "$failures" -gt 0 ]; then
   echo "$failures failure(s)" >&2

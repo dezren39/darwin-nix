@@ -63,7 +63,30 @@
 set -uo pipefail
 PATH=${BREW_ADOPT_PATH:-/run/current-system/sw/bin:/usr/bin:/bin:/usr/sbin:/sbin}
 
-PRIMARY_USER=${1:?usage: brew-adopt-unmanaged.sh PRIMARY_USER}
+# Argument contract (#1884): exactly one positional argument, the
+# primary user. Anything else is a usage error (exit 2) BEFORE any side
+# effects - this script runs as root during activation, so a stray
+# argument must never be silently ignored. --help/-h prints usage and
+# exits 0, also without side effects.
+usage() {
+  echo "usage: brew-adopt-unmanaged.sh PRIMARY_USER"
+}
+
+case ${1:-} in
+  --help | -h)
+    if [ $# -ne 1 ]; then
+      usage >&2
+      exit 2
+    fi
+    usage
+    exit 0
+    ;;
+esac
+if [ $# -ne 1 ]; then
+  usage >&2
+  exit 2
+fi
+PRIMARY_USER=$1
 BREW=${BREW_ADOPT_BREW:-/opt/homebrew/bin/brew}
 SUDO=${BREW_ADOPT_SUDO:-/usr/bin/sudo}
 PLISTBUDDY=${BREW_ADOPT_PLISTBUDDY:-/usr/libexec/PlistBuddy}
@@ -185,8 +208,21 @@ elif [ -d "$APPLICATIONS/OneDrive.app" ]; then
   else
     installed_version=${bundle_version:-$short_version}
   fi
-  if [ -n "$vendored_version" ] && [ -n "$installed_version" ] &&
-    [ "$(vercmp "$installed_version" "$vendored_version")" = "1" ]; then
+  if [ -z "$installed_version" ]; then
+    log "ERROR: OneDrive is present at $APPLICATIONS/OneDrive.app but its version could not be read: both CFBundleVersion and CFBundleShortVersionString are missing or unreadable in $APPLICATIONS/OneDrive.app/Contents/Info.plist."
+    log "ERROR: without the installed version, the downgrade guard cannot prove the vendored pkg (${vendored_version:-unknown}) is not a downgrade, so it fails closed."
+    log "ERROR: remedy: fix or reinstall OneDrive so its Info.plist is readable, or remove $APPLICATIONS/OneDrive.app if the bundle is corrupt — then re-run ./s."
+    log "ERROR: aborting before brew bundle so the failure is this message, not the installer's."
+    exit 1
+  fi
+  if [ -z "$vendored_version" ]; then
+    log "ERROR: OneDrive is present at $APPLICATIONS/OneDrive.app (installed version $installed_version) but the vendored cask version could not be read from $vendored_file: the file is missing, unparsable, or its version stanza is unreadable."
+    log "ERROR: without the vendored version, the downgrade guard cannot prove the vendored pkg is not a downgrade of $installed_version, so it fails closed."
+    log "ERROR: remedy: restore or fix homebrew-local/Casks/onedrive.rb so its version stanza is readable, or remove $APPLICATIONS/OneDrive.app if OneDrive should not be adopted — then re-run ./s."
+    log "ERROR: aborting before brew bundle so the failure is this message, not the installer's."
+    exit 1
+  fi
+  if [ "$(vercmp "$installed_version" "$vendored_version")" = "1" ]; then
     log "ERROR: OneDrive self-updated to $installed_version — newer than the vendored cask ($vendored_version) — before brew adopted it."
     log "ERROR: the vendored pkg would be a downgrade and its installer would refuse it inside brew bundle."
     log "ERROR: remedy: bump homebrew-local/Casks/onedrive.rb to $installed_version (same URL pattern; sha256 of Microsoft's pkg for that version), or comment the onedrive entry in casks.nix back out — then re-run ./s."

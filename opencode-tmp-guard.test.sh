@@ -23,6 +23,11 @@
 #                  <name>.from-tmpdir-<stamp>, then relinked (#1456)
 #   wrong target:  $T/opencode symlinks elsewhere          -> WARN naming the
 #                  actual target, link left in place (#1456)
+#   working files: $T/wrepo has recent ordinary files plus nested
+#                  node_modules trees (#1843)               -> ordinary files
+#                  refreshed, node_modules entries NOT refreshed; a repo
+#                  whose only recent files are inside node_modules is not
+#                  counted as changed by the freshness probe
 #
 # Run: bash opencode-tmp-guard.test.sh (exit 0 = all passed)
 set -u
@@ -170,6 +175,51 @@ grep -q "points at $T4/elsewhere, not" "$work/out4"
 check "1456 wrong target: WARN names the actual target" $?
 [ "$(readlink "$T4/opencode")" = "$T4/elsewhere" ]
 check "1456 wrong target: symlink left in place" $?
+
+# --- Scenario 5: working-file refresh prunes node_modules (#1843) --
+# The repo-discovery scan prunes node_modules, but the working-file
+# freshness probe (-mtime -14) and the atime-refresh touch pass did
+# not, so dependency trees were walked and kept alive every run.
+T5="$work/T5"
+HOME5="$work/home5"
+mkdir -p "$T5/wrepo/node_modules/pkg/deep" "$T5/wrepo/sub/node_modules/lib" "$T5/wrepo/sub" \
+  "$T5/nmrepo/node_modules/pkg" "$HOME5"
+seed_gitdir "$T5/wrepo/.git"
+printf 'app\n' > "$T5/wrepo/app.js"
+printf 'dep\n' > "$T5/wrepo/node_modules/pkg/deep/index.js"
+printf 'nested dep\n' > "$T5/wrepo/sub/node_modules/lib/x.js"
+printf 'ordinary nested\n' > "$T5/wrepo/sub/ordinary.js"
+for f in "$T5/wrepo/app.js" "$T5/wrepo/node_modules/pkg/deep/index.js" \
+  "$T5/wrepo/sub/node_modules/lib/x.js" "$T5/wrepo/sub/ordinary.js"; do
+  touch -a -t $OLD_T "$f"
+done
+# nmrepo: only its node_modules file is recent; everything else is old
+# in both atime and mtime, so a pruning probe finds nothing recent.
+seed_gitdir "$T5/nmrepo/.git"
+printf 'stale\n' > "$T5/nmrepo/stale.js"
+printf 'dep\n' > "$T5/nmrepo/node_modules/pkg/index.js"
+touch -a -m -t $OLD_T "$T5/nmrepo/.git/HEAD" "$T5/nmrepo/stale.js"
+touch -m -t $OLD_T "$T5/nmrepo" "$T5/nmrepo/.git"
+touch -a -t $OLD_T "$T5/nmrepo/node_modules/pkg/index.js"
+touch "$work/ref5"
+
+rc=$(GUARD_TEST_T="$T5" HOME="$HOME5" PATH="$work/bin:$PATH" bash "$work/guard.sh" > "$work/out5" 2>&1; echo $?)
+[ "$rc" -eq 0 ]; check "1843 working-file run exits 0" $?
+refreshed5() { # $1 = file; 0 if its atime is newer than the scenario-5 marker
+  [ -n "$(find "$1" -anewer "$work/ref5" 2>/dev/null)" ]
+}
+refreshed5 "$T5/wrepo/app.js"; check "1843 recent ordinary working file refreshed" $?
+refreshed5 "$T5/wrepo/sub/ordinary.js"; check "1843 nested ordinary working file refreshed" $?
+refreshed5 "$T5/wrepo/node_modules/pkg/deep/index.js"; [ $? -ne 0 ]
+check "1843 node_modules file NOT refreshed by the touch pass" $?
+refreshed5 "$T5/wrepo/sub/node_modules/lib/x.js"; [ $? -ne 0 ]
+check "1843 nested node_modules file NOT refreshed by the touch pass" $?
+refreshed5 "$T5/nmrepo/stale.js"; [ $? -ne 0 ]
+check "1843 probe prunes node_modules: repo recent only in node_modules NOT refreshed" $?
+refreshed5 "$T5/nmrepo/node_modules/pkg/index.js"; [ $? -ne 0 ]
+check "1843 node_modules-only repo: dependency file NOT refreshed" $?
+grep -q "working files in 1 (changed <14d)" "$work/out5"
+check "1843 run reports exactly 1 repo with recent working files" $?
 
 if [ "$failures" -gt 0 ]; then
   echo "FAILURES: $failures"

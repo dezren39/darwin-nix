@@ -266,6 +266,9 @@ esac
 # oversized -- for --depth. 08 is probed as accepted decimal 8
 # (rule 6, #881).
 probe_rejected "unknown option: --bogus" --bogus
+# #1893: --help is honored only as the sole argument.
+probe_rejected "unexpected-extra-arg" --help unexpected-extra-arg
+probe_rejected "--bogus" -h --bogus
 probe_rejected "spotlight-exclude-artifacts: --depth requires a value" --depth
 probe_rejected "spotlight-exclude-artifacts: --depth requires a value" --depth --dry-run
 probe_rejected "spotlight-exclude-artifacts: --depth may be given only once" --no-system --dry-run --path "$VALID" --depth 1 --depth 3

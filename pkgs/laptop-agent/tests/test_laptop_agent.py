@@ -9,6 +9,7 @@ import http.client
 import io
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -227,6 +228,199 @@ class AuthNonAsciiTest(unittest.TestCase):
         self.assertEqual(status, 401)
         self.assertEqual(json.loads(body), {"error": "bad token"})
 
+
+class AuthFailureConnectionTest(unittest.TestCase):
+    """Issue #1911: a 401 must not leave the request body on a live
+    keep-alive connection.
+
+    Oracle: on ONE http.client.HTTPConnection, a wrong-token POST with
+    a body is answered 401 with `Connection: close` and the unchanged
+    {"error": "bad token"} body; the follow-up right-token request on
+    the same connection object is then served normally (the client
+    reconnects to a clean 200) instead of being parsed as a request
+    line and answered with http.server's HTML 400 Bad request syntax.
+    """
+
+    def setUp(self):
+        self.token = "<MASKED_SECRET_002>"
+        with tempfile.NamedTemporaryFile("w", delete=False) as f:
+            f.write(self.token + "\n")
+            self.token_path = f.name
+        self.port = free_port()
+        env = dict(os.environ,
+                   LAPTOP_AGENT_TOKEN_FILE=self.token_path,
+                   LAPTOP_AGENT_HOST="127.0.0.1",
+                   LAPTOP_AGENT_PORT=str(self.port),
+                   LAPTOP_AGENT_STATE=tempfile.mkdtemp())
+        self.proc = subprocess.Popen([sys.executable, str(AGENT)], env=env,
+                                     stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE)
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            try:
+                conn = self._conn()
+                status, _, _ = self._call(conn, "GET", "/health", self.token)
+                conn.close()
+                if status == 200:
+                    return
+            except Exception:
+                time.sleep(0.1)
+        self.tearDown()
+        self.fail("agent did not start")
+
+    def tearDown(self):
+        self.proc.terminate()
+        self.proc.wait(timeout=10)
+        os.unlink(self.token_path)
+
+    def _conn(self):
+        return http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+
+    def _call(self, conn, method, path, token, body=None):
+        headers = {"X-Agent-Token": token,
+                   "Content-Type": "application/json"}
+        data = json.dumps(body).encode() if body is not None else None
+        conn.request(method, path, body=data, headers=headers)
+        r = conn.getresponse()
+        payload = r.read()
+        try:
+            parsed = json.loads(payload) if payload else {}
+        except ValueError:
+            parsed = {}
+        return r.status, r.getheader("Connection"), parsed
+
+    def _assert_401_close_then_ok(self, path, body, ok_statuses):
+        conn = self._conn()
+        status, connection, parsed = self._call(
+            conn, "POST", path, "WRONG-TOKEN", body)
+        self.assertEqual(status, 401, parsed)
+        self.assertEqual(parsed, {"error": "bad token"})
+        self.assertEqual(connection, "close")
+        status, _, parsed = self._call(conn, "POST", path, self.token, body)
+        self.assertIn(status, ok_statuses, parsed)
+        self.assertNotEqual(status, 400, parsed)
+        conn.close()
+        return parsed
+
+    def test_exec_401_closes_and_reused_connection_works(self):
+        parsed = self._assert_401_close_then_ok(
+            "/exec", {"cmds": [{"argv": ["/bin/echo", "hi"]}]}, (200,))
+        self.assertIn("results", parsed)
+
+    def test_jobs_401_closes_and_reused_connection_works(self):
+        parsed = self._assert_401_close_then_ok(
+            "/jobs", {"argv": ["/bin/sh", "-c", "true"]}, (200, 202))
+        self.assertIn("job_id", parsed)
+
+
+
+class AuthedUnreadBodyConnectionTest(unittest.TestCase):
+    """Issue #1916: authenticated POST paths that never parse the body
+    (kill, unknown routes) must drain it before answering.
+
+    Oracle: on ONE http.client.HTTPConnection, an authed POST with a
+    JSON body to /jobs/<unknown>/kill answers 404 and to an unknown
+    route answers 404, and a following GET /health on the same
+    connection is served 200 -- the drained body is not parsed as the
+    next request line (which used to produce http.server's HTML 400).
+    """
+
+    def setUp(self):
+        self.token = "<MASKED_SECRET_003>"
+        with tempfile.NamedTemporaryFile("w", delete=False) as f:
+            f.write(self.token + "\n")
+            self.token_path = f.name
+        self.port = free_port()
+        env = dict(os.environ,
+                   LAPTOP_AGENT_TOKEN_FILE=self.token_path,
+                   LAPTOP_AGENT_HOST="127.0.0.1",
+                   LAPTOP_AGENT_PORT=str(self.port),
+                   LAPTOP_AGENT_STATE=tempfile.mkdtemp())
+        self.proc = subprocess.Popen([sys.executable, str(AGENT)], env=env,
+                                     stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE)
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            try:
+                conn = self._conn()
+                status, _, _ = self._call(conn, "GET", "/health", self.token)
+                conn.close()
+                if status == 200:
+                    return
+            except Exception:
+                time.sleep(0.1)
+        self.tearDown()
+        self.fail("agent did not start")
+
+    def tearDown(self):
+        self.proc.terminate()
+        self.proc.wait(timeout=10)
+        os.unlink(self.token_path)
+
+    def _conn(self):
+        return http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+
+    def _call(self, conn, method, path, body=None):
+        headers = {"X-Agent-Token": self.token,
+                   "Content-Type": "application/json"}
+        data = json.dumps(body).encode() if body is not None else None
+        conn.request(method, path, body=data, headers=headers)
+        r = conn.getresponse()
+        payload = r.read()
+        try:
+            parsed = json.loads(payload) if payload else {}
+        except ValueError:
+            parsed = {}
+        return r.status, r.getheader("Connection"), parsed
+
+    def _assert_health_ok(self, conn):
+        status, _, parsed = self._call(conn, "GET", "/health")
+        self.assertEqual(status, 200, parsed)
+        self.assertTrue(parsed.get("ok"), parsed)
+
+    def test_kill_unknown_job_with_body_then_health_same_connection(self):
+        conn = self._conn()
+        status, connection, parsed = self._call(
+            conn, "POST", "/jobs/deadbeef/kill",
+            {"argv": ["/bin/echo", "hi"]})
+        self.assertEqual(status, 404, parsed)
+        self.assertEqual(parsed, {"error": "no such job"})
+        self.assertNotEqual(connection, "close")
+        self._assert_health_ok(conn)
+        conn.close()
+
+    def test_unknown_route_with_body_then_health_same_connection(self):
+        conn = self._conn()
+        status, connection, parsed = self._call(
+            conn, "POST", "/no-such-route", {"argv": ["/bin/echo", "hi"]})
+        self.assertEqual(status, 404, parsed)
+        self.assertEqual(parsed, {"error": "no such route"})
+        self.assertNotEqual(connection, "close")
+        self._assert_health_ok(conn)
+        conn.close()
+
+    def test_kill_running_job_with_body_then_health_same_connection(self):
+        conn = self._conn()
+        status, _, parsed = self._call(
+            conn, "POST", "/jobs",
+            {"argv": ["/bin/sh", "-c", "sleep 30"]})
+        self.assertIn(status, (200, 202), parsed)
+        job_id = parsed["job_id"]
+        status, connection, parsed = self._call(
+            conn, "POST", f"/jobs/{job_id}/kill", {"reason": "test"})
+        self.assertEqual(status, 200, parsed)
+        self.assertEqual(parsed, {"ok": True, "job_id": job_id})
+        self.assertNotEqual(connection, "close")
+        self._assert_health_ok(conn)
+        conn.close()
+
+    def test_kill_unknown_job_without_body_still_404(self):
+        conn = self._conn()
+        status, _, parsed = self._call(conn, "POST", "/jobs/deadbeef/kill")
+        self.assertEqual(status, 404, parsed)
+        self.assertEqual(parsed, {"error": "no such job"})
+        self._assert_health_ok(conn)
+        conn.close()
 
 class TailFileTest(unittest.TestCase):
     def test_job_public_samples_state_before_reading_spools(self):
@@ -556,6 +750,124 @@ class JobSlotsTest(unittest.TestCase):
             status, body = call("POST", "/exec", {
                 "cmds": [{"argv": [sys.executable, "-c", "pass"]}]})
             self.assertEqual(status, 200, body)
+        finally:
+            proc.terminate()
+            proc.wait(timeout=10)
+            proc.stdout.close()
+            proc.stderr.close()
+            os.unlink(token_path)
+            shutil.rmtree(state_dir, ignore_errors=True)
+
+
+
+class ExecSpoolFailureTest(unittest.TestCase):
+    """Issue #1923: POST /exec spool-dir creation OSError escapes run_one.
+
+    Oracle: when tempfile.mkdtemp under STATE_DIR/exec raises OSError,
+    run_one returns the same per-command error entry shape as a Popen
+    failure ({"exit": None, "error": ...}), so POST /exec answers 200
+    JSON instead of dropping the connection, and results of commands
+    that already ran in the same batch are preserved.
+    """
+
+    def test_run_one_spool_oserror_returns_error_entry(self):
+        with tempfile.NamedTemporaryFile("w", delete=False) as t:
+            t.write("exec-spool-test-token\n")
+            token_path = t.name
+        os.environ.setdefault("LAPTOP_AGENT_TOKEN_FILE", token_path)
+        sys.path.insert(0, str(AGENT.parent))
+        import laptop_agent as la
+        with tempfile.TemporaryDirectory() as td:
+            good = Path(td) / "good"
+            (good / "exec").mkdir(parents=True)
+            blocker = Path(td) / "blocker"
+            blocker.write_text("not a directory")
+            spec = {"argv": [sys.executable, "-c", "print(12345)"]}
+            with patch.object(la, "STATE_DIR", good):
+                ok = la.run_one(spec, 10)
+            self.assertEqual(ok["exit"], 0, ok)
+            self.assertIn("12345", ok["stdout"])
+            # STATE_DIR is now a regular file: mkdtemp(dir=STATE_DIR/exec)
+            # raises NotADirectoryError, an OSError subclass.
+            with patch.object(la, "STATE_DIR", blocker):
+                # Batch shape of _do_POST: first cmd ran under good state,
+                # second hits the spool failure; both entries survive.
+                results = [ok, la.run_one(spec, 10)]
+            self.assertEqual(len(results), 2)
+            self.assertEqual(results[0]["exit"], 0)
+            self.assertIsNone(results[1]["exit"])
+            self.assertIn("error", results[1])
+            self.assertIn("NotADirectoryError", results[1]["error"])
+            self.assertEqual(results[1]["stdout"], "")
+
+    def test_exec_spool_failure_returns_200_json_not_dropped(self):
+        token = "exec-spool-failure-test-token"
+        with tempfile.NamedTemporaryFile("w", delete=False) as f:
+            f.write(token + "\n")
+            token_path = f.name
+        state_dir = tempfile.mkdtemp()
+        port = free_port()
+        env = dict(os.environ,
+                   LAPTOP_AGENT_TOKEN_FILE=token_path,
+                   LAPTOP_AGENT_HOST="127.0.0.1",
+                   LAPTOP_AGENT_PORT=str(port),
+                   LAPTOP_AGENT_STATE=state_dir)
+        proc = subprocess.Popen([sys.executable, str(AGENT)], env=env,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE)
+        headers = {"X-Agent-Token": token,
+                   "Content-Type": "application/json"}
+
+        def call(method, path, body=None):
+            data = json.dumps(body).encode() if body is not None else None
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}{path}", data=data,
+                headers=headers, method=method)
+            try:
+                with urllib.request.urlopen(req, timeout=20) as r:
+                    return r.status, json.loads(r.read())
+            except urllib.error.HTTPError as e:
+                with e:
+                    return e.code, json.loads(e.read())
+
+        try:
+            deadline = time.time() + 10
+            while True:
+                try:
+                    status, body = call("GET", "/health")
+                    if status == 200 and body["ok"]:
+                        break
+                except Exception:
+                    if time.time() > deadline:
+                        raise
+                    time.sleep(0.1)
+
+            # Replace the initialized exec spool parent after startup:
+            # mkdtemp now fails with ENOTDIR for every command.
+            exec_dir = Path(state_dir) / "exec"
+            exec_dir.rmdir()
+            exec_dir.write_text("not a directory")
+            status, body = call("POST", "/exec", {
+                "cmds": [{"argv": [sys.executable, "-c", "pass"]},
+                         {"argv": [sys.executable, "-c", "pass"]}]})
+            # Before the fix this POST got an empty reply (dropped
+            # connection); urlopen would raise instead of returning.
+            self.assertEqual(status, 200, body)
+            self.assertEqual(len(body["results"]), 2)
+            for entry in body["results"]:
+                self.assertIsNone(entry["exit"], entry)
+                self.assertIn("error", entry)
+
+            # Daemon still healthy, and /exec recovers once the spool
+            # parent is a directory again.
+            status, body = call("GET", "/health")
+            self.assertEqual(status, 200, body)
+            exec_dir.unlink()
+            exec_dir.mkdir()
+            status, body = call("POST", "/exec", {
+                "cmds": [{"argv": [sys.executable, "-c", "pass"]}]})
+            self.assertEqual(status, 200, body)
+            self.assertEqual(body["results"][0]["exit"], 0, body)
         finally:
             proc.terminate()
             proc.wait(timeout=10)
@@ -1963,3 +2275,112 @@ class ReaperStartupTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+MAX_EXEC_COMMANDS = int(re.search(
+    r"^MAX_EXEC_COMMANDS = (\d+)", AGENT.read_text(), re.M).group(1))
+
+
+class ExecBatchBoundsTest(unittest.TestCase):
+    """Issue #1842: one POST /exec batch must not hold a SEMA slot for
+    an unbounded aggregate duration.
+
+    Oracle: a batch of exactly MAX_EXEC_COMMANDS runs to completion; a
+    batch one command larger is rejected 400 before any command runs
+    or any slot is taken; and a batch whose early command consumes the
+    shared timeout budget reports the later commands as batch-deadline
+    timeouts without launching them.
+    """
+
+    def setUp(self):
+        self.token = "<MASKED_SECRET_002>"
+        with tempfile.NamedTemporaryFile("w", delete=False) as f:
+            f.write(self.token + "\n")
+            self.token_path = f.name
+        self.port = free_port()
+        self.state = tempfile.mkdtemp()
+        env = dict(os.environ,
+                   LAPTOP_AGENT_TOKEN_FILE=self.token_path,
+                   LAPTOP_AGENT_HOST="127.0.0.1",
+                   LAPTOP_AGENT_PORT=str(self.port),
+                   LAPTOP_AGENT_STATE=self.state)
+        self.proc = subprocess.Popen([sys.executable, str(AGENT)], env=env,
+                                     stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE)
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            try:
+                status, body = self._call("GET", "/health")
+                if status == 200 and body.get("ok"):
+                    return
+            except Exception:
+                time.sleep(0.1)
+        self.tearDown()
+        self.fail("agent did not start")
+
+    def tearDown(self):
+        self.proc.terminate()
+        self.proc.wait(timeout=10)
+        os.unlink(self.token_path)
+
+    def _call(self, method, path, body=None):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port,
+                                          timeout=60)
+        try:
+            conn.request(method, path,
+                         body=json.dumps(body).encode()
+                         if body is not None else None,
+                         headers={"X-Agent-Token": self.token,
+                                  "Content-Type": "application/json"})
+            resp = conn.getresponse()
+            return resp.status, json.loads(resp.read().decode())
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _pass_cmd():
+        return {"argv": [sys.executable, "-c", "pass"]}
+
+    def test_batch_at_max_commands_is_accepted(self):
+        status, body = self._call(
+            "POST", "/exec",
+            body={"cmds": [self._pass_cmd()
+                           for _ in range(MAX_EXEC_COMMANDS)],
+                  "timeout_s": 120})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(len(body["results"]), MAX_EXEC_COMMANDS)
+        self.assertTrue(all(r["exit"] == 0 for r in body["results"]))
+
+    def test_batch_one_over_max_is_rejected_and_runs_nothing(self):
+        marker = os.path.join(self.state, "oversized-ran")
+        cmds = [self._pass_cmd() for _ in range(MAX_EXEC_COMMANDS)]
+        cmds.append({"argv": [sys.executable, "-c",
+                              f"open({marker!r}, 'w').write('x')"]})
+        status, body = self._call("POST", "/exec",
+                                  body={"cmds": cmds, "timeout_s": 120})
+        self.assertEqual(status, 400, body)
+        self.assertIn("MAX_EXEC_COMMANDS", body.get("error", ""))
+        self.assertFalse(os.path.exists(marker))
+        # The rejection took no slot: an ordinary request still works.
+        status, body = self._call("POST", "/exec",
+                                  body={"cmds": [self._pass_cmd()]})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["results"][0]["exit"], 0)
+
+    def test_aggregate_deadline_stops_later_commands(self):
+        marker = os.path.join(self.state, "after-deadline-ran")
+        cmds = [
+            {"argv": [sys.executable, "-c", "import time; time.sleep(5)"]},
+            {"argv": [sys.executable, "-c",
+                      f"open({marker!r}, 'w').write('x')"]},
+        ]
+        status, body = self._call("POST", "/exec",
+                                  body={"cmds": cmds, "timeout_s": 1})
+        self.assertEqual(status, 200, body)
+        first, second = body["results"]
+        self.assertTrue(first.get("timeout"), first)
+        self.assertIsNone(first["exit"])
+        self.assertEqual(second.get("error"), "batch deadline exceeded")
+        self.assertTrue(second.get("timeout"), second)
+        self.assertFalse(os.path.exists(marker))
+

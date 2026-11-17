@@ -35,17 +35,29 @@ context7-login:
     bin=/run/current-system/sw/bin/mcp-remote
     [ -x "$bin" ] || { echo "mcp-remote missing; it comes from pkgs/npm-mcp-servers via just switch" >&2; exit 1; }
     auth="$HOME/.mcp-auth"
+    # mcp-remote stores each server's tokens in ~/.mcp-auth/mcp-remote-v1/
+    # under an MD5 hash of the server URL (docs/mcp.md: the URL is the
+    # identity). Scope the success check below to Context7's own token
+    # file: a recent token for any other server must not read as a
+    # Context7 sign-in (#1828).
+    url="https://mcp.context7.com/mcp"
+    if command -v md5sum >/dev/null 2>&1; then
+        url_hash=$(printf %s "$url" | md5sum | cut -d ' ' -f 1)
+    else
+        url_hash=$(md5 -q -s "$url")
+    fi
+    token_name="${url_hash}_tokens.json"
     echo "Starting mcp-remote; a browser window will open for Context7 (Clerk)."
     echo "Complete the sign-in, then this returns automatically."
     # mcp-remote is a stdio MCP server: it exits the moment stdin closes, which
     # would abort the OAuth callback. Hold stdin open with a FIFO instead.
     fifo=$(mktemp -u); mkfifo "$fifo"
     exec 3<>"$fifo"; rm -f "$fifo"
-    "$bin" https://mcp.context7.com/mcp <&3 >/dev/null 2>&1 &
+    "$bin" "$url" <&3 >/dev/null 2>&1 &
     pid=$!
     trap 'kill "$pid" 2>/dev/null || true; exec 3>&-' EXIT
     for _ in $(seq 1 120); do
-        if find "$auth" -name '*token*' -newermt '-10 minutes' 2>/dev/null | grep -q .; then
+        if find "$auth" -name "$token_name" -newermt '-10 minutes' 2>/dev/null | grep -q .; then
             echo "Authenticated. Credentials cached under $auth."
             echo "Pick it up now with: mcpx restart context7"
             exit 0
@@ -192,8 +204,8 @@ switch:
 # Format all nix files and run tidy
 [group('format')]
 fmt:
-    nixfmt *.nix pkgs/*.nix
-    nix run .#flake-tidy -- all || true
+    nix fmt
+    nix run .#flake-tidy -- all
 
 # =============================================================================
 # Flake Tidy
@@ -269,7 +281,17 @@ LINK_GIT_OUTPUT_DIR := env_var_or_default("LINK_GIT_OUTPUT_DIR", home_directory(
 # Symlink ~/git/* into ~/ (add-only unless --force)
 [group('symlinks')]
 link-git-dirs *args:
-    ./symlinker.sh --input-dir "{{LINK_GIT_INPUT_DIR}}" --output-dir "{{LINK_GIT_OUTPUT_DIR}}" {{args}}
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # #1836: symlinker.sh requires Bash 4+ (declare -A); stock macOS
+    # /bin/bash is 3.2 and the script's env-bash shebang resolves to it.
+    # Resolve a modern Bash explicitly instead of relying on the shebang.
+    bash_bin=""
+    for cand in "${SYMLINKER_BASH:-}" /opt/homebrew/bin/bash /run/current-system/sw/bin/bash "$HOME/.nix-profile/bin/bash" "$(command -v bash || true)"; do
+        if [[ -n "$cand" && -x "$cand" ]] && "$cand" -c '[[ ${BASH_VERSINFO[0]} -ge 4 ]]' 2>/dev/null; then bash_bin="$cand"; break; fi
+    done
+    if [[ -z "$bash_bin" ]]; then echo "link-git-dirs: no Bash 4 or newer found — install Homebrew bash, or run the packaged wrapper: nix run .#symlinker" >&2; exit 2; fi
+    exec "$bash_bin" ./symlinker.sh --input-dir "{{LINK_GIT_INPUT_DIR}}" --output-dir "{{LINK_GIT_OUTPUT_DIR}}" {{args}}
 
 alias link-git     := link-git-dirs
 alias link-home    := link-git-dirs
@@ -507,26 +529,7 @@ opencode-db-prune *args:
 # Back up the OpenCode database (APFS clone; instant, safe while it is in use)
 [group('opencode')]
 opencode-db-backup:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    db="$HOME/.local/share/opencode/opencode.db"
-    dest="$HOME/.local/share/opencode/backup/$(date +%Y%m%dT%H%M%S)"
-    mkdir -p "$dest"
-    # BEGIN IMMEDIATE takes SQLite's write lock: no commit lands and the WAL
-    # cannot be reset while it is held. A checkpoint can still copy WAL frames
-    # into the main file between the two clones, which is harmless: the WAL
-    # clone still holds every frame and replays them on open. cp -c is
-    # clonefile(2): atomic, and no extra disk until the files diverge.
-    /usr/bin/sqlite3 "$db" <<SQL
-    .timeout 120000
-    BEGIN IMMEDIATE;
-    .shell /bin/cp -c "$db" "$dest/opencode.db"
-    .shell if [ -f "$db-wal" ]; then /bin/cp -c "$db-wal" "$dest/opencode.db-wal"; fi
-    ROLLBACK;
-    SQL
-    chmod 600 "$dest"/opencode.db*
-    echo "backup: $dest"
-    just --justfile {{ justfile() }} opencode-db-check "$dest/opencode.db"
+    ./opencode-db-backup.sh
 
 # Retention for opencode-db-backup dirs: dry-run by default (lists what
 # would go), pass --apply to delete. Keeps the newest 3 by default.

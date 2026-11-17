@@ -44,15 +44,22 @@ ALL_ARTIFACT_NAMES=("${CACHE_NAMES[@]}" "${RISKY_NAMES[@]}" "${TRASH_NAMES[@]}")
 # build_name_expr OUTVAR NAME...
 #   Fills OUTVAR with a find(1) fragment: -name a -o -name b -o -name c
 #   Callers wrap it: find X \( "${ARR[@]}" \) -prune ...
-#   Using nameref keeps this bash 4.3+; every consumer already requires bash.
+#   The fill goes through eval under bash's dynamic scoping -- the
+#   pre-nameref idiom -- because consumers run under stock macOS
+#   Bash 3.2, which has no namerefs (Bash 4.3) (#1874). The names
+#   expanded here are this family's own constants (the lists above,
+#   callers' FIND_NAMES), never user input.
 build_name_expr() {
-  local -n _out="$1"
+  local _bne_target="$1"
   shift
-  _out=()
-  local _n
-  for _n in "$@"; do
-    [ ${#_out[@]} -gt 0 ] && _out+=(-o)
-    _out+=(-name "$_n")
+  local _bne_n _bne_first=1
+  eval "$_bne_target=()"
+  for _bne_n in "$@"; do
+    if [ "$_bne_first" -eq 0 ]; then
+      eval "$_bne_target+=(-o)"
+    fi
+    _bne_first=0
+    eval "$_bne_target+=(-name \"\$_bne_n\")"
   done
 }
 
@@ -111,9 +118,12 @@ arg_require_value() {
 #   marks it 1, a repeat dies with the contract phrase.
 #     arg_once "$1" DEPTH_SET
 arg_once() {
-  local -n _arg_once_seen="$2"
-  [ "${_arg_once_seen:-0}" -eq 0 ] || arg_die "$1 may be given only once"
-  _arg_once_seen=1
+  # The seen-flag is read and set through eval under dynamic scoping:
+  # stock macOS Bash 3.2 has no namerefs (#1874).
+  local _ao_seen
+  eval "_ao_seen=\${$2:-0}"
+  [ "$_ao_seen" -eq 0 ] || arg_die "$1 may be given only once"
+  eval "$2=1"
 }
 
 # arg_conflict OPTION OTHER_OPTION SEEN
@@ -196,11 +206,14 @@ arg_decimal() {
 #   the whole invocation in the order given.
 #     arg_used REPO_FLAGS_USED --path
 arg_used() {
-  local -n _arg_used_list="$1"
-  if [ -n "${_arg_used_list:-}" ]; then
-    _arg_used_list="$_arg_used_list $2"
+  # The accumulator is read and set through eval under dynamic
+  # scoping: stock macOS Bash 3.2 has no namerefs (#1874).
+  local _au_cur
+  eval "_au_cur=\${$1:-}"
+  if [ -n "$_au_cur" ]; then
+    eval "$1=\"\$_au_cur \$2\""
   else
-    _arg_used_list="$2"
+    eval "$1=\"\$2\""
   fi
 }
 
@@ -244,14 +257,21 @@ arg_refuse_in_mode() {
 
 OUTCOME_PROGRAM="${OUTCOME_PROGRAM:-${0##*/}}"
 OUTCOME_FAIL_DIR="${OUTCOME_FAIL_DIR:-}"
-declare -gA OUTCOME_FAILURES=()
+# Distinct failed items are kept in two parallel indexed arrays (keys and
+# their summaries) rather than one associative array: associative arrays
+# are a Bash 4 feature, and consumers such as git-maintain-repos must also
+# run under macOS's stock Bash 3.2 (#1834). First summary per key wins,
+# matching the old associative assignment's dedupe-by-item contract.
+OUTCOME_FAILURE_KEYS=()
+OUTCOME_FAILURE_SUMMARIES=()
 
 # outcome_init [PROGRAM]
 #   Reset this process's accumulator and set the summary/error prefix.
 outcome_init() {
   OUTCOME_PROGRAM="${1:-${0##*/}}"
   export OUTCOME_PROGRAM
-  OUTCOME_FAILURES=()
+  OUTCOME_FAILURE_KEYS=()
+  OUTCOME_FAILURE_SUMMARIES=()
 }
 
 # outcome_fail_files DIR
@@ -265,11 +285,13 @@ outcome_fail_files() {
 }
 
 _outcome_remember() {
-  local _outcome_key="$1" _outcome_summary="$2"
+  local _outcome_key="$1" _outcome_summary="$2" _outcome_i
   [ -n "$_outcome_key" ] || _outcome_key="__outcome_missing_item__"
-  if [ -z "${OUTCOME_FAILURES["$_outcome_key"]+present}" ]; then
-    OUTCOME_FAILURES["$_outcome_key"]="$_outcome_summary"
-  fi
+  for ((_outcome_i = 0; _outcome_i < ${#OUTCOME_FAILURE_KEYS[@]}; _outcome_i++)); do
+    [ "${OUTCOME_FAILURE_KEYS[$_outcome_i]}" = "$_outcome_key" ] && return 0
+  done
+  OUTCOME_FAILURE_KEYS+=("$_outcome_key")
+  OUTCOME_FAILURE_SUMMARIES+=("$_outcome_summary")
 }
 
 # outcome_fail ITEM OPERATION TARGET STATUS [DETAIL]
@@ -364,7 +386,7 @@ _outcome_load_failures() {
 #   True when this process or a parallel worker recorded at least one item.
 outcome_has_failures() {
   _outcome_load_failures "${1:-}"
-  [ "${#OUTCOME_FAILURES[@]}" -gt 0 ]
+  [ "${#OUTCOME_FAILURE_KEYS[@]}" -gt 0 ]
 }
 
 # outcome_finish [DIR]
@@ -372,15 +394,11 @@ outcome_has_failures() {
 outcome_finish() {
   local _outcome_dir="${1:-${OUTCOME_FAIL_DIR:-}}"
   local _outcome_key _outcome_count _outcome_summary=""
-  local -a _outcome_items=()
   _outcome_load_failures "$_outcome_dir"
-  _outcome_count=${#OUTCOME_FAILURES[@]}
+  _outcome_count=${#OUTCOME_FAILURE_KEYS[@]}
   [ "$_outcome_count" -gt 0 ] || exit 0
 
-  for _outcome_key in "${!OUTCOME_FAILURES[@]}"; do
-    _outcome_items+=("${OUTCOME_FAILURES[$_outcome_key]}")
-  done
-  for _outcome_key in "${_outcome_items[@]}"; do
+  for _outcome_key in "${OUTCOME_FAILURE_SUMMARIES[@]}"; do
     [ -z "$_outcome_summary" ] || _outcome_summary+="; "
     _outcome_summary+="$_outcome_key"
   done

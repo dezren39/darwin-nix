@@ -15,6 +15,9 @@
 #     stderr, no stub called;
 #   * --dry-run -> the same exit-2 rejection (there is no dry-run
 #     mode; the flag must not run the sequence);
+#   * pgrep error (exit 2) -> exit 2, diagnostic naming the pgrep
+#     status on stderr, no stub called (#1860: an operational error
+#     is not proof that no opencode is running);
 #   * no argument -> the full stubbed sequence runs in order and
 #     exits 0 (the control: the empty-log legs above pass only
 #     because the guard stops the script, not because the stubs
@@ -128,6 +131,23 @@ check "no argument runs the vacuum step" \
   grep -q "^opencode-db-vacuum.sh --auto-vacuum -y$" "$LOG"
 check "no argument runs sudo GC" grep -q "^sudo nix-collect-garbage -d$" "$LOG"
 check "no argument runs nix store optimise" grep -q "^nix store optimise$" "$LOG"
+
+# --- pgrep error: exit 2, diagnostic, no steps (#1860) -----------------------
+cat > "$BIN/pgrep" <<'EOF'
+#!/bin/sh
+exit 2
+EOF
+chmod +x "$BIN/pgrep"
+run_full_clean
+expect_rc "pgrep error exits 2" 2
+check "pgrep error names the pgrep status on stderr" \
+  grep -q "pgrep failed with exit 2" "$TMP_ROOT/err"
+expect_no_steps "pgrep error"
+cat > "$BIN/pgrep" <<'EOF'
+#!/bin/sh
+exit 1
+EOF
+chmod +x "$BIN/pgrep"
 
 # --- #1465: captured (non-terminal) output carries no ANSI escapes -----------
 # step() bolded its headers unconditionally, so a logged run was full of

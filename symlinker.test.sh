@@ -732,6 +732,104 @@ else
 fi
 check "Q: flag-before---undo undo removed the symlink" test ! -L "$Q/out/example.txt"
 
+
+# --- Scenario R (#1811): --force refuses an occupied backup destination ---
+# With a fixed --backup-suffix, the backup destination <conflict><suffix>
+# may already hold a previous backup; the Execute loop's mv used to
+# overwrite it silently, destroying the earlier backup. The run must
+# refuse that destination: exit 1 with an error naming the destination,
+# the previous backup byte-identical, and the conflict left in place
+# (no symlink created over it). A following run whose destination is
+# free must still back up and link normally.
+R="$TMP_ROOT/r"; mkdir -p "$R/in" "$R/out" "$R/cache"
+printf 'conflict\n' > "$R/out/item"
+printf 'previous-backup\n' > "$R/out/item.old"
+printf 'incoming\n' > "$R/in/item"
+r_run() { XDG_CACHE_HOME="$R/cache" bash "$SCRIPT" --input-dir "$R/in" --output-dir "$R/out" --force --yes --backup-suffix .old >"$R/log" 2>"$R/err"; }
+if r_run; then
+  fail "R: occupied backup destination should exit 1, got 0"
+else
+  echo "ok: R: occupied backup destination exits 1"
+fi
+grep -qF "backup destination already exists" "$R/log" "$R/err" || fail "R: output does not name the refusal: $(cat "$R/log" "$R/err")"
+check "R: previous backup contents preserved" grep -qx previous-backup "$R/out/item.old"
+check "R: conflict left in place (not moved, not linked over)" grep -qx conflict "$R/out/item"
+[[ ! -L "$R/out/item" ]] || fail "R: conflict was replaced by a symlink despite the refusal"
+# Free the destination: the same run must now succeed end to end.
+mv "$R/out/item.old" "$R/saved.old"
+if r_run; then
+  echo "ok: R: run with a free backup destination passes"
+else
+  fail "R: run with a free backup destination should pass: $(cat "$R/err") $(cat "$R/log")"
+fi
+check "R: free-destination run created the symlink" test -L "$R/out/item"
+check "R: free-destination run backed up the conflict" grep -qx conflict "$R/out/item.old"
+
+# --- Scenario R2 (#1908): dry-run --skip-backup must not simulate deleting
+# a refused occupied backup destination. PR #1906's dry-run loop logs
+# REFUSE for an occupied destination, but the --skip-backup simulation
+# then unconditionally logged rm -rf for it and counted it under
+# "Would delete", claiming a protected previous backup would be deleted.
+# The execute path is correct: only backups this run created are deleted.
+RD="$R/dry"; mkdir -p "$RD/in" "$RD/out" "$RD/cache"
+printf 'conflict\n' > "$RD/out/item"
+printf 'previous-backup\n' > "$RD/out/item.old"
+printf 'incoming\n' > "$RD/in/item"
+printf 'conflict2\n' > "$RD/out/free"
+printf 'incoming2\n' > "$RD/in/free"
+if XDG_CACHE_HOME="$RD/cache" bash "$SCRIPT" --input-dir "$RD/in" --output-dir "$RD/out" --dry-run --force --yes --skip-backup --backup-suffix .old --no-input >"$RD/log" 2>"$RD/err"; then
+  echo "ok: R2: dry-run --skip-backup exits 0"
+else
+  fail "R2: dry-run --skip-backup should exit 0: $(cat "$RD/log" "$RD/err")"
+fi
+check "R2: dry-run logs the refusal" grep -qF "REFUSE mv out/item out/item.old" "$RD/log"
+if grep -qF "rm -rf out/item.old" "$RD/log"; then
+  fail "R2: dry-run simulated deleting the refused occupied backup destination"
+else
+  echo "ok: R2: dry-run does not simulate deleting the refused destination"
+fi
+check "R2: dry-run still simulates deleting a free destination backup" grep -qF "rm -rf out/free.old" "$RD/log"
+if grep -A2 "Would delete" "$RD/log" | grep -qF "out/item.old"; then
+  fail "R2: dry-run Would delete lists the refused occupied backup destination"
+else
+  echo "ok: R2: dry-run Would delete omits the refused destination"
+fi
+grep -A2 "Would delete" "$RD/log" | grep -qF "out/free.old" || fail "R2: dry-run Would delete does not list the free destination backup"
+check "R2: dry-run counts exactly one deletion" grep -qF "1 deleted" "$RD/log"
+check "R2: dry-run left the previous backup untouched" grep -qx previous-backup "$RD/out/item.old"
+check "R2: dry-run left the conflict untouched" grep -qx conflict "$RD/out/item"
+
+
+# ─── Scenario S (#1836): the Bash version guard refuses Bash < 4 ────────────
+# CI only has a modern Bash, so the guard's decision is exercised by
+# extracting the real guard block from the script (markers in
+# symlinker.sh) and calling it with the major versions it will meet:
+# 3 (stock macOS Bash 3.2) must refuse with exit 2 and the actionable
+# invocation paths, 5 must pass silently. A full run under the real
+# interpreter is the control: --help still exits 0.
+S="$TMP_ROOT/s"; mkdir -p "$S"
+sed -n '/# symlinker-bash-guard:start/,/# symlinker-bash-guard:end/p' "$SCRIPT" > "$S/guard.sh"
+grep -q "symlinker_require_bash" "$S/guard.sh" || fail "S: guard block not found in symlinker.sh"
+
+( source "$S/guard.sh"; symlinker_require_bash 3 ) >"$S/old.log" 2>&1
+rc_old=$?
+[[ $rc_old -eq 2 ]] || fail "S: guard with major 3 exited $rc_old, want 2"
+check "S: guard names the Bash 4 requirement" grep -q "requires Bash 4 or newer" "$S/old.log"
+check "S: guard names the found version" grep -q "found:" "$S/old.log"
+check "S: guard offers the packaged wrapper" grep -q "nix run .#symlinker" "$S/old.log"
+
+( source "$S/guard.sh"; symlinker_require_bash 5 ) >"$S/new.log" 2>&1
+rc_new=$?
+[[ $rc_new -eq 0 ]] || fail "S: guard with major 5 exited $rc_new, want 0"
+check "S: guard is silent for a modern Bash" test ! -s "$S/new.log"
+
+( source "$S/guard.sh"; symlinker_require_bash "" ) >"$S/none.log" 2>&1
+rc_none=$?
+[[ $rc_none -eq 2 ]] || fail "S: guard with no version exited $rc_none, want 2"
+
+bash "$SCRIPT" --help >"$S/help.log" 2>&1 || fail "S: --help under the real interpreter exited non-zero"
+check "S: --help still prints usage" grep -q "USAGE" "$S/help.log"
+
 if (( failures > 0 )); then
   echo "symlinker tests: $failures failure(s)" >&2
   exit 1

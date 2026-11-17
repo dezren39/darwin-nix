@@ -166,9 +166,9 @@ rec {
       # touch-reopen test expired its own task before the reopen
       # under builder load and failed the mcpx-home-manager-module
       # flake check (run 43098524363).
-      # Pinned forward 2026-11-16 to developing-today/code main HEAD.
+      # Pinned forward 2026-11-17 to developing-today/code main HEAD.
       inputs.opencode.inputs.mcpx-src.url =
-        "github:developing-today/code/2f5d9cba7d55adde867f8ca4810afc241fbe712f";
+        "github:developing-today/code/6ee8002be2aca41e24e9ab1a07b55bd32f552f72";
       # Pin the chain's opencode to the #1791 hash-fix rev: the rev the
       # chain otherwise resolves (6c43550) records an aarch64-darwin
       # node_modules fixed-output hash that does not match its own
@@ -178,10 +178,10 @@ rec {
       # pin branch for that tree (fork PR #2269, merged) carries the
       # corrected nix/hashes.json and nothing else. Drop this override
       # once the chain's own opencode resolution moves past 6c43550.
-      # Pinned forward 2026-11-16 to the fork's main HEAD (e7d5bb7), which
+      # Pinned forward 2026-11-17 to the fork's main HEAD (fa677f8), which
       # carries 118d889 (#1547): provider."opencode-route" overrides such
       # as hidden apply to routes instead of disabling every route.
-      inputs.opencode.url = "github:developing-today-forks/opencode/e7d5bb7354053ca7aa09d6f370aee40d7f127503";
+      inputs.opencode.url = "github:developing-today-forks/opencode/fa677f81720b64d3a54d14fb29e9d9e4bb321be8";
     };
     sidepulse-src = {
       url = "github:inteliwear/sidepulse/ffb1d3c2f3eed3b7e80e32d7876a7e1d67bd5dfb";
@@ -340,6 +340,8 @@ rec {
     homeManagerModules.mcpx = inputs.openchamber.homeManagerModules.mcpx;
     darwinModules.mcpx = inputs.openchamber.darwinModules.mcpx;
     homeManagerModules.fleet-brokers = import ./pkgs/fleet-brokers/home-module.nix;
+    homeManagerModules.meta-quota-export = import ./pkgs/meta-quota-export/home-module.nix;
+    homeManagerModules.rustdesk-units = import ./pkgs/rustdesk-units/home-module.nix;
 
     # Shared package definitions — used by packages, apps, devShells, and checks
     mkPackages =
@@ -498,6 +500,63 @@ rec {
               pytest -q -p no:cacheprovider
               touch $out
             '';
+        # #1873: tests/fmt-tidy-propagation.sh is the hermetic regression
+        # for #1801 (`just fmt` swallowing a flake-tidy failure via
+        # `|| true`). Nothing ran it: it lives outside pkgs/flake-tidy's
+        # pytest suite, so wire it here following the *-tests pattern.
+        # The script stubs nix/nixfmt itself but needs a real `just`
+        # binary on PATH, and computes the repo root from its own
+        # location, so stage justfile + tests/ in that layout. The
+        # script's runtime-generated stubs use `#!/usr/bin/env bash`,
+        # which has no interpreter in the build sandbox, so the staged
+        # copy is rewritten to the store bash (patchShebangs for stubs
+        # that only exist at test runtime; the repo file is untouched).
+        fmt-tidy-propagation-tests =
+          pkgs.runCommandLocal "fmt-tidy-propagation-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.coreutils
+                pkgs.just
+              ];
+            }
+            ''
+              mkdir -p tests
+              cp ${./justfile} justfile
+              cp ${./tests/fmt-tidy-propagation.sh} tests/fmt-tidy-propagation.sh
+              chmod u+w justfile tests/fmt-tidy-propagation.sh
+              sed -i "s|#!/usr/bin/env bash|#!${pkgs.bash}/bin/bash|g" tests/fmt-tidy-propagation.sh
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash tests/fmt-tidy-propagation.sh
+              touch $out
+            '';
+        # #1887: tests/failing-jobs-extraction.sh pins the main-broken
+        # watcher's failing-jobs extraction (`.github/scripts/
+        # failing-jobs.sh`) against saved jobs-JSON pages, so a copy
+        # that drops pagination fails here instead of merging green.
+        # The script under test calls a stubbed `gh`; the stub applies
+        # the caller's --jq program with real jq, hence the jq input.
+        failing-jobs-tests =
+          pkgs.runCommandLocal "failing-jobs-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.coreutils
+                pkgs.jq
+              ];
+            }
+            ''
+              mkdir -p .github/scripts tests
+              cp ${./.github/scripts/failing-jobs.sh} .github/scripts/failing-jobs.sh
+              cp ${./tests/failing-jobs-extraction.sh} tests/failing-jobs-extraction.sh
+              chmod u+w .github/scripts/failing-jobs.sh tests/failing-jobs-extraction.sh
+              sed -i "s|#!/usr/bin/env bash|#!${pkgs.bash}/bin/bash|g" .github/scripts/failing-jobs.sh tests/failing-jobs-extraction.sh
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash tests/failing-jobs-extraction.sh
+              touch $out
+            '';
         # #1149: simple-rebuild.test.sh pins simple-rebuild.sh's
         # mode-flag parser -- --build-only with --activate-only in
         # either order and a repeated --activate-only exit 2 naming
@@ -524,6 +583,36 @@ rec {
               export HOME="$TMPDIR/home"
               mkdir -p "$HOME"
               bash ./simple-rebuild.test.sh
+              touch $out
+            '';
+        # #1864: simple-rebuild-staging.test.sh pins simple-rebuild.sh's
+        # scoped staging -- a valid run registers only the new flake
+        # inputs a tracked file references (intent-to-add, removed
+        # before any commit) and never stages unrelated tracked edits
+        # or untracked files, in normal and --no-commit modes. The
+        # suite drives the real script in a disposable repo, with the
+        # nix build invocation redirected to a stub that probes the
+        # flake's view with the real nix (the #1852 precedent).
+        simple-rebuild-staging-tests =
+          pkgs.runCommandLocal "simple-rebuild-staging-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.zsh
+                pkgs.coreutils
+                pkgs.gnugrep
+                pkgs.gawk
+                pkgs.git
+                pkgs.nix
+              ];
+            }
+            ''
+              cp ${./simple-rebuild.sh} simple-rebuild.sh
+              cp ${./simple-rebuild-staging.test.sh} simple-rebuild-staging.test.sh
+              chmod u+w simple-rebuild.sh simple-rebuild-staging.test.sh
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./simple-rebuild-staging.test.sh
               touch $out
             '';
         # #1804: install-determinate-nix.test.sh pins
@@ -740,6 +829,31 @@ rec {
               bash ./opencode-db-backup-prune.test.sh
               touch $out
             '';
+        # #1758: opencode-db-backup.test.sh pins the backup writers
+        # completion proof — a happy-path run publishes exactly one
+        # timestamp dir whose copy carries the WAL-only rows; a failing
+        # clone cp exits non-zero and publishes nothing; a cp that
+        # silently drops the WAL copy is caught by the content check
+        # (live counts recorded under the write lock vs the staged
+        # copy). Self-contained: fixture WAL database only.
+        opencode-db-backup-tests =
+          pkgs.runCommandLocal "opencode-db-backup-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.coreutils
+                pkgs.sqlite
+              ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/opencode-db-backup.sh $src/opencode-db-backup.test.sh $src/opencode-db-backup-prune.sh ./
+              chmod u+w ./opencode-db-backup.sh ./opencode-db-backup.test.sh ./opencode-db-backup-prune.sh
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./opencode-db-backup.test.sh
+              touch $out
+            '';
         # #557: var-folders-clean.test.sh (the #553 test for clean.sh's
         # /private/var/folders sweep) was run by nothing, tested a pasted
         # copy of the loops instead of the shipped logic, and exited 0 on
@@ -804,6 +918,32 @@ rec {
               bash ./tmux-navigator.test.sh
               touch $out
             '';
+        # #1851: gc-root-activation.test.sh extracts the
+        # rootActivatedGeneration entry from homeUser.nix and pins its
+        # end-of-DAG anchor (entryAfter every other entry in the built
+        # activate script) plus the behaviour that anchor buys: a
+        # later-entry failure leaves the prior activated generation's
+        # GC root intact, a successful activation advances it.
+        gc-root-activation-tests =
+          pkgs.runCommandLocal "gc-root-activation-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.coreutils
+                pkgs.gawk
+                pkgs.gnugrep
+                pkgs.gnused
+              ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/homeUser.nix $src/gc-root-activation.test.sh ./
+              chmod u+w ./homeUser.nix ./gc-root-activation.test.sh
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./gc-root-activation.test.sh
+              touch $out
+            '';
         # #967: symlink-scripts.test.sh drives the real symlink-commands
         # and symlink-plugins — in place against the repo's real
         # commands/ and plugins/, and as verbatim copies in a fixture
@@ -845,6 +985,9 @@ rec {
                 pkgs.findutils
                 pkgs.gnugrep
                 pkgs.gnused
+                # #1779: search.sh parses `brew info --json=v2` output
+                # with python3 (the brew-repair pattern).
+                pkgs.python3
               ];
               src = inputs.self;
             }
@@ -854,6 +997,39 @@ rec {
               export HOME="$TMPDIR/home"
               mkdir -p "$HOME"
               bash ./search.test.sh
+              touch $out
+            '';
+        # #1892: help-extra-args.test.sh pins the operator-script help
+        # contract for the 14 scripts whose -h|--help arm used to exit 0
+        # without accounting for the rest of the command line:
+        # --help extra and -h --bogus are usage errors (exit 2, the
+        # unaccounted argument named); --help / -h alone print usage
+        # and exit 0. One shared suite, like opencode-db-args-tests,
+        # because the contract is cross-script by definition.
+        help-extra-args-tests =
+          pkgs.runCommandLocal "help-extra-args-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.coreutils
+                pkgs.findutils
+                pkgs.gnugrep
+                pkgs.gnused
+                pkgs.python3
+                pkgs.sqlite
+              ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/git-discover-repos $src/git-maintain-repos $src/spotlight-exclude-artifacts $src/search.sh $src/patch-vscode-insiders.sh $src/install-vscode-patch-agent.sh $src/var-folders-clean.sh $src/backup-zed.sh $src/code-install-extensions.sh $src/full-clean.sh $src/clean.sh $src/symlinker.sh $src/opencode-db-backup-prune.sh $src/opencode-db-prune.sh $src/opencode-db-vacuum.sh $src/help-extra-args.test.sh ./
+              mkdir -p lib pkgs/brew-repair pkgs/adopt
+              cp $src/lib/common.sh $src/lib/arg-probe.sh lib/
+              cp $src/pkgs/brew-repair/brew-repair.sh pkgs/brew-repair/
+              cp $src/pkgs/adopt/adopt.sh pkgs/adopt/
+              chmod -R u+w ./
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./help-extra-args.test.sh
               touch $out
             '';
         # #1167: full-clean.test.sh drives the real full-clean.sh
@@ -909,6 +1085,43 @@ rec {
               export HOME="$TMPDIR/home"
               mkdir -p "$HOME"
               bash ./rebuild-backup-zed.test.sh
+              touch $out
+            '';
+        # #1852: rebuild-staging.test.sh is the regression test for
+        # the #1812 data-safety invariant (a rebuild must not stage
+        # unrelated work from the checkout). It passed manually but
+        # was referenced by nothing, so a future change could silently
+        # reintroduce the staging behavior. The suite copies the real
+        # rebuild.sh into a fixture git repo, stubs simple-rebuild.sh
+        # and the flake-update invocation, and pins that the tracked
+        # edits and the untracked file stay unstaged. The build
+        # sandbox has no /usr/bin/env, so the staged scripts are
+        # rewritten to store interpreters (the #1873 pattern:
+        # patchShebangs for the copied scripts, sed for the test
+        # file, whose runtime-generated simple-rebuild.sh stub also
+        # carries an env shebang; the repo files are untouched).
+        rebuild-staging-tests =
+          pkgs.runCommandLocal "rebuild-staging-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.zsh
+                pkgs.coreutils
+                pkgs.gnugrep
+                pkgs.gnused
+                pkgs.diffutils
+                pkgs.git
+              ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/rebuild.sh $src/simple-rebuild.sh $src/rebuild-staging.test.sh ./
+              chmod u+w ./rebuild.sh ./simple-rebuild.sh ./rebuild-staging.test.sh
+              patchShebangs ./rebuild.sh ./simple-rebuild.sh
+              sed -i "s|#!/usr/bin/env bash|#!${pkgs.bash}/bin/bash|g" ./rebuild-staging.test.sh
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./rebuild-staging.test.sh
               touch $out
             '';
         # #940: git-discover-repos.test.sh drives the real
@@ -1069,6 +1282,28 @@ rec {
               export HOME="$TMPDIR/home"
               mkdir -p "$HOME"
               bash ./opencode-tmp-guard.test.sh
+              touch $out
+            '';
+        # #1828: context7-login must scope its success check to Context7's
+        # own token file (md5 of the server URL), not any recent *token*
+        # file under ~/.mcp-auth. The test extracts the real predicate
+        # from the justfile and drives it against fixture auth dirs.
+        context7-login-tests =
+          pkgs.runCommandLocal "context7-login-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.coreutils
+                pkgs.findutils
+                pkgs.gnugrep
+                pkgs.gnused
+              ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/justfile $src/context7-login.test.sh ./
+              chmod u+w ./context7-login.test.sh
+              bash ./context7-login.test.sh
               touch $out
             '';
         # #1432: exercise the real OpenChamber deploy activation body with a
@@ -1239,6 +1474,74 @@ rec {
               export HOME="$TMPDIR/home"
               mkdir -p "$HOME"
               bash ./mcp-clients-activation.test.sh
+              touch $out
+            '';
+        # Probes for browser-remote-debug.py (Chromium-family Local State
+        # devtools.remote_debugging.user-enabled = true): CLI contract,
+        # key/mode preservation, running-browser SingletonSocket/SingletonLock
+        # skip, stale crashed-lock recovery, symlink preservation, and
+        # per-browser failure isolation without leaking Local State content.
+        browser-remote-debug-tests =
+          pkgs.runCommandLocal "browser-remote-debug-tests"
+            {
+              nativeBuildInputs = [ pkgs.python3 ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/browser-remote-debug.py $src/browser-remote-debug.test.py ./
+              chmod u+w ./browser-remote-debug.py ./browser-remote-debug.test.py
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              python3 ./browser-remote-debug.test.py
+              touch $out
+            '';
+        # Guard for the Chromium-family CDP launcher port claims
+        # (#1878): runs the real make_cdp_app generation out of
+        # systemPackages.nix and asserts Chrome/Edge launchers carry
+        # the non-default --user-data-dir their advertised fixed ports
+        # require, Helium's do not, and mcpx.config.nix + docs/mcp.md
+        # agree on which launch path serves helium-live's 19222.
+        chromium-family-cdp-tests =
+          pkgs.runCommandLocal "chromium-family-cdp-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.coreutils
+                pkgs.gnugrep
+                pkgs.gnused
+              ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/systemPackages.nix $src/mcpx.config.nix $src/chromium-family-cdp.test.sh ./
+              mkdir -p docs
+              cp $src/docs/mcp.md docs/
+              chmod u+w ./chromium-family-cdp.test.sh
+              bash ./chromium-family-cdp.test.sh
+              touch $out
+            '';
+        # Exercise the home-manager activation wrapper around
+        # browser-remote-debug.py: partial failures are recorded in
+        # service-events without blocking activation; unrecorded failures
+        # fail activation loudly.
+        browser-remote-debug-activation-tests =
+          pkgs.runCommandLocal "browser-remote-debug-activation-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.coreutils
+                pkgs.gnugrep
+                pkgs.gnused
+                pkgs.python3
+              ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/browser-remote-debug-activation.sh $src/browser-remote-debug-activation.test.sh $src/browser-remote-debug.py ./
+              chmod u+w ./browser-remote-debug-activation.test.sh
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./browser-remote-debug-activation.test.sh
               touch $out
             '';
         # #1454: activation must durably record failures from the root and
@@ -1688,6 +1991,108 @@ rec {
                   exit 1
                 }
                 [ "$wantedBy" = "default.target" ] || { echo "WantedBy=$wantedBy, want default.target" >&2; exit 1; }
+                touch $out
+              '';
+        # darwin-nix#1776: the meta-quota-export home-manager module must
+        # render the service + timer faithful to the live hand-installed
+        # units on amd (oneshot, TimeoutStartSec=120, same ExecStart;
+        # OnCalendar=*:0/15, RandomizedDelaySec=20, Persistent=true).
+        meta-quota-export-home-manager-module =
+          if !pkgs.stdenv.hostPlatform.isLinux then
+            pkgs.runCommandLocal "meta-quota-export-home-manager-module-check" { } "touch $out"
+          else
+            let
+              eval = inputs.home-manager.lib.homeManagerConfiguration {
+                inherit pkgs;
+                modules = [
+                  inputs.self.homeManagerModules.meta-quota-export
+                  {
+                    services.meta-quota-export.enable = true;
+                    home = {
+                      username = "fleet-test";
+                      homeDirectory = "/home/fleet-test";
+                      stateVersion = "25.11";
+                    };
+                  }
+                ];
+              };
+              svc = eval.config.systemd.user.services.meta-quota-export.Service;
+              tim = eval.config.systemd.user.timers.meta-quota-export;
+            in
+            pkgs.runCommandLocal "meta-quota-export-home-manager-module-check"
+              {
+                svcExec = svc.ExecStart;
+                svcType = svc.Type;
+                svcTimeout = toString svc.TimeoutStartSec;
+                onCalendar = tim.Timer.OnCalendar;
+                randDelay = toString tim.Timer.RandomizedDelaySec;
+                persistent = if tim.Timer.Persistent then "true" else "false";
+                timerUnit = tim.Timer.Unit;
+                wantedBy = pkgs.lib.concatStringsSep " " tim.Install.WantedBy;
+              }
+              ''
+                [ "$svcExec" = "/run/current-system/sw/bin/node %h/atlas/meta-quota-export/meta-quota-export.mjs --cdp-port 19222 --out-dir %h/atlas/meta-quota-export" ] || { echo "ExecStart wrong: $svcExec" >&2; exit 1; }
+                [ "$svcType" = "oneshot" ] || { echo "Type wrong: $svcType" >&2; exit 1; }
+                [ "$svcTimeout" = "120" ] || { echo "TimeoutStartSec wrong: $svcTimeout" >&2; exit 1; }
+                [ "$onCalendar" = "*:0/15" ] || { echo "OnCalendar wrong: $onCalendar" >&2; exit 1; }
+                [ "$randDelay" = "20" ] || { echo "RandomizedDelaySec wrong: $randDelay" >&2; exit 1; }
+                [ "$persistent" = "true" ] || { echo "Persistent wrong: $persistent" >&2; exit 1; }
+                [ "$timerUnit" = "meta-quota-export.service" ] || { echo "Timer Unit wrong: $timerUnit" >&2; exit 1; }
+                [ "$wantedBy" = "timers.target" ] || { echo "WantedBy wrong: $wantedBy" >&2; exit 1; }
+                touch $out
+              '';
+        # darwin-nix#1777: the rustdesk-units home-manager module must
+        # render both units faithful to the live hand-installed units on
+        # amd and install the vendored picker script at the live path.
+        rustdesk-units-home-manager-module =
+          if !pkgs.stdenv.hostPlatform.isLinux then
+            pkgs.runCommandLocal "rustdesk-units-home-manager-module-check" { } "touch $out"
+          else
+            let
+              eval = inputs.home-manager.lib.homeManagerConfiguration {
+                inherit pkgs;
+                modules = [
+                  inputs.self.homeManagerModules.rustdesk-units
+                  {
+                    services.rustdesk-units.enable = true;
+                    home = {
+                      username = "fleet-test";
+                      homeDirectory = "/home/fleet-test";
+                      stateVersion = "25.11";
+                    };
+                  }
+                ];
+              };
+              rd = eval.config.systemd.user.services.rustdesk.Service;
+              pk = eval.config.systemd.user.services.rd-picker-autogrant.Service;
+              picker = eval.config.home.file.".local/bin/rd-picker-autogrant.py";
+            in
+            pkgs.runCommandLocal "rustdesk-units-home-manager-module-check"
+              {
+                rdExec = rd.ExecStart;
+                rdType = rd.Type;
+                rdRestart = rd.Restart;
+                rdRestartSec = toString rd.RestartSec;
+                rdEnv = pkgs.lib.concatStringsSep " " rd.Environment;
+                pkExec = pk.ExecStart;
+                pkRestart = pk.Restart;
+                pkRestartSec = toString pk.RestartSec;
+                pickerSource = picker.source;
+                pickerExec = if picker.executable then "true" else "false";
+                wantedBy = pkgs.lib.concatStringsSep " " eval.config.systemd.user.services.rustdesk.Install.WantedBy;
+              }
+              ''
+                [ "$rdExec" = "/etc/profiles/per-user/user/bin/rustdesk --service" ] || { echo "rustdesk ExecStart wrong: $rdExec" >&2; exit 1; }
+                [ "$rdType" = "simple" ] || { echo "rustdesk Type wrong: $rdType" >&2; exit 1; }
+                [ "$rdRestart" = "on-failure" ] || { echo "rustdesk Restart wrong: $rdRestart" >&2; exit 1; }
+                [ "$rdRestartSec" = "5" ] || { echo "rustdesk RestartSec wrong: $rdRestartSec" >&2; exit 1; }
+                case "$rdEnv" in *"XDG_RUNTIME_DIR=/run/user/1337"*"WAYLAND_DISPLAY=wayland-1"*"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1337/bus"*) ;; *) echo "rustdesk Environment wrong: $rdEnv" >&2; exit 1 ;; esac
+                [ "$pkExec" = "/usr/bin/env python3 %h/.local/bin/rd-picker-autogrant.py" ] || { echo "picker ExecStart wrong: $pkExec" >&2; exit 1; }
+                [ "$pkRestart" = "always" ] || { echo "picker Restart wrong: $pkRestart" >&2; exit 1; }
+                [ "$pkRestartSec" = "3" ] || { echo "picker RestartSec wrong: $pkRestartSec" >&2; exit 1; }
+                case "$pickerSource" in *"rd-picker-autogrant.py") ;; *) echo "picker source wrong: $pickerSource" >&2; exit 1 ;; esac
+                [ "$pickerExec" = "true" ] || { echo "picker not executable" >&2; exit 1; }
+                [ "$wantedBy" = "default.target" ] || { echo "WantedBy wrong: $wantedBy" >&2; exit 1; }
                 touch $out
               '';
         # code#5343: the laptop-agent must reject an empty token at startup

@@ -179,6 +179,55 @@ if [ "$rc" -ne 0 ]; then fail "TMPDIR inside root: expected exit 0, got $rc"; fi
 if [ -e "$tmpdir_root/aa" ]; then fail "TMPDIR inside root: top-level entries were not swept"; fi
 if [ -e "$tmpdir_root/zz/keepme" ]; then fail "TMPDIR inside root: zz contents were not swept"; fi
 
+# Bash 3.2 failure accounting (#1896): macOS's stock bash has no
+# Bash 4.2+ pipeline option to keep a piped while loop in the
+# current shell, so a helper that counts failures inside pipeline
+# loops loses every count there and exits 0. Two guards:
+# (a) the helper must not reference that option at all — the
+# accounting construct has to be one every Bash version runs in
+# the parent shell (process substitution, per the helper header);
+# (b) behavior under a simulated 3.2 shell, where setting that
+# option is a silent no-op (a BASH_ENV function shadowing the
+# shopt builtin reproduces exactly that state on a modern bash):
+# the deletion-failure and enumeration-failure cases above must
+# behave identically — non-zero exit, failure named on stderr.
+if grep -q 'lastpipe' "$HELPER"; then
+  fail "bash 3.2: helper still references lastpipe (failure accounting would be lost on macOS stock bash)"
+fi
+bash32_env="$TMP_ROOT/bash32-env.sh"
+cat > "$bash32_env" <<'BASH32_EOF'
+shopt() { return 0; }
+BASH32_EOF
+
+fail_root32="$TMP_ROOT/failfolders32"
+mkdir -p "$fail_root32/aa" "$fail_root32/zz"
+touch "$fail_root32/aa/file" "$fail_root32/zz/file2"
+rc=0
+PATH="$shim_dir:$PATH" BASH_ENV="$bash32_env" bash "$HELPER" "$fail_root32" >"$TMP_ROOT/out" 2>"$TMP_ROOT/err" || rc=$?
+if [ "$rc" -eq 0 ]; then fail "bash 3.2 rm failure: expected non-zero exit, got 0"; fi
+if ! grep -qF "$fail_root32/aa" "$TMP_ROOT/err"; then fail "bash 3.2 rm failure: failed entry not named on stderr"; fi
+if [ ! -e "$fail_root32/aa/file" ]; then fail "bash 3.2 rm failure: shimmed entry was removed anyway"; fi
+if [ -e "$fail_root32/zz/file2" ]; then fail "bash 3.2 rm failure: zz contents were not swept after the failure"; fi
+
+enum_root32="$TMP_ROOT/enumfolders32"
+mkdir -p "$enum_root32/aa" "$enum_root32/zz/inner"
+touch "$enum_root32/aa/f" "$enum_root32/topfile" "$enum_root32/zz/inner/g"
+make_find_shim "$enum_root32"
+rc=0
+PATH="$find_shim_dir:$PATH" BASH_ENV="$bash32_env" bash "$HELPER" "$enum_root32" >"$TMP_ROOT/out" 2>"$TMP_ROOT/err" || rc=$?
+if [ "$rc" -eq 0 ]; then fail "bash 3.2 find failure (root): expected non-zero exit, got 0"; fi
+if ! grep -qF "failed to enumerate: $enum_root32" "$TMP_ROOT/err"; then fail "bash 3.2 find failure (root): failed root not named on stderr"; fi
+if [ ! -e "$enum_root32/aa/f" ] || [ ! -e "$enum_root32/topfile" ] || [ ! -e "$enum_root32/zz/inner/g" ]; then fail "bash 3.2 find failure (root): entries were swept despite the failed enumeration"; fi
+
+# And the plain success case under the simulated 3.2 shell.
+ok_root32="$TMP_ROOT/okfolders32"
+mkdir -p "$ok_root32/aa" "$ok_root32/zz/sub"
+touch "$ok_root32/aa/file1" "$ok_root32/zz/file2"
+rc=0
+BASH_ENV="$bash32_env" bash "$HELPER" "$ok_root32" >"$TMP_ROOT/out" 2>"$TMP_ROOT/err" || rc=$?
+if [ "$rc" -ne 0 ]; then fail "bash 3.2 success sweep: expected exit 0, got $rc"; fi
+if [ -e "$ok_root32/aa" ] || [ -e "$ok_root32/zz/file2" ] || [ ! -d "$ok_root32/zz" ]; then fail "bash 3.2 success sweep: sweep incomplete"; fi
+
 if [ "$failures" -eq 0 ]; then
   echo "PASS: /private/var/folders cleaning logic verified successfully."
 else

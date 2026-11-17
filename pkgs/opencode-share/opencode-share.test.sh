@@ -218,6 +218,9 @@ exit 0
 STUB
 write_bash_stub "$STUB_BIN/rmdir" <<'STUB'
 echo "rmdir $*" >> "$RMDIR_LOG"
+if [[ "${RMDIR_RC:-0}" != "0" ]]; then
+  exit "$RMDIR_RC"
+fi
 exit 0
 STUB
 chmod +x "$STUB_BIN/mount" "$STUB_BIN/umount" "$STUB_BIN/bindfs" "$STUB_BIN/rmdir"
@@ -396,6 +399,85 @@ out_o7="$(bash "$SCRIPT" --unmount --dry-run "$GOOD1" 2>&1)"; rc_o7=$?
 out_o8="$(bash "$SCRIPT" --status --source "$SRC" "$GOOD1" 2>&1)"; rc_o8=$?
 [[ $rc_o8 -eq 0 ]] || fail "O: --status --source expected exit 0 (global option), got $rc_o8"
 [[ $failures -eq $start ]] && ok "O: --dry-run refuses at exit 2 in status mode; --source stays accepted; controls pass"
+
+# ─── Scenario P (#1759): --unmount must not strand a symlinked .opencode ──
+# do_unmount's cleanup ran an unchecked `rmdir` on whatever [[ -d ]] let
+# through: rmdir refuses a symlink (ENOTDIR), the result was never checked,
+# and the run printed "Unmounted" / exit 0 with the symlink still in place;
+# a dangling symlink failed [[ -d ]] and was skipped with no message at
+# all. This scenario reuses scenario K's stub mode (nothing mounted), with
+# the rmdir stub's RMDIR_RC seam: the symlinked cases use the REAL unlink,
+# so the post-state is asserted on disk, not on stub logs.
+start=$failures
+P_LINK_TARGET="$TMP_ROOT/p-link-target"; mkdir -p "$P_LINK_TARGET"
+P_LINK_SRC="$TMP_ROOT/p-link-src"; mkdir -p "$P_LINK_SRC"
+ln -s "$P_LINK_SRC" "$P_LINK_TARGET/.opencode"
+P_DANGLE_TARGET="$TMP_ROOT/p-dangle-target"; mkdir -p "$P_DANGLE_TARGET"
+ln -s "$TMP_ROOT/p-no-such-place" "$P_DANGLE_TARGET/.opencode"
+P_DIR_TARGET="$TMP_ROOT/p-dir-target"; mkdir -p "$P_DIR_TARGET/.opencode"
+run_p() {
+  local target="$1"
+  export RMDIR_RC="$2"
+  export UMOUNT_RC=0
+  : > "$MOUNT_STATE"
+  : > "$UMOUNT_LOG"; : > "$RMDIR_LOG"
+  if [[ "$k_mode" == "direct" ]]; then
+    env -u OPENCODE_SHARE_TEST_MACFUSE_MARKER PATH="$STUB_BIN:$PATH" \
+      bash "$SCRIPT" --unmount --source "$SRC" "$target" 2>&1
+  elif [[ "$k_mode" == "namespace" ]]; then
+    local up="$TMP_ROOT/ov-up-p-$RANDOM" work="$TMP_ROOT/ov-work-p-$RANDOM"
+    mkdir -p "$up" "$work"
+    unshare -rm bash "$TMP_ROOT/fake-macfuse.sh" "$up" "$work" \
+      env -u OPENCODE_SHARE_TEST_MACFUSE_MARKER PATH="$STUB_BIN:$PATH" \
+      bash "$SCRIPT" --unmount --source "$SRC" "$target" 2>&1
+  else
+    OPENCODE_SHARE_TEST_MACFUSE_MARKER="$FAKE_MACFUSE_MARKER" \
+      PATH="$STUB_BIN:$PATH" bash "$SCRIPT" --unmount --source "$SRC" "$target" 2>&1
+  fi
+}
+out_p1="$(run_p "$P_LINK_TARGET" 0)"; rc_p1=$?
+[[ $rc_p1 -eq 0 ]] || fail "P: symlinked target expected exit 0, got $rc_p1"
+[[ ! -L "$P_LINK_TARGET/.opencode" && ! -e "$P_LINK_TARGET/.opencode" ]] || fail "P: symlinked .opencode left behind after --unmount (regression)"
+grep -q "Unmounted .opencode from $P_LINK_TARGET" <<<"$out_p1" || fail "P: symlinked target not reported Unmounted after unlink"
+grep -q "Done (unmount 1 target(s))" <<<"$out_p1" || fail "P: symlinked target missing the Done line"
+out_p2="$(run_p "$P_DANGLE_TARGET" 0)"; rc_p2=$?
+[[ $rc_p2 -eq 0 ]] || fail "P: dangling-symlink target expected exit 0, got $rc_p2"
+[[ ! -L "$P_DANGLE_TARGET/.opencode" ]] || fail "P: dangling .opencode symlink left behind silently (regression)"
+grep -q "$P_DANGLE_TARGET/.opencode" <<<"$out_p2" || fail "P: dangling symlink never named in the output (regression)"
+out_p3="$(run_p "$P_DIR_TARGET" 1)"; rc_p3=$?
+[[ $rc_p3 -ne 0 ]] || fail "P: failing rmdir expected non-zero exit, got $rc_p3"
+grep -q "Failed to remove empty mount point: $P_DIR_TARGET/.opencode" <<<"$out_p3" || fail "P: rmdir failure not named on stderr"
+grep -q "1 target(s) had errors" <<<"$out_p3" || fail "P: rmdir failure not counted in the summary"
+if grep -q "Unmounted .opencode from" <<<"$out_p3"; then
+  fail "P: target with a failed rmdir reported as Unmounted (regression)"
+fi
+if grep -q "Done (unmount" <<<"$out_p3"; then
+  fail "P: success Done line printed for a failed rmdir (regression)"
+fi
+out_p4="$(run_p "$P_DIR_TARGET" 0)"; rc_p4=$?
+[[ $rc_p4 -eq 0 ]] || fail "P: RMDIR_RC=0 control expected exit 0, got $rc_p4"
+grep -q "Unmounted .opencode from $P_DIR_TARGET" <<<"$out_p4" || fail "P: RMDIR_RC=0 control did not report Unmounted"
+grep -q "Done (unmount 1 target(s))" <<<"$out_p4" || fail "P: RMDIR_RC=0 control missing the Done line"
+[[ -s "$RMDIR_LOG" ]] || fail "P: RMDIR_RC=0 control did not rmdir the empty mount point"
+[[ $failures -eq $start ]] && ok "P: symlinked + dangling .opencode unlinked and reported; failing rmdir counted, named, no success lines; RMDIR_RC=0 control unchanged"
+
+# ─── Scenario Q (#1894): help/version are sole-argument only ─────────
+start=$failures
+out_q1="$(bash "$SCRIPT" --help 2>&1)"; rc_q1=$?
+[[ $rc_q1 -eq 0 ]] || fail "Q: --help expected exit 0, got $rc_q1"
+grep -q "Usage: opencode-share" <<<"$out_q1" || fail "Q: --help did not print usage"
+out_q2="$(bash "$SCRIPT" --version 2>&1)"; rc_q2=$?
+[[ $rc_q2 -eq 0 ]] || fail "Q: --version expected exit 0, got $rc_q2"
+grep -q "opencode-share 1.0.0" <<<"$out_q2" || fail "Q: --version did not print the version"
+for flag in --help -h --version; do
+  out_qx="$(bash "$SCRIPT" "$flag" extra 2>&1)"; rc_qx=$?
+  [[ $rc_qx -eq 1 ]] || fail "Q: $flag extra expected exit 1, got $rc_qx"
+  grep -q "unknown argument: extra" <<<"$out_qx" || fail "Q: $flag extra did not name the unaccounted argument"
+done
+out_q3="$(bash "$SCRIPT" --dry-run --help 2>&1)"; rc_q3=$?
+[[ $rc_q3 -eq 1 ]] || fail "Q: --dry-run --help expected exit 1, got $rc_q3"
+grep -q "must be the sole argument" <<<"$out_q3" || fail "Q: --dry-run --help did not explain the sole-argument rule"
+[[ $failures -eq $start ]] && ok "Q: help/version succeed alone, fail as usage errors with unaccounted arguments (#1894)"
 
 if [[ $failures -gt 0 ]]; then
   echo "$failures failure(s)" >&2

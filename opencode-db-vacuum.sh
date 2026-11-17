@@ -220,7 +220,7 @@ while [ $# -gt 0 ]; do
     --no-backup) KEEP_BACKUP=0; shift ;;
     --force) FORCE=1; shift ;;
     -y|--yes) ASSUME_YES=1; shift ;;
-    -h|--help) usage; exit 0 ;;
+    -h|--help) if [[ $# -gt 1 ]]; then arg_die "unexpected argument: $2"; fi; usage; exit 0 ;;
     *) arg_die "unknown option: $1 (try --help)" ;;
   esac
 done
@@ -361,7 +361,7 @@ note "file size      : $(gb "$total_bytes")"
 note "live data      : $(gb "$live_bytes")"
 note "reclaimable    : $(gb "$free_bytes")"
 
-if [ "$freelist" -eq 0 ] && [ "$FORCE" -eq 0 ]; then
+if [ "$freelist" -eq 0 ] && [ "$FORCE" -eq 0 ] && [ "$SET_AUTOVACUUM" -eq 0 ]; then
   cat <<EOF
 
 Nothing to reclaim: freelist_count is 0, so every page holds live data.
@@ -376,6 +376,15 @@ route deletes whole sessions and cascades to messages, parts and events:
 Then re-run this script. Use --force to vacuum anyway.
 EOF
   exit 0
+fi
+
+# freelist is 0 but --auto-vacuum was requested (#1920): the pragma only
+# persists when set in the same connection as a VACUUM (#1088), so the
+# nothing-to-reclaim early exit above must not swallow the flag — fall
+# through and let the vacuum path apply it. The rebuild reclaims nothing,
+# which is exactly the price --force already pays for the same request.
+if [ "$freelist" -eq 0 ] && [ "$SET_AUTOVACUUM" -eq 1 ] && [ "$FORCE" -eq 0 ]; then
+  note "freelist_count is 0, but --auto-vacuum was requested: vacuuming anyway so auto_vacuum=INCREMENTAL is applied"
 fi
 
 # VACUUM INTO writes a full copy of the live data. Require headroom for it.

@@ -29,7 +29,7 @@ usage() {
 # and 8). -h/--help prints usage and exits 0.
 if [[ $# -gt 0 ]]; then
     case "$1" in
-        -h|--help) usage; exit 0 ;;
+        -h|--help) if [[ $# -gt 1 ]]; then echo "code-install-extensions: unexpected argument: $2" >&2; usage >&2; exit 2; fi; usage; exit 0 ;;
         *) echo "code-install-extensions: unknown argument: $1" >&2; usage >&2; exit 2 ;;
     esac
 fi

@@ -110,6 +110,13 @@ reset_state() {
   STAT_DIALECT=bsd
   OD_CFVERSION="26.198.1011.0006" OD_CFSHORT="26.198.1011"
   UPSTREAM_VERSION="26.189.0928.0009"
+  # Test 10 deletes and then empties the vendored cask; restore it so
+  # every later case starts from the same fixture.
+  cat >"$tmp/taps/dezren39/homebrew-local/Casks/onedrive.rb" <<'RB'
+cask "onedrive" do
+  version "26.198.1011.0006"
+end
+RB
 }
 
 # BREW_ADOPT_PATH puts the stub bin first and keeps the ambient PATH
@@ -144,6 +151,24 @@ run() {
   run_script || rc=$?
   {
     echo "--- run (rc=$rc) ---"
+    cat "$tmp/out"
+  } >>"$tmp/all-out"
+}
+
+# run_args: like run but with explicit arguments instead of the fixed
+# primary user, for the argument-contract scenarios (#1884).
+run_args() {
+  rc=0
+  STUB_STATE="$tmp/state" \
+    BREW_ADOPT_PATH="$tmp/bin:$PATH" \
+    BREW_ADOPT_BREW="$tmp/bin/brew" \
+    BREW_ADOPT_SUDO="$tmp/bin/sudo" \
+    BREW_ADOPT_PLISTBUDDY="$tmp/bin/plistbuddy" \
+    BREW_ADOPT_APPLICATIONS="$tmp/apps" \
+    BREW_ADOPT_TAPS_DIR="$tmp/taps" \
+    bash "$script" "$@" >"$tmp/out" 2>&1 || rc=$?
+  {
+    echo "--- run_args $* (rc=$rc) ---"
     cat "$tmp/out"
   } >>"$tmp/all-out"
 }
@@ -226,7 +251,45 @@ run
 check "upstream caught up: exit 0" test $rc -eq 0
 check "upstream caught up: retire logged" out_has "retire homebrew-local"
 
-# 9. No apps at all (fresh machine): both skip cleanly.
+# 9. OneDrive present but both PlistBuddy reads fail: fail closed, exit 1.
+reset_state
+echo drewry.pope >"$tmp/state/chrome_owner"
+touch "$tmp/state/receipt_google-chrome"
+OD_CFVERSION=""
+OD_CFSHORT=""
+run
+check "onedrive unreadable: exit 1" test $rc -eq 1
+check "onedrive unreadable: diagnostic names the plist" out_has "could not be read"
+check "onedrive unreadable: plist path named" out_has "OneDrive.app/Contents/Info.plist"
+check "onedrive unreadable: no bundle handoff logged" out_has -v "brew bundle will install the vendored pkg"
+
+# 10. OneDrive present, installed version known, but the vendored cask
+# version is unreadable: fail closed (#1899, distinct from test 9's
+# installed-version-unknown). Two shapes: file missing, and file present
+# with no version stanza.
+reset_state
+echo drewry.pope >"$tmp/state/chrome_owner"
+touch "$tmp/state/receipt_google-chrome"
+rm "$tmp/taps/dezren39/homebrew-local/Casks/onedrive.rb"
+run
+check "onedrive vendored missing: exit 1" test $rc -eq 1
+check "onedrive vendored missing: diagnostic names the vendored file" out_has "vendored cask version could not be read"
+check "onedrive vendored missing: remedy printed" out_has "restore or fix homebrew-local/Casks/onedrive.rb"
+check "onedrive vendored missing: no bundle handoff logged" out_has -v "brew bundle will install the vendored pkg"
+
+reset_state
+echo drewry.pope >"$tmp/state/chrome_owner"
+touch "$tmp/state/receipt_google-chrome"
+cat >"$tmp/taps/dezren39/homebrew-local/Casks/onedrive.rb" <<'RB'
+cask "onedrive" do
+end
+RB
+run
+check "onedrive vendored unparsable: exit 1" test $rc -eq 1
+check "onedrive vendored unparsable: diagnostic names the vendored file" out_has "vendored cask version could not be read"
+check "onedrive vendored unparsable: no bundle handoff logged" out_has -v "brew bundle will install the vendored pkg"
+
+# 11. No apps at all (fresh machine): both skip cleanly.
 reset_state
 rm -rf "$tmp/apps/Google Chrome.app" "$tmp/apps/OneDrive.app"
 run
@@ -234,7 +297,33 @@ check "fresh machine: exit 0" test $rc -eq 0
 check "fresh machine: chrome fresh-install note" out_has "brew bundle will install it fresh"
 check "fresh machine: onedrive fresh-install note" out_has "brew bundle will install the vendored cask fresh"
 
-# 10. GNU stat first on PATH (as during darwin activation): the owner is
+# 11. Extra positional argument: usage error, exit 2, no side effects (#1884).
+reset_state
+run_args drewry.pope extra-arg
+check "extra arg: exit 2" test $rc -eq 2
+check "extra arg: usage printed" out_has "usage: brew-adopt-unmanaged.sh PRIMARY_USER"
+check "extra arg: no stub calls" test ! -s "$tmp/state/calls"
+
+# 12. No argument at all: usage error, exit 2, no side effects (#1884).
+reset_state
+run_args
+check "no arg: exit 2" test $rc -eq 2
+check "no arg: usage printed" out_has "usage: brew-adopt-unmanaged.sh PRIMARY_USER"
+check "no arg: no stub calls" test ! -s "$tmp/state/calls"
+
+# 13. --help and -h: usage on stdout, exit 0, no side effects (#1884).
+reset_state
+run_args --help
+check "--help: exit 0" test $rc -eq 0
+check "--help: usage printed" out_has "usage: brew-adopt-unmanaged.sh PRIMARY_USER"
+check "--help: no stub calls" test ! -s "$tmp/state/calls"
+reset_state
+run_args -h
+check "-h: exit 0" test $rc -eq 0
+check "-h: usage printed" out_has "usage: brew-adopt-unmanaged.sh PRIMARY_USER"
+check "-h: no stub calls" test ! -s "$tmp/state/calls"
+
+# 14. GNU stat first on PATH (as during darwin activation): the owner is
 # still read correctly, so a root-owned bundle is chowned and adopted.
 reset_state
 STAT_DIALECT=gnu
@@ -244,7 +333,7 @@ check "gnu stat: chown called" calls_has "chown -R drewry.pope"
 check "gnu stat: owner read, not filesystem info" out_has -v "File:"
 check "gnu stat: adopt called" calls_has "brew install --cask --adopt google-chrome"
 
-# 11. GNU stat, user-owned bundle: no chown.
+# 15. GNU stat, user-owned bundle: no chown.
 reset_state
 STAT_DIALECT=gnu
 echo drewry.pope >"$tmp/state/chrome_owner"
@@ -253,7 +342,7 @@ run
 check "gnu stat, managed chrome: exit 0" test $rc -eq 0
 check "gnu stat, managed chrome: no chown" out_has -v "chown -R"
 
-# 12. OneDrive 26.212 writes CFBundleVersion without the first dot
+# 16. OneDrive 26.212 writes CFBundleVersion without the first dot
 # (26212.1029.0006, short 26.212.1029). The version reported and compared
 # must be 26.212.1029.0006, the form Microsoft's pkg URL uses: a newer
 # install still fails closed, and the remedy names the dotted version.
@@ -266,7 +355,7 @@ check "dotless build: newer still exits 1" test $rc -eq 1
 check "dotless build: remedy names the dotted version" out_has "bump homebrew-local/Casks/onedrive.rb to 26.212.1029.0006"
 check "dotless build: dotless form not offered" out_has -v "to 26212.1029.0006"
 
-# 13. Same dotless build, vendored cask bumped to match: same-version
+# 17. Same dotless build, vendored cask bumped to match: same-version
 # install proceeds (comparing 26212 against 26 would call it newer).
 reset_state
 echo drewry.pope >"$tmp/state/chrome_owner"
@@ -275,7 +364,7 @@ OD_CFVERSION="26212.1029.0006" OD_CFSHORT="26.212.1029"
 vendored_rb="$tmp/taps/dezren39/homebrew-local/Casks/onedrive.rb"
 cp "$vendored_rb" "$tmp/onedrive.rb.orig"
 sed -i.bak 's/version "26.198.1011.0006"/version "26.212.1029.0006"/' "$vendored_rb"
-grep -q '26.212.1029.0006' "$vendored_rb" || { echo "FAIL: test 13 setup did not bump the vendored version" >&2; exit 1; }
+grep -q '26.212.1029.0006' "$vendored_rb" || { echo "FAIL: test 17 setup did not bump the vendored version" >&2; exit 1; }
 run
 check "dotless build, matching cask: exit 0" test $rc -eq 0
 check "dotless build, matching cask: bundle handoff logged" out_has "brew bundle will install the vendored pkg"

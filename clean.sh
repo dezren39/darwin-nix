@@ -601,7 +601,7 @@ sweep_unknown_large_scratch() {
   [ -d "$base" ] || return 0
   age_cutoff_min=$((UNKNOWN_SCRATCH_STALE_DAYS * 1440))
   for entry in "$base"/*; do
-    [ -e "$entry" ] || continue
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
     name="${entry##*/}"
     [ "$name" = "opencode" ] && continue   # owned by the git-aware tidy pass, not this
     unknown_scratch_is_known "$name" && continue
@@ -1282,7 +1282,7 @@ sweep_short_lived_scratch() {
   done < "$fresh_list"
   rm -f "$fresh_list"
   for entry in "$base"/*; do
-    [ -e "$entry" ] || continue
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
     name="${entry##*/}"
     short_scratch_is_kept "$name" && continue
     [ -n "${fresh[$name]:-}" ] && continue   # touched inside the window: keep
@@ -1778,7 +1778,7 @@ clean_opencode_scratch_dir() {
   local base="$1" days="$2" label="$3" n=0 freed_kb=0 entry k
   [ -d "$base" ] || return 0
   for entry in "$base"/*; do
-    [ -e "$entry" ] || continue
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
     if opencode_entry_is_idle "$entry" "$days"; then
       k="$(du -sk "$entry" 2>/dev/null | cut -f1)"
       if [ "$DRY_RUN" = "1" ]; then echo "  would remove: ${entry/#$CALLER_USER_HOME/\~} ($(( ${k:-0} / 1024 )) MB)"
@@ -1806,7 +1806,7 @@ clean_opencode_root_scratch() {
   local base="$1" days="$2" n=0 freed_kb=0 entry name p skip k
   [ -d "$base" ] || return 0
   for entry in "$base"/*; do
-    [ -e "$entry" ] || continue
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
     name="$(basename "$entry")"
     skip=0
     for p in "${OPENCODE_ROOT_PROTECTED[@]}"; do [ "$name" = "$p" ] && skip=1 && break; done
@@ -1903,7 +1903,7 @@ tidy_purge_postgres_dirs() {
 tidy_purge_large_entries() {
   local root="$1" limit_kb=$(( OPENCODE_TIDY_LARGE_MB * 1024 )) entry k
   for entry in "$root"/*; do
-    [ -e "$entry" ] || continue
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
     k="$(du -sk "$entry" 2>/dev/null | cut -f1)"
     if [ "${k:-0}" -ge "$limit_kb" ]; then
       if [ "$DRY_RUN" = "1" ]; then echo "  would remove (>${OPENCODE_TIDY_LARGE_MB}MB): ${entry/#$CALLER_USER_HOME/\~} ($(( k / 1024 )) MB)"
@@ -2006,7 +2006,7 @@ tidy_opencode_loose_files() {
   local base="$1" bucket_root="$2" entry name
   [ -d "$base" ] || return 0
   for entry in "$base"/*; do
-    [ -e "$entry" ] || continue
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
     [ "$entry" = "$bucket_root" ] && continue
     name="$(basename "$entry")"
     if [ -f "$entry" ]; then
@@ -2015,6 +2015,11 @@ tidy_opencode_loose_files() {
     elif [ -d "$entry" ]; then
       [ -e "$entry/.git" ] && continue           # rule 1
       tidy_classify_and_place "$entry" "$bucket_root"
+    elif [ -L "$entry" ]; then
+      # Dangling symlink (#1915): [ -f ] and [ -d ] are both false for
+      # one, so without this branch it was neither filed away nor
+      # removed. File it away like a loose file (mv keeps the link).
+      tidy_file_to_bucket "$entry" "$bucket_root"
     fi
   done
 }

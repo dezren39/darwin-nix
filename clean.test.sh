@@ -1135,5 +1135,139 @@ DEL_MISSING_OUT="$(DRY_RUN=0 del "$DEL_DIR/never-existed" 2>&1 || true)"
 echo "ok: del handles dangling/live symlinks and still skips missing paths silently"
 rm -rf "$DEL_DIR"
 
+# ─── #1915: sweep [ -e ] pre-filters must not skip dangling symlinks ──
+# Six sweep loops gated entries on [ -e "$entry" ] before del() or the
+# tidy judges ever ran; -e is false for a dangling symlink, so stale
+# dangling links were silently skipped by every sweep even after #1904
+# fixed del() itself. Oracle: per-loop filesystem state / dry-run lines
+# for a dangling link judged by the REAL extracted functions, plus a
+# static pin that each of the six loop bodies carries the -L gate.
+# Mutation check: dropping the [ -L ] half from any loop makes its
+# behavioral case fail (entry never reaches the judges) and the static
+# pin fail for that loop. tidy_purge_large_entries has no behavioral
+# case: a dangling link's du is 0, so its size gate judges it out on
+# size either way -- the static pin is its coverage.
+SW_DIR="$TMP_ROOT/sweep-dangling"
+mkdir -p "$SW_DIR"
+for fn in sweep_unknown_large_scratch sweep_short_lived_scratch \
+  clean_opencode_scratch_dir clean_opencode_root_scratch \
+  tidy_purge_large_entries tidy_opencode_loose_files; do
+  awk "/^$fn\\(\\) \\{/,/^\\}/" "$SCRIPT" > "$SW_DIR/$fn.sh"
+  grep -q "$fn" "$SW_DIR/$fn.sh" || fail "could not extract $fn from clean.sh (#1915)"
+  if grep -q '\[ -L "\$entry" \]' "$SW_DIR/$fn.sh"; then
+    echo "ok: $fn gates on existence-or-symlink (#1915)"
+  else
+    fail "$fn has no [ -L ] gate -- dangling symlinks are pre-filtered (#1915)"
+  fi
+done
+sed -n '/^del() {/,/^}/p' "$SCRIPT" > "$SW_DIR/del.sh"
+
+# sweep_short_lived_scratch: a stale dangling link matching a scratch
+# glob is removed on a real run; a fresh one is kept by the age gate.
+(
+  # shellcheck disable=SC2034 # consumed by the sourced sweep_short_lived_scratch
+  DRY_RUN=0; CALLER_USER_HOME="$HOME"; SHORT_SCRATCH_STALE_HOURS=8
+  TMPDIR="$SW_DIR"  # an earlier section exports a TMPDIR it later removes
+  # shellcheck disable=SC2034 # consumed by the sourced sweep_short_lived_scratch
+  SHORT_SCRATCH_GLOBS=('opencode-*'); _ss_total_removed=0
+  warn() { printf '%s\n' "$*" >&2; }
+  info() { printf '%s\n' "$*"; }
+  short_scratch_is_kept() { return 1; }
+  . "$SW_DIR/del.sh"
+  . "$SW_DIR/sweep_short_lived_scratch.sh"
+  mkdir -p "$SW_DIR/short"
+  ln -s "$SW_DIR/no-such-target" "$SW_DIR/short/opencode-stale123"
+  ln -s "$SW_DIR/no-such-target" "$SW_DIR/short/opencode-fresh123"
+  touch -h -t 202501010000 "$SW_DIR/short/opencode-stale123"
+  sweep_short_lived_scratch "$SW_DIR/short"
+  [ ! -L "$SW_DIR/short/opencode-stale123" ] \
+    || { echo "SWEEP_FAIL stale dangling link survived sweep_short_lived_scratch" >&2; exit 1; }
+  [ -L "$SW_DIR/short/opencode-fresh123" ] \
+    || { echo "SWEEP_FAIL fresh dangling link was removed by sweep_short_lived_scratch" >&2; exit 1; }
+) && echo "ok: sweep_short_lived_scratch removes a stale dangling link, keeps a fresh one" \
+  || fail "sweep_short_lived_scratch dangling-symlink case (#1915)"
+
+# clean_opencode_scratch_dir + clean_opencode_root_scratch: with the
+# idle judge stubbed idle, a dangling link is reported under dry-run.
+(
+  DRY_RUN=1; CALLER_USER_HOME="$HOME"
+  # shellcheck disable=SC2034 # consumed by the sourced clean_opencode_root_scratch
+  OPENCODE_ROOT_PROTECTED=(.DS_Store auth.json tmp)
+  warn() { printf '%s\n' "$*" >&2; }
+  info() { printf '%s\n' "$*"; }
+  opencode_entry_is_idle() { return 0; }
+  . "$SW_DIR/del.sh"
+  . "$SW_DIR/clean_opencode_scratch_dir.sh"
+  . "$SW_DIR/clean_opencode_root_scratch.sh"
+  mkdir -p "$SW_DIR/scratch" "$SW_DIR/root"
+  ln -s "$SW_DIR/no-such-target" "$SW_DIR/scratch/stale-link"
+  ln -s "$SW_DIR/no-such-target" "$SW_DIR/root/stray-link"
+  OUT1="$(clean_opencode_scratch_dir "$SW_DIR/scratch" 7 "tmp/opencode")"
+  case "$OUT1" in
+    *"would remove: $SW_DIR/scratch/stale-link"*) : ;;
+    *) echo "SWEEP_FAIL clean_opencode_scratch_dir dry-run missed dangling link: $OUT1" >&2; exit 1 ;;
+  esac
+  OUT2="$(clean_opencode_root_scratch "$SW_DIR/root" 7)"
+  case "$OUT2" in
+    *"would remove: $SW_DIR/root/stray-link"*) : ;;
+    *) echo "SWEEP_FAIL clean_opencode_root_scratch dry-run missed dangling link: $OUT2" >&2; exit 1 ;;
+  esac
+) && echo "ok: opencode scratch sweeps report a dangling link under dry-run" \
+  || fail "opencode scratch sweeps dangling-symlink case (#1915)"
+
+# sweep_unknown_large_scratch: with the size floor at 0, a stale
+# dangling link is judged and reported instead of pre-filtered.
+(
+  # shellcheck disable=SC2034 # consumed by the sourced sweep_unknown_large_scratch
+  DRY_RUN=1; CALLER_USER_HOME="$HOME"; PRUNE_UNKNOWN_SCRATCH=1
+  # shellcheck disable=SC2034 # consumed by the sourced sweep_unknown_large_scratch
+  UNKNOWN_SCRATCH_STALE_DAYS=7; UNKNOWN_SCRATCH_MIN_MB=0
+  # shellcheck disable=SC2034 # consumed by the sourced sweep_unknown_large_scratch
+  UNKNOWN_SCRATCH_HITS=()
+  warn() { printf '%s\n' "$*" >&2; }
+  info() { printf '%s\n' "$*"; }
+  unknown_scratch_is_known() { return 1; }
+  stat_birth_time() { echo unknown; }
+  stat_mtime_time() { echo unknown; }
+  . "$SW_DIR/del.sh"
+  . "$SW_DIR/sweep_unknown_large_scratch.sh"
+  mkdir -p "$SW_DIR/unknown"
+  ln -s "$SW_DIR/no-such-target" "$SW_DIR/unknown/mystery-link"
+  touch -h -t 202501010000 "$SW_DIR/unknown/mystery-link"
+  OUT3="$(sweep_unknown_large_scratch "$SW_DIR/unknown")"
+  case "$OUT3" in
+    *"would remove (unknown, 0 MB"*) : ;;
+    *) echo "SWEEP_FAIL sweep_unknown_large_scratch missed dangling link: $OUT3" >&2; exit 1 ;;
+  esac
+) && echo "ok: sweep_unknown_large_scratch judges a dangling link instead of pre-filtering it" \
+  || fail "sweep_unknown_large_scratch dangling-symlink case (#1915)"
+
+awk '/^tidy_file_to_bucket\(\) \{/,/^\}/' "$SCRIPT" > "$SW_DIR/tidy_file_to_bucket.sh"
+grep -q 'tidy_file_to_bucket' "$SW_DIR/tidy_file_to_bucket.sh" \
+  || fail "could not extract tidy_file_to_bucket from clean.sh (#1915)"
+# tidy_opencode_loose_files: a dangling link reaches the new symlink
+# branch and is filed away like a loose file (the link itself moves).
+(
+  # shellcheck disable=SC2034 # consumed by the sourced tidy functions
+  DRY_RUN=0; CALLER_USER_HOME="$HOME"; SPOTLIGHT_MARKER=".metadata_never_index"
+  # shellcheck disable=SC2034 # consumed by the sourced tidy_file_to_bucket
+  TIDY_MOVE_FAILURES=0
+  warn() { printf '%s\n' "$*" >&2; }
+  info() { printf '%s\n' "$*"; }
+  tidy_classify_and_place() { echo "SWEEP_FAIL tidy classified a dangling link as a dir" >&2; exit 1; }
+  . "$SW_DIR/tidy_file_to_bucket.sh" 2>/dev/null || true
+  . "$SW_DIR/tidy_opencode_loose_files.sh"
+  mkdir -p "$SW_DIR/loose" "$SW_DIR/bucket"
+  ln -s "$SW_DIR/no-such-target" "$SW_DIR/loose/dangling-note"
+  tidy_opencode_loose_files "$SW_DIR/loose" "$SW_DIR/bucket"
+  [ ! -L "$SW_DIR/loose/dangling-note" ] \
+    || { echo "SWEEP_FAIL dangling link left in place by tidy_opencode_loose_files" >&2; exit 1; }
+  [ -n "$(find "$SW_DIR/bucket" -type l -name dangling-note 2>/dev/null)" ] \
+    || { echo "SWEEP_FAIL dangling link not filed into the tidy bucket" >&2; exit 1; }
+) && echo "ok: tidy_opencode_loose_files files a dangling link away" \
+  || fail "tidy_opencode_loose_files dangling-symlink case (#1915)"
+rm -rf "$SW_DIR"
+
+
 [ "$failures" -eq 0 ] || { echo "$failures failure(s)" >&2; exit 1; }
 echo "all clean.sh flag-shaped-value checks passed"

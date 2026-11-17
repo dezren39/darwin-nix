@@ -461,6 +461,24 @@ grep -q "Done (unmount 1 target(s))" <<<"$out_p4" || fail "P: RMDIR_RC=0 control
 [[ -s "$RMDIR_LOG" ]] || fail "P: RMDIR_RC=0 control did not rmdir the empty mount point"
 [[ $failures -eq $start ]] && ok "P: symlinked + dangling .opencode unlinked and reported; failing rmdir counted, named, no success lines; RMDIR_RC=0 control unchanged"
 
+# ─── Scenario Q (#1894): help/version are sole-argument only ─────────
+start=$failures
+out_q1="$(bash "$SCRIPT" --help 2>&1)"; rc_q1=$?
+[[ $rc_q1 -eq 0 ]] || fail "Q: --help expected exit 0, got $rc_q1"
+grep -q "Usage: opencode-share" <<<"$out_q1" || fail "Q: --help did not print usage"
+out_q2="$(bash "$SCRIPT" --version 2>&1)"; rc_q2=$?
+[[ $rc_q2 -eq 0 ]] || fail "Q: --version expected exit 0, got $rc_q2"
+grep -q "opencode-share 1.0.0" <<<"$out_q2" || fail "Q: --version did not print the version"
+for flag in --help -h --version; do
+  out_qx="$(bash "$SCRIPT" "$flag" extra 2>&1)"; rc_qx=$?
+  [[ $rc_qx -eq 1 ]] || fail "Q: $flag extra expected exit 1, got $rc_qx"
+  grep -q "unknown argument: extra" <<<"$out_qx" || fail "Q: $flag extra did not name the unaccounted argument"
+done
+out_q3="$(bash "$SCRIPT" --dry-run --help 2>&1)"; rc_q3=$?
+[[ $rc_q3 -eq 1 ]] || fail "Q: --dry-run --help expected exit 1, got $rc_q3"
+grep -q "must be the sole argument" <<<"$out_q3" || fail "Q: --dry-run --help did not explain the sole-argument rule"
+[[ $failures -eq $start ]] && ok "Q: help/version succeed alone, fail as usage errors with unaccounted arguments (#1894)"
+
 if [[ $failures -gt 0 ]]; then
   echo "$failures failure(s)" >&2
   exit 1

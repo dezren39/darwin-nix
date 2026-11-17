@@ -9,6 +9,7 @@ import http.client
 import io
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -2047,3 +2048,112 @@ class ReaperStartupTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+MAX_EXEC_COMMANDS = int(re.search(
+    r"^MAX_EXEC_COMMANDS = (\d+)", AGENT.read_text(), re.M).group(1))
+
+
+class ExecBatchBoundsTest(unittest.TestCase):
+    """Issue #1842: one POST /exec batch must not hold a SEMA slot for
+    an unbounded aggregate duration.
+
+    Oracle: a batch of exactly MAX_EXEC_COMMANDS runs to completion; a
+    batch one command larger is rejected 400 before any command runs
+    or any slot is taken; and a batch whose early command consumes the
+    shared timeout budget reports the later commands as batch-deadline
+    timeouts without launching them.
+    """
+
+    def setUp(self):
+        self.token = "<MASKED_SECRET_002>"
+        with tempfile.NamedTemporaryFile("w", delete=False) as f:
+            f.write(self.token + "\n")
+            self.token_path = f.name
+        self.port = free_port()
+        self.state = tempfile.mkdtemp()
+        env = dict(os.environ,
+                   LAPTOP_AGENT_TOKEN_FILE=self.token_path,
+                   LAPTOP_AGENT_HOST="127.0.0.1",
+                   LAPTOP_AGENT_PORT=str(self.port),
+                   LAPTOP_AGENT_STATE=self.state)
+        self.proc = subprocess.Popen([sys.executable, str(AGENT)], env=env,
+                                     stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE)
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            try:
+                status, body = self._call("GET", "/health")
+                if status == 200 and body.get("ok"):
+                    return
+            except Exception:
+                time.sleep(0.1)
+        self.tearDown()
+        self.fail("agent did not start")
+
+    def tearDown(self):
+        self.proc.terminate()
+        self.proc.wait(timeout=10)
+        os.unlink(self.token_path)
+
+    def _call(self, method, path, body=None):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port,
+                                          timeout=60)
+        try:
+            conn.request(method, path,
+                         body=json.dumps(body).encode()
+                         if body is not None else None,
+                         headers={"X-Agent-Token": self.token,
+                                  "Content-Type": "application/json"})
+            resp = conn.getresponse()
+            return resp.status, json.loads(resp.read().decode())
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _pass_cmd():
+        return {"argv": [sys.executable, "-c", "pass"]}
+
+    def test_batch_at_max_commands_is_accepted(self):
+        status, body = self._call(
+            "POST", "/exec",
+            body={"cmds": [self._pass_cmd()
+                           for _ in range(MAX_EXEC_COMMANDS)],
+                  "timeout_s": 120})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(len(body["results"]), MAX_EXEC_COMMANDS)
+        self.assertTrue(all(r["exit"] == 0 for r in body["results"]))
+
+    def test_batch_one_over_max_is_rejected_and_runs_nothing(self):
+        marker = os.path.join(self.state, "oversized-ran")
+        cmds = [self._pass_cmd() for _ in range(MAX_EXEC_COMMANDS)]
+        cmds.append({"argv": [sys.executable, "-c",
+                              f"open({marker!r}, 'w').write('x')"]})
+        status, body = self._call("POST", "/exec",
+                                  body={"cmds": cmds, "timeout_s": 120})
+        self.assertEqual(status, 400, body)
+        self.assertIn("MAX_EXEC_COMMANDS", body.get("error", ""))
+        self.assertFalse(os.path.exists(marker))
+        # The rejection took no slot: an ordinary request still works.
+        status, body = self._call("POST", "/exec",
+                                  body={"cmds": [self._pass_cmd()]})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["results"][0]["exit"], 0)
+
+    def test_aggregate_deadline_stops_later_commands(self):
+        marker = os.path.join(self.state, "after-deadline-ran")
+        cmds = [
+            {"argv": [sys.executable, "-c", "import time; time.sleep(5)"]},
+            {"argv": [sys.executable, "-c",
+                      f"open({marker!r}, 'w').write('x')"]},
+        ]
+        status, body = self._call("POST", "/exec",
+                                  body={"cmds": cmds, "timeout_s": 1})
+        self.assertEqual(status, 200, body)
+        first, second = body["results"]
+        self.assertTrue(first.get("timeout"), first)
+        self.assertIsNone(first["exit"])
+        self.assertEqual(second.get("error"), "batch deadline exceeded")
+        self.assertTrue(second.get("timeout"), second)
+        self.assertFalse(os.path.exists(marker))
+

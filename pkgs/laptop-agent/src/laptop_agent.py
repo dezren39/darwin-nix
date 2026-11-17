@@ -75,6 +75,14 @@ MAX_OUT = 1 << 20            # per-stream capture cap for /exec (tail kept)
 MAX_BODY = 1 << 20           # request body cap for /exec and /jobs
 EXEC_TIMEOUT_DEFAULT = 120
 EXEC_TIMEOUT_MAX = 600
+# Batch bounds (#1842): MAX_EXEC_COMMANDS caps how many commands one
+# POST /exec request may carry, and the batch as a whole shares the
+# request's timeout_s budget as an aggregate deadline — run_batch hands
+# each command only the time remaining, so one admitted batch can hold
+# its SEMA slot for at most EXEC_TIMEOUT_MAX seconds in total, no
+# matter how many commands it contains. Oversized batches are rejected
+# with 400 before any slot is acquired or command is launched.
+MAX_EXEC_COMMANDS = 100
 JOB_TTL_S = 24 * 3600
 REAP_INTERVAL_S = 3600       # background reaper cadence (#1504)
 KILL_GRACE_S = 5
@@ -222,6 +230,31 @@ def run_one(spec, timeout_s):
         return result
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def run_batch(cmds, timeout_s):
+    """Run one POST /exec batch under an aggregate deadline (#1842).
+
+    The batch shares a single budget of timeout_s seconds (the caller
+    has already clamped it to EXEC_TIMEOUT_MAX). Each command receives
+    only the time remaining when it starts; once the deadline is spent,
+    the remaining commands are not launched at all and are reported
+    with a "batch deadline exceeded" timeout result, so the caller can
+    tell exactly where the batch was cut.
+    """
+    deadline = time.monotonic() + timeout_s
+    results = []
+    for c in cmds:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            results.append({"exit": None,
+                            "error": "batch deadline exceeded",
+                            "stdout": "", "stderr": "",
+                            "duration_ms": 0, "truncated": False,
+                            "timeout": True})
+            continue
+        results.append(run_one(c, remaining))
+    return results
 
 
 def _jobs_root():
@@ -738,6 +771,10 @@ class Handler(BaseHTTPRequestHandler):
             cmds = body.get("cmds") or []
             if not isinstance(cmds, list) or not cmds:
                 return self._send(400, {"error": "cmds required"})
+            if len(cmds) > MAX_EXEC_COMMANDS:
+                return self._send(
+                    400, {"error": f"too many cmds: {len(cmds)} exceeds "
+                                   f"MAX_EXEC_COMMANDS ({MAX_EXEC_COMMANDS})"})
             for c in cmds:
                 if not isinstance(c, dict) or (
                         c.get("shell") is None and not (
@@ -752,7 +789,7 @@ class Handler(BaseHTTPRequestHandler):
             if not SEMA.acquire(timeout=5):
                 return self._send(503, {"error": "busy"})
             try:
-                results = [run_one(c, timeout) for c in cmds]
+                results = run_batch(cmds, timeout)
             finally:
                 SEMA.release()
             return self._send(200, {"results": results})

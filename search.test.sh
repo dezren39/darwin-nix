@@ -162,9 +162,17 @@ if [ "$(search_calls)" = "0" ]; then
 else
   fail "no brew search calls (working) -- got $(search_calls)"
 fi
-printf 'Checking %s...\nbar\nChecking ~/Applications...\nbar\nFound 2 app(s) not installed via Homebrew.\n' "$APPS" > "$TMP_ROOT/expected"
+printf 'Checking %s...\nbar\nChecking ~/Applications...\nFound 1 app(s) not installed via Homebrew.\n' "$APPS" > "$TMP_ROOT/expected"
 check "working brew report includes summary after #1617 cleanup" \
   cmp -s "$TMP_ROOT/expected" "$TMP_ROOT/out"
+# --- #1897: the same app in both scan legs is listed and counted once ------
+# (The working fixture puts Bar.app in both $APPS and ~/Applications; the
+# pinned report above already shows bar once with a count of 1.)
+if [ "$(grep -c '^bar$' "$TMP_ROOT/out")" = "1" ]; then
+  echo "ok: app present in both legs is listed once (#1897)"
+else
+  fail "app present in both legs is listed once (#1897) — got $(grep -c '^bar$' "$TMP_ROOT/out") bar lines"
+fi
 
 # --- no unmatched apps: make the empty result explicit -----------------------
 run_search all-managed

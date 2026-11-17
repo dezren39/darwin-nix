@@ -139,6 +139,15 @@ check_if_brew_installed() {
     # Check if app exists in brew list
     if [[ ! " ${BREW_APPS[*]} " =~ " ${app_name} " ]] && \
        [[ ! " ${BREW_NAMES[*]} " =~ " ${normalized_name} " ]]; then
+        # The same app can be present in both scan legs (/Applications
+        # and ~/Applications); record each normalized name once so the
+        # listing and the summary count agree with the distinct-app
+        # reality (#1897). The temp file is the dedupe state: the scan
+        # legs run in pipeline subshells, so shell variables set in one
+        # leg would not survive into the other.
+        if grep -qxF -e "$normalized_name" "$UNMANAGED_APPS_FILE" 2>/dev/null; then
+            return
+        fi
         # echo "${app_path}"
         echo "${normalized_name}"
         printf '%s\n' "$normalized_name" >> "$UNMANAGED_APPS_FILE"

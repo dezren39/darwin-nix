@@ -128,6 +128,27 @@ check "rebuild.sh --bogus prints usage on stderr" \
   grep -q "Usage: rebuild.sh" "$TMP_ROOT/err"
 expect_no_steps "rebuild.sh --bogus"
 
+# --- rebuild.sh: help followed by an extra argument (#1830) -------------------
+# The complete argument list is validated before help is honored: a help
+# flag plus anything else is a usage error naming the extra argument.
+: > "$LOG"
+run_script "$REBUILD_WORK" rebuild.sh --help unexpected
+expect_rc "rebuild.sh --help unexpected exits 2" 2
+check "rebuild.sh --help unexpected names the extra argument on stderr" \
+  grep -q -- "unexpected" "$TMP_ROOT/err"
+check "rebuild.sh --help unexpected prints usage on stderr" \
+  grep -q "Usage: rebuild.sh" "$TMP_ROOT/err"
+expect_no_steps "rebuild.sh --help unexpected"
+
+: > "$LOG"
+run_script "$REBUILD_WORK" rebuild.sh -h --bogus
+expect_rc "rebuild.sh -h --bogus exits 2" 2
+check "rebuild.sh -h --bogus names the extra argument on stderr" \
+  grep -q -- "--bogus" "$TMP_ROOT/err"
+check "rebuild.sh -h --bogus prints usage on stderr" \
+  grep -q "Usage: rebuild.sh" "$TMP_ROOT/err"
+expect_no_steps "rebuild.sh -h --bogus"
+
 # --- rebuild.sh: no-argument control ------------------------------------------
 : > "$LOG"
 run_script "$REBUILD_WORK" rebuild.sh

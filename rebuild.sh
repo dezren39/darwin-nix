@@ -2,12 +2,18 @@
 
 # This script takes no arguments (#1167): any argument was silently
 # ignored and the rebuild ran anyway (git add, flake update, switch).
-# Reject the first argument by name, with usage on stderr and exit 2,
-# before any work -- the house argument contract (#1145 rules 1 and
-# 8). --help prints usage and exits 0, with no side effects.
+# Reject the first unaccounted argument by name, with usage on stderr
+# and exit 2, before any work -- the house argument contract (#1145
+# rules 1 and 8). The complete argument list is validated before help
+# is honored (#1830): --help prints usage and exits 0 only when it is
+# the sole argument, with no side effects.
 if [[ $# -gt 0 ]]; then
     case "$1" in
-        -h|--help) echo "Usage: rebuild.sh"; exit 0 ;;
+        -h|--help)
+            if [[ $# -gt 1 ]]; then
+                echo "rebuild: unknown argument: $2" >&2; echo "Usage: rebuild.sh" >&2; exit 2
+            fi
+            echo "Usage: rebuild.sh"; exit 0 ;;
         *) echo "rebuild: unknown argument: $1" >&2; echo "Usage: rebuild.sh" >&2; exit 2 ;;
     esac
 fi

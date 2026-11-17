@@ -557,11 +557,47 @@ readarray() {
 }
 EOF
 
-if grep -nE '(^|[[:space:];])mapfile[[:space:]]|(^|[[:space:];])readarray[[:space:]]|declare +-[a-zA-Z]*[Ag]([[:space:]]|$)' "$SCRIPT" "$SELF_DIR/lib/common.sh" > "$TMP_ROOT/bash4-scan.out"; then
+if grep -nE '(^|[[:space:];])mapfile[[:space:]]|(^|[[:space:];])readarray[[:space:]]|declare +-[a-zA-Z]*[Ag]([[:space:]]|$)|(local|declare|typeset) +-[a-zA-Z]*n([[:space:]]|$)' "$SCRIPT" "$SELF_DIR/lib/common.sh" > "$TMP_ROOT/bash4-scan.out"; then
   fail "Bash 4-only construct(s) in git-maintain-repos / lib/common.sh: $(cat "$TMP_ROOT/bash4-scan.out")"
 else
   echo "ok: no Bash 4-only constructs in git-maintain-repos or lib/common.sh (#1834)"
 fi
+
+# The scan must actually catch the nameref forms (#1874): plant both
+# spellings in a scratch file and require the same pattern to match.
+printf 'local -n _x="$1"\n' > "$TMP_ROOT/nameref-local.sh"
+printf 'declare -n _y="$1"\n' > "$TMP_ROOT/nameref-declare.sh"
+if grep -nE '(local|declare|typeset) +-[a-zA-Z]*n([[:space:]]|$)' "$TMP_ROOT/nameref-local.sh" "$TMP_ROOT/nameref-declare.sh" > /dev/null; then
+  echo "ok: Bash 4-only scan catches local -n / declare -n namerefs (#1874)"
+else
+  fail "Bash 4-only scan does not catch planted nameref declarations (#1874)"
+fi
+
+# Helper behavior after the nameref removal (#1874): the three
+# write-through-name helpers in lib/common.sh must behave exactly as
+# they did through namerefs -- array fill with -o separators, the
+# arg_once seen-flag (first use marks, a repeat dies), and the
+# arg_used accumulator in invocation order.
+(
+  source "$SELF_DIR/lib/common.sh"
+  usage() { :; }
+  ARG_PROGRAM=bash32-helpers
+  build_name_expr T_EXPR alpha beta gamma
+  [ "${T_EXPR[*]}" = "-name alpha -o -name beta -o -name gamma" ] || exit 11
+  build_name_expr T_EXPR2 solo
+  [ "${T_EXPR2[*]}" = "-name solo" ] || exit 12
+  T_SEEN=0
+  arg_once --depth T_SEEN || exit 13
+  [ "$T_SEEN" -eq 1 ] || exit 14
+  ( arg_once --depth T_SEEN ) 2>/dev/null && exit 15
+  T_USED=""
+  arg_used T_USED --path
+  arg_used T_USED --depth
+  [ "$T_USED" = "--path --depth" ] || exit 16
+  exit 0
+)
+[ $? -eq 0 ] && echo "ok: common.sh helpers behave identically without namerefs (#1874)" \
+  || fail "common.sh helper behavior changed after nameref removal (#1874)"
 
 run_bash32() { # run_bash32 <args...> — like run(), under the builtin mask
   OUT="$(BASH_ENV="$BASH32_GUARD" bash "$SCRIPT" "$@" 2>"$TMP_ROOT/err")"; STATUS=$?

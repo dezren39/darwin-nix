@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Tests for the operator-script help contract (#1892): -h|--help is
+# Tests for the operator-script help contract (#1892, extended to the
+# remaining three scripts from #1893): -h|--help is
 # honored only as the sole argument. Every script below used to exit 0
 # on `$1 == -h|--help` without looking at the rest of the command line,
 # so `--help extra` and `-h --bogus` reported success while silently
@@ -44,6 +45,9 @@ SCRIPTS=(
   opencode-db-vacuum.sh
   pkgs/brew-repair/brew-repair.sh
   pkgs/adopt/adopt.sh
+  git-discover-repos
+  git-maintain-repos
+  spotlight-exclude-artifacts
 )
 
 for rel in "${SCRIPTS[@]}"; do

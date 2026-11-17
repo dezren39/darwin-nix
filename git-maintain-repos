@@ -206,7 +206,7 @@ while [ $# -gt 0 ]; do
     --reflog-expire) { arg_require_value "$1" "${2:-}"; arg_once "$1" REFLOG_EXPIRE_SET; REFLOG_EXPIRE="$2"; REPO_FLAGS_USED="$REPO_FLAGS_USED --reflog-expire"; shift; } ;;
     --no-register) REGISTER=0; REPO_FLAGS_USED="$REPO_FLAGS_USED --no-register" ;;
     --dry-run) DRY_RUN=1 ;;
-    -h|--help) usage; exit 0 ;;
+    -h|--help) { if [[ $# -gt 1 ]]; then arg_die "unexpected argument: $2"; fi; usage; exit 0; } ;;
     --one) shift; break ;;                       # internal single-repo mode
     -*) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
     *)

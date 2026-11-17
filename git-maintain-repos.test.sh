@@ -314,6 +314,9 @@ esac
 # except 0, which is legal there (git auto-detect), so 0 is probed as
 # accepted; 08 is probed as accepted decimal 8 (rule 6, #881).
 probe_rejected "unknown option: --bogus" --bogus
+# #1893: --help is honored only as the sole argument.
+probe_rejected "unexpected-extra-arg" --help unexpected-extra-arg
+probe_rejected "--bogus" -h --bogus
 probe_rejected "git-maintain-repos: --jobs requires a value" --jobs
 probe_rejected "git-maintain-repos: --jobs requires a value" --jobs --dry-run
 probe_rejected "git-maintain-repos: --jobs may be given only once" --dry-run --path "$VALID" --jobs 1 --jobs 2

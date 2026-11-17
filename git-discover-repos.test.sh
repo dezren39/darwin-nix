@@ -898,6 +898,9 @@ case "$OUT" in *"FOUND"$'\t'"trash"*) echo "ok: --find alone still emits FOUND r
 # paths are this script'''s declared repeatable input and accumulate.
 # 08 is probed as accepted decimal 8 (rule 6, #881).
 probe_rejected "unknown option: --bogus" --bogus
+# #1893: --help is honored only as the sole argument.
+probe_rejected "unexpected-extra-arg" --help unexpected-extra-arg
+probe_rejected "--bogus" -h --bogus
 probe_rejected "git-discover-repos: --find requires a value" --find
 probe_rejected "git-discover-repos: --find requires a value" --find --dry-run
 probe_rejected "git-discover-repos: --depth may be given only once" --path "$VALID" --dry-run --depth 2 --depth 5

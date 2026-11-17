@@ -312,6 +312,115 @@ class AuthFailureConnectionTest(unittest.TestCase):
         self.assertIn("job_id", parsed)
 
 
+
+class AuthedUnreadBodyConnectionTest(unittest.TestCase):
+    """Issue #1916: authenticated POST paths that never parse the body
+    (kill, unknown routes) must drain it before answering.
+
+    Oracle: on ONE http.client.HTTPConnection, an authed POST with a
+    JSON body to /jobs/<unknown>/kill answers 404 and to an unknown
+    route answers 404, and a following GET /health on the same
+    connection is served 200 -- the drained body is not parsed as the
+    next request line (which used to produce http.server's HTML 400).
+    """
+
+    def setUp(self):
+        self.token = "<MASKED_SECRET_003>"
+        with tempfile.NamedTemporaryFile("w", delete=False) as f:
+            f.write(self.token + "\n")
+            self.token_path = f.name
+        self.port = free_port()
+        env = dict(os.environ,
+                   LAPTOP_AGENT_TOKEN_FILE=self.token_path,
+                   LAPTOP_AGENT_HOST="127.0.0.1",
+                   LAPTOP_AGENT_PORT=str(self.port),
+                   LAPTOP_AGENT_STATE=tempfile.mkdtemp())
+        self.proc = subprocess.Popen([sys.executable, str(AGENT)], env=env,
+                                     stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE)
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            try:
+                conn = self._conn()
+                status, _, _ = self._call(conn, "GET", "/health", self.token)
+                conn.close()
+                if status == 200:
+                    return
+            except Exception:
+                time.sleep(0.1)
+        self.tearDown()
+        self.fail("agent did not start")
+
+    def tearDown(self):
+        self.proc.terminate()
+        self.proc.wait(timeout=10)
+        os.unlink(self.token_path)
+
+    def _conn(self):
+        return http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+
+    def _call(self, conn, method, path, body=None):
+        headers = {"X-Agent-Token": self.token,
+                   "Content-Type": "application/json"}
+        data = json.dumps(body).encode() if body is not None else None
+        conn.request(method, path, body=data, headers=headers)
+        r = conn.getresponse()
+        payload = r.read()
+        try:
+            parsed = json.loads(payload) if payload else {}
+        except ValueError:
+            parsed = {}
+        return r.status, r.getheader("Connection"), parsed
+
+    def _assert_health_ok(self, conn):
+        status, _, parsed = self._call(conn, "GET", "/health")
+        self.assertEqual(status, 200, parsed)
+        self.assertTrue(parsed.get("ok"), parsed)
+
+    def test_kill_unknown_job_with_body_then_health_same_connection(self):
+        conn = self._conn()
+        status, connection, parsed = self._call(
+            conn, "POST", "/jobs/deadbeef/kill",
+            {"argv": ["/bin/echo", "hi"]})
+        self.assertEqual(status, 404, parsed)
+        self.assertEqual(parsed, {"error": "no such job"})
+        self.assertNotEqual(connection, "close")
+        self._assert_health_ok(conn)
+        conn.close()
+
+    def test_unknown_route_with_body_then_health_same_connection(self):
+        conn = self._conn()
+        status, connection, parsed = self._call(
+            conn, "POST", "/no-such-route", {"argv": ["/bin/echo", "hi"]})
+        self.assertEqual(status, 404, parsed)
+        self.assertEqual(parsed, {"error": "no such route"})
+        self.assertNotEqual(connection, "close")
+        self._assert_health_ok(conn)
+        conn.close()
+
+    def test_kill_running_job_with_body_then_health_same_connection(self):
+        conn = self._conn()
+        status, _, parsed = self._call(
+            conn, "POST", "/jobs",
+            {"argv": ["/bin/sh", "-c", "sleep 30"]})
+        self.assertIn(status, (200, 202), parsed)
+        job_id = parsed["job_id"]
+        status, connection, parsed = self._call(
+            conn, "POST", f"/jobs/{job_id}/kill", {"reason": "test"})
+        self.assertEqual(status, 200, parsed)
+        self.assertEqual(parsed, {"ok": True, "job_id": job_id})
+        self.assertNotEqual(connection, "close")
+        self._assert_health_ok(conn)
+        conn.close()
+
+    def test_kill_unknown_job_without_body_still_404(self):
+        conn = self._conn()
+        status, _, parsed = self._call(conn, "POST", "/jobs/deadbeef/kill")
+        self.assertEqual(status, 404, parsed)
+        self.assertEqual(parsed, {"error": "no such job"})
+        self._assert_health_ok(conn)
+        conn.close()
+
 class TailFileTest(unittest.TestCase):
     def test_job_public_samples_state_before_reading_spools(self):
         with tempfile.NamedTemporaryFile("w", suffix="-token",

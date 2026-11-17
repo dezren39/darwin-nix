@@ -1943,8 +1943,18 @@ tidy_dir_to_bucket() {
 }
 
 tidy_classify_and_place() {
-  local dir="$1" bucket_root="$2" g wt kept_worktree="" idle_worktrees=()
+  local dir="$1" bucket_root="$2" g wt kept_worktree="" idle_worktrees=() inventory
   tidy_dir_has_recent_file "$dir" && return 0   # rule 2, tidy's own protect window
+
+  # The nested-worktree inventory decides whether anything below may be
+  # purged or archived, so its failure must be observable (#1863): a find
+  # that fails -- wholly or partially -- is NOT an empty inventory. On
+  # failure, warn and skip every purge/removal/archive action for this
+  # directory; an undiscovered worktree must never be treated as scratch.
+  if ! inventory="$(find "$dir" -mindepth 1 -name .git -print 2>/dev/null)"; then
+    warn "tidy: nested-worktree discovery failed for $dir; skipping purge/archive for safety"
+    return 0
+  fi
 
   # Rule 3, worktree-bearing case: a nested worktree's own kept/idle status
   # is judged by OPENCODE_WORKTREE_STALE_DAYS (the same gate the top-level
@@ -1961,7 +1971,7 @@ tidy_classify_and_place() {
     else
       kept_worktree="$wt"; break
     fi
-  done < <(find "$dir" -mindepth 1 -name .git -print 2>/dev/null)
+  done <<< "$inventory"
 
   if [ -n "$kept_worktree" ]; then
     return 0   # a kept worktree inside: leave this entire directory alone

@@ -949,6 +949,59 @@ case "$CACHE_OUT" in
   *) fail "idle-repo .venv not offered for deletion in dry-run" ;;
 esac
 unset CACHE_OUT CACHE_ROOT
+# --- tidy: failed nested-worktree discovery skips purge/archive (#1863) ---
+# tidy_classify_and_place protects nested worktrees before purging or
+# archiving a scratch directory. Its .git inventory used to run through
+# process substitution, so a failed find looked exactly like an empty
+# inventory and the purge proceeded. Drive the REAL function extracted
+# from clean.sh with stubbed helpers and a stubbed find: on discovery
+# failure no destructive helper may run; successful scans keep their
+# existing behavior (empty inventory -> normal leaf; kept worktree ->
+# leave the whole directory alone).
+TC_DIR="$TMP_ROOT/tidy-classify"
+mkdir -p "$TC_DIR/subject/wt" "$TC_DIR/bucket"
+awk '/^tidy_classify_and_place\(\) \{/,/^\}/' "$SCRIPT" > "$TC_DIR/fn.sh"
+grep -q 'tidy_classify_and_place' "$TC_DIR/fn.sh" || fail "could not extract tidy_classify_and_place from clean.sh"
+
+tc_run() { # tc_run <mode: fail|empty|kept> <calls-file>
+  (
+    # shellcheck disable=SC2034 # consumed by the sourced tidy_classify_and_place
+    DRY_RUN=0; OPENCODE_WORKTREE_STALE_DAYS=30; CALLER_USER_HOME="$HOME"
+    TC_CALLS="$2"; : > "$TC_CALLS"
+    warn() { echo "warn: $*" >> "$TC_CALLS"; }
+    tidy_dir_has_recent_file() { return 1; }
+    opencode_entry_is_idle() { return 1; }
+    tidy_purge_postgres_dirs() { echo purge_pg >> "$TC_CALLS"; }
+    tidy_purge_large_entries() { echo purge_large >> "$TC_CALLS"; }
+    tidy_dir_to_bucket() { echo archive >> "$TC_CALLS"; }
+    del() { echo "del $*" >> "$TC_CALLS"; }
+    case "$1" in
+      fail)  find() { return 1; } ;;
+      empty) find() { return 0; } ;;
+      kept)  find() { printf '%s\n' "$TC_DIR/subject/wt/.git"; } ;;
+    esac
+    . "$TC_DIR/fn.sh"
+    tidy_classify_and_place "$TC_DIR/subject" "$TC_DIR/bucket"
+  )
+}
+
+tc_run fail "$TC_DIR/calls-fail"
+grep -q 'nested-worktree discovery failed' "$TC_DIR/calls-fail"   || fail "failed nested-worktree discovery did not warn (#1863)"
+if grep -Eq '^(purge_pg|purge_large|archive|del )' "$TC_DIR/calls-fail"; then
+  fail "failed nested-worktree discovery still ran destructive helpers: $(cat "$TC_DIR/calls-fail")"
+else
+  echo "ok: failed nested-worktree discovery skips purge/archive (#1863)"
+fi
+
+tc_run empty "$TC_DIR/calls-empty"
+grep -q '^purge_pg$' "$TC_DIR/calls-empty" && grep -q '^purge_large$' "$TC_DIR/calls-empty" && grep -q '^archive$' "$TC_DIR/calls-empty"   && echo "ok: successful empty inventory still purges/archives as a normal leaf"   || fail "successful empty inventory changed behavior: $(cat "$TC_DIR/calls-empty")"
+
+tc_run kept "$TC_DIR/calls-kept"
+if grep -Eq '^(purge_pg|purge_large|archive|del )' "$TC_DIR/calls-kept"; then
+  fail "kept nested worktree no longer protects its directory: $(cat "$TC_DIR/calls-kept")"
+else
+  echo "ok: kept nested worktree still protects its whole directory"
+fi
 
 [ "$failures" -eq 0 ] || { echo "$failures failure(s)" >&2; exit 1; }
 echo "all clean.sh flag-shaped-value checks passed"

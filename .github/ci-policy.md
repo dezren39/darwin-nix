@@ -33,8 +33,13 @@ Per-workflow application in this repo:
   The full per-check `nix build` matrix (fail-fast off) runs nightly
   (07:17 UTC) and on `workflow_dispatch`, covering every
   `checks` derivation — the 23 `*-tests` suites plus `formatting`,
-  `tidy`, and `mcpx-darwin-skip`. The check list is derived from the
-  flake (`nix eval --json .#checks.x86_64-linux`), never hardcoded.
+  `tidy`, and `mcpx-darwin-skip`. Coverage is partitioned by system
+  (#1832): each system's check list is derived from the flake for
+  that system (`nix eval --json .#checks.x86_64-linux` /
+  `.#checks.aarch64-darwin`), never hardcoded, and Darwin checks
+  build on a native macOS runner (macos-14), Linux checks on
+  ubuntu-latest. The flake generates no `x86_64-darwin` checks, so
+  that system has no partition.
   No path filters: check sources include root-level scripts and
   test files, and a filter that misses one silently excludes that
   check (#1108).

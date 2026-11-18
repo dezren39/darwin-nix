@@ -154,39 +154,13 @@ rec {
     # differently and miss the fixed-output hash.
     openchamber = {
       url = "github:developing-today-forks/openchamber";
-      # Pin the chain's mcpx source forward again: the 2026-11-10 full
-      # flake update rolled it back a week (developing-today/code
-      # 031cde2, 2026-11-03), whose pool handoff reads /proc and fails
-      # its tests on aarch64-darwin (no /proc on macOS). The source this
-      # flake carried before the update (code f8957ac, 2026-11-10) is
-      # green on aarch64-darwin. Drop this override once the fork's own
-      # mcpx-src pin catches up.
-      # Pinned forward 2026-11-11 to the merge of developing-today/code
-      # PR 8775 (darwin-nix issue 1815): at f8957ac the mcpx
-      # touch-reopen test expired its own task before the reopen
-      # under builder load and failed the mcpx-home-manager-module
-      # flake check (run 43098524363).
-      # Pinned 2026-11-17 to developing-today/code PR 11453 (c9af4fe), on
-      # top of PR 11443 (merged): 11443 makes the mcpx supervisor scan see
-      # fallback sockets (without it the darwin mcpx build fails two
-      # tests); 11453 makes the darwin agent restart survive an activation
-      # that failed before postActivation (without it the daemon stayed on
-      # a three-switches-stale config). Move to a main rev once 11453 merges.
-      inputs.opencode.inputs.mcpx-src.url =
-        "github:developing-today/code/c9af4fe47d10753effa9a9a1e16b365113c4449c";
-      # Pin the chain's opencode to the #1791 hash-fix rev: the rev the
-      # chain otherwise resolves (6c43550) records an aarch64-darwin
-      # node_modules fixed-output hash that does not match its own
-      # content — two independent native darwin builds (the Mac in
-      # #1791 and darwin-nix run 42965438016) agree the output is
-      # sha256-g9J6PY3Bv1i8K6e8chtUwj/lvdVifAGf/VbtAnxnp2A=. The fork's
-      # pin branch for that tree (fork PR #2269, merged) carries the
-      # corrected nix/hashes.json and nothing else. Drop this override
-      # once the chain's own opencode resolution moves past 6c43550.
-      # Pinned forward 2026-11-17 to the fork's main HEAD (fa677f8), which
-      # carries 118d889 (#1547): provider."opencode-route" overrides such
-      # as hidden apply to routes instead of disabling every route.
-      inputs.opencode.url = "github:developing-today-forks/opencode/fa677f81720b64d3a54d14fb29e9d9e4bb321be8";
+      # No overrides: the chain's own pins (openchamber -> opencode ->
+      # mcpx-src) carry every fix this flake used to pin forward
+      # (opencode #1547 route overrides, the #1791 node_modules hash,
+      # code #11443/#11453/#11476 for mcpx on aarch64-darwin), as of
+      # openchamber 877cf35 / opencode 0a8dbad / code d3a0db8 (2026-11-18).
+      # If the chain regresses, pin here again with
+      # inputs.opencode.url / inputs.opencode.inputs.mcpx-src.url.
     };
     sidepulse-src = {
       url = "github:inteliwear/sidepulse/ffb1d3c2f3eed3b7e80e32d7876a7e1d67bd5dfb";

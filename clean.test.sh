@@ -1546,5 +1546,87 @@ case "$DRIFT_OUT_OK" in
   *) fail "drift check control did not report orphan-cask (got: $DRIFT_OUT_OK / $DRIFT_ERR_OK) (#1918)" ;;
 esac
 
+# --- Colima recreation requires two complete Docker listings (#1831) --------
+# Run the real cleanup script in dry-run mode with a fake Colima profile and
+# Docker CLI. The daemon probe succeeds; each listing can independently fail,
+# so an empty wc result must never be mistaken for a verified zero.
+COLIMA_TEST="$TMP_ROOT/colima-listings"
+COLIMA_BIN="$COLIMA_TEST/bin"
+COLIMA_HOME="$COLIMA_TEST/home"
+mkdir -p "$COLIMA_BIN" "$COLIMA_HOME/.colima/default" \
+  "$COLIMA_HOME/.colima/_lima/_disks/colima"
+cat > "$COLIMA_BIN/docker" <<'STUB'
+#!/usr/bin/env bash
+if [ -n "${DOCKER_HOST:-}" ]; then
+  case "$1" in
+    info) exit 0 ;;
+    ps)
+      case "${DOCKER_PS_MODE:-empty}" in
+        fail) printf 'partial-container\n'; exit 7 ;;
+        nonempty) printf 'container-id\n'; exit 0 ;;
+        *) exit 0 ;;
+      esac
+      ;;
+    volume)
+      case "${DOCKER_VOLUME_MODE:-empty}" in
+        fail) printf 'partial-volume\n'; exit 8 ;;
+        nonempty) printf 'volume-name\n'; exit 0 ;;
+        *) exit 0 ;;
+      esac
+      ;;
+  esac
+fi
+exit 0
+STUB
+cat > "$COLIMA_BIN/colima" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+cat > "$COLIMA_BIN/du" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *"/.colima/_lima/_disks/colima"*) printf '1048577\t%s\n' "${*: -1}" ;;
+  *) /usr/bin/du "$@" ;;
+esac
+STUB
+chmod +x "$COLIMA_BIN/docker" "$COLIMA_BIN/colima" "$COLIMA_BIN/du"
+run_colima_case() { # <ps mode> <volume mode> — sets output and status
+  DOCKER_PS_MODE="$1" DOCKER_VOLUME_MODE="$2" HOME="$COLIMA_HOME" \
+    PATH="$COLIMA_BIN:$PATH" bash "$SCRIPT" --system --dry-run \
+      >"$COLIMA_TEST/out" 2>"$COLIMA_TEST/err"
+  COLIMA_STATUS=$?
+  COLIMA_OUT="$(cat "$COLIMA_TEST/out")"
+  COLIMA_ERR="$(cat "$COLIMA_TEST/err")"
+}
+expect_colima_no_delete() {
+  case "$COLIMA_OUT" in
+    *"would run: as_user colima stop -p default"*|*"would run: as_user colima delete -f -p default"*)
+      fail "$1 attempted the Colima deletion path (status $COLIMA_STATUS)" ;;
+    *) echo "ok: $1 leaves the Colima profile intact" ;;
+  esac
+}
+run_colima_case fail empty
+expect_colima_no_delete "failed docker ps with successful empty volume listing"
+case "$COLIMA_OUT$COLIMA_ERR" in
+  *"docker ps"*) echo "ok: failed docker ps is diagnosed" ;;
+  *) fail "failed docker ps was not diagnosed (got: $COLIMA_OUT / $COLIMA_ERR)" ;;
+esac
+run_colima_case empty fail
+expect_colima_no_delete "failed docker volume ls with successful empty container listing"
+case "$COLIMA_OUT$COLIMA_ERR" in
+  *"docker volume ls"*) echo "ok: failed docker volume ls is diagnosed" ;;
+  *) fail "failed docker volume ls was not diagnosed (got: $COLIMA_OUT / $COLIMA_ERR)" ;;
+esac
+run_colima_case nonempty empty
+expect_colima_no_delete "verified non-empty container listing"
+run_colima_case empty nonempty
+expect_colima_no_delete "verified non-empty volume listing"
+run_colima_case empty empty
+case "$COLIMA_OUT" in
+  *"would run: as_user colima stop -p default"*"would run: as_user colima delete -f -p default"*)
+    echo "ok: two verified empty listings permit Colima recreation" ;;
+  *) fail "two verified empty listings did not enter recreation path (got: $COLIMA_OUT)" ;;
+esac
+
 [ "$failures" -eq 0 ] || { echo "$failures failure(s)" >&2; exit 1; }
 echo "all clean.sh flag-shaped-value checks passed"

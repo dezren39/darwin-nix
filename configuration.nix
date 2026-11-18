@@ -15,8 +15,11 @@ let
   serviceEventAsPrimaryUser = pkgs.writeShellScript "service-event-as-primary-user" ''
     set -euo pipefail
     primary_uid=$(/usr/bin/id -u ${config.system.primaryUser})
+    # -H: sudo keeps root's HOME (/var/root) otherwise, and service-event
+    # writes under $HOME/Library/Logs (switch-20261117T180205.log: "cannot
+    # write /var/root/Library/Logs/nix-services/events.jsonl").
     exec /bin/launchctl asuser "$primary_uid" \
-      /usr/bin/sudo -u ${config.system.primaryUser} \
+      /usr/bin/sudo -H -u ${config.system.primaryUser} \
       ${serviceEvent} "$@"
   '';
 in
@@ -953,7 +956,10 @@ lib.recursiveUpdate {
     system_activation_helper=${./system-activation-helper.sh}
     service_event=${serviceEvent}
     service_event_as_user=${serviceEventAsPrimaryUser}
-    as_user="/bin/launchctl asuser $primary_uid /usr/bin/sudo -u ${config.system.primaryUser}"
+    # -H so the user-scope helpers get the user's HOME, not /var/root: without
+    # it git-maintain-repos wrote /var/root/.config/git and service-event
+    # /var/root/Library/Logs, both refused, which failed the switch.
+    as_user="/bin/launchctl asuser $primary_uid /usr/bin/sudo -H -u ${config.system.primaryUser}"
     helper_env="/usr/bin/env PATH=/run/current-system/sw/bin:/usr/bin:/bin"
 
     # exclude: --system re-asserts the static list only (~40 ms). Consider

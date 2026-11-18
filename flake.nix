@@ -1562,7 +1562,7 @@ rec {
               src = inputs.self;
             }
             ''
-              cp $src/system-activation-helper.sh $src/system-activation-helper.test.sh ./
+              cp $src/system-activation-helper.sh $src/system-activation-helper.test.sh $src/configuration.nix ./
               chmod u+w ./system-activation-helper.test.sh
               bash ./system-activation-helper.test.sh
               touch $out

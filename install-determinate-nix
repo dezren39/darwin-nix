@@ -63,7 +63,7 @@ if [[ ! -x /nix/var/nix/profiles/default/bin/nix ]]; then
   # because the script later execs ./s and a trap does not run across
   # exec. Only the directory this invocation created is ever removed.
   trap 'rm -rf "$tmpdir"' EXIT
-  curl --fail --location --silent --show-error --output "$pkg" "$url"
+  curl --fail --location --silent --show-error --connect-timeout 10 --max-time 300 --output "$pkg" "$url"
   sudo installer -pkg "$pkg" -target /
   rm -rf "$tmpdir"
   trap - EXIT

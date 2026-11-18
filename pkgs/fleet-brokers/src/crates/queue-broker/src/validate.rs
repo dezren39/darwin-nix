@@ -467,3 +467,28 @@ pub fn task_from_packet(packet: &Value, queue: &str) -> Value {
         "max_attempts": max_attempts,
     })
 }
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+
+    #[test]
+    fn non_ascii_week_key_does_not_panic() {
+        let packet = serde_json::json!({
+            "dedupe_key": "repo-health:v1:maintenance:developing-today/code:fmt:202éW01",
+            "payload": {}
+        });
+        let (errors, _warnings) = validate_packet(&packet);
+        eprintln!("errors={errors:?}");
+    }
+
+    #[test]
+    fn w00_key_is_rejected() {
+        let packet = serde_json::json!({
+            "dedupe_key": "repo-health:v1:maintenance:developing-today/code:fmt:2026-W00",
+            "payload": {}
+        });
+        let (errors, _warnings) = validate_packet(&packet);
+        eprintln!("errors={errors:?}");
+    }
+}

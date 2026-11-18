@@ -328,7 +328,6 @@ rec {
     nixosModules.mcpx = inputs.openchamber.nixosModules.mcpx;
     homeManagerModules.mcpx = inputs.openchamber.homeManagerModules.mcpx;
     darwinModules.mcpx = inputs.openchamber.darwinModules.mcpx;
-    homeManagerModules.fleet-brokers = import ./pkgs/fleet-brokers/home-module.nix;
     homeManagerModules.meta-quota-export = import ./pkgs/meta-quota-export/home-module.nix;
     homeManagerModules.rustdesk-units = import ./pkgs/rustdesk-units/home-module.nix;
 
@@ -413,7 +412,6 @@ rec {
         twg-cli = pkgs.callPackage ./pkgs/twg-cli/package.nix { };
         # code#5362: the laptop fleet brokers (secrets + queue) and
         # the repo-queue client, as one workspace package.
-        fleet-brokers = pkgs.callPackage ./pkgs/fleet-brokers/package.nix { };
         # code#5343: the resident laptop execution agent daemon.
         laptop-agent = pkgs.callPackage ./pkgs/laptop-agent/package.nix { };
         # mcp-remote and chrome-devtools-mcp, which mcpx.config.nix runs.
@@ -1866,93 +1864,6 @@ rec {
                 || { echo "rendered config.json mismatch:" >&2; cat "$configFile" >&2; exit 1; }
               touch $out
             '';
-        # code#5362: the fleet-brokers home-manager module must render
-        # all three fleet service units pointing at the flake's own packages.
-        fleet-brokers-home-manager-module =
-          # The module's service config is guarded by hostPlatform.isLinux,
-          # so the check must not evaluate it on Darwin (codex P1 on #1459).
-          if !pkgs.stdenv.hostPlatform.isLinux then
-            pkgs.runCommandLocal "fleet-brokers-home-manager-module-check" { } "touch $out"
-          else
-            let
-              selfPkgs = mkPackages pkgs;
-              eval = inputs.home-manager.lib.homeManagerConfiguration {
-                inherit pkgs;
-                modules = [
-                  inputs.self.homeManagerModules.fleet-brokers
-                  {
-                    services.fleet-brokers = {
-                      enable = true;
-                      package = selfPkgs.fleet-brokers;
-                      laptopAgentPackage = selfPkgs.laptop-agent;
-                      # nixpkgs' bws is unfree; the check only needs a
-                      # package on the unit PATH, so a stub stands in.
-                      bwsPackage = pkgs.coreutils;
-                    };
-                    home = {
-                      username = "fleet-test";
-                      homeDirectory = "/home/fleet-test";
-                      stateVersion = "25.11";
-                    };
-                  }
-                ];
-              };
-              qb = eval.config.systemd.user.services.queue-broker.Service;
-              sb = eval.config.systemd.user.services.secrets-broker.Service;
-              la = eval.config.systemd.user.services.laptop-agent.Service;
-              repoQueueAlias = eval.config.home.file.".local/bin/repo-queue".source;
-            in
-            pkgs.runCommandLocal "fleet-brokers-home-manager-module-check"
-              {
-                qbExec = qb.ExecStart;
-                sbExec = sb.ExecStart;
-                sbPath = pkgs.lib.concatStringsSep ":" sb.Environment;
-                bwsBin = "${pkgs.coreutils}/bin";
-                laExec = la.ExecStart;
-                inherit repoQueueAlias;
-                repoQueueBinary = "${selfPkgs.fleet-brokers}/bin/repo-queue";
-                wantedBy = pkgs.lib.concatStringsSep " " eval.config.systemd.user.services.queue-broker.Install.WantedBy;
-              }
-              ''
-                case "$qbExec" in
-                *"/bin/queue-broker") ;;
-                *)
-                  echo "queue-broker ExecStart wrong: $qbExec" >&2
-                  exit 1
-                  ;;
-                esac
-                case "$sbExec" in
-                *"/bin/secrets-broker") ;;
-                *)
-                  echo "secrets-broker ExecStart wrong: $sbExec" >&2
-                  exit 1
-                  ;;
-                esac
-                case "$sbPath" in
-                *"$bwsBin"*) ;;
-                *)
-                  echo "secrets-broker PATH lacks bwsPackage: $sbPath" >&2
-                  exit 1
-                  ;;
-                esac
-                case "$laExec" in
-                *"/bin/laptop-agent") ;;
-                *)
-                  echo "laptop-agent ExecStart wrong: $laExec" >&2
-                  exit 1
-                  ;;
-                esac
-                [ "$repoQueueAlias" = "$repoQueueBinary" ] || {
-                  echo "repo-queue alias target=$repoQueueAlias, want packaged binary $repoQueueBinary" >&2
-                  exit 1
-                }
-                [ -x "$repoQueueAlias" ] || {
-                  echo "repo-queue alias target is not an executable provisioned binary: $repoQueueAlias" >&2
-                  exit 1
-                }
-                [ "$wantedBy" = "default.target" ] || { echo "WantedBy=$wantedBy, want default.target" >&2; exit 1; }
-                touch $out
-              '';
         # darwin-nix#1776: the meta-quota-export home-manager module must
         # render the service + timer faithful to the live hand-installed
         # units on amd (oneshot, TimeoutStartSec=120, same ExecStart;

@@ -166,9 +166,13 @@ rec {
       # touch-reopen test expired its own task before the reopen
       # under builder load and failed the mcpx-home-manager-module
       # flake check (run 43098524363).
-      # Pinned forward 2026-11-17 to developing-today/code main HEAD.
+      # Pinned 2026-11-17 to developing-today/code main (6ee8002) plus
+      # PR 11443 (b443870): at 6ee8002 the mcpx supervisor scan cannot see
+      # fallback sockets, which every darwin build uses (long TMPDIR), so
+      # two supervised-stdio tests fail and the mcpx build fails. Move back
+      # to a main rev once PR 11443 merges.
       inputs.opencode.inputs.mcpx-src.url =
-        "github:developing-today/code/6ee8002be2aca41e24e9ab1a07b55bd32f552f72";
+        "github:developing-today/code/b4438700558e27188d766c9de771c98056a27ec7";
       # Pin the chain's opencode to the #1791 hash-fix rev: the rev the
       # chain otherwise resolves (6c43550) records an aarch64-darwin
       # node_modules fixed-output hash that does not match its own

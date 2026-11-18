@@ -166,13 +166,14 @@ rec {
       # touch-reopen test expired its own task before the reopen
       # under builder load and failed the mcpx-home-manager-module
       # flake check (run 43098524363).
-      # Pinned 2026-11-17 to developing-today/code main (6ee8002) plus
-      # PR 11443 (b443870): at 6ee8002 the mcpx supervisor scan cannot see
-      # fallback sockets, which every darwin build uses (long TMPDIR), so
-      # two supervised-stdio tests fail and the mcpx build fails. Move back
-      # to a main rev once PR 11443 merges.
+      # Pinned 2026-11-17 to developing-today/code PR 11453 (c9af4fe), on
+      # top of PR 11443 (merged): 11443 makes the mcpx supervisor scan see
+      # fallback sockets (without it the darwin mcpx build fails two
+      # tests); 11453 makes the darwin agent restart survive an activation
+      # that failed before postActivation (without it the daemon stayed on
+      # a three-switches-stale config). Move to a main rev once 11453 merges.
       inputs.opencode.inputs.mcpx-src.url =
-        "github:developing-today/code/b4438700558e27188d766c9de771c98056a27ec7";
+        "github:developing-today/code/c9af4fe47d10753effa9a9a1e16b365113c4449c";
       # Pin the chain's opencode to the #1791 hash-fix rev: the rev the
       # chain otherwise resolves (6c43550) records an aarch64-darwin
       # node_modules fixed-output hash that does not match its own
@@ -1702,6 +1703,33 @@ rec {
           ) "mac-app-util requires SBCL >= 2.6.6 on newer macOS";
           inputs.mac-app-util.packages.${pkgs.stdenv.hostPlatform.system}.default;
         mcpx = (mkPackages pkgs).mcpx;
+        # developing-today/code PR 11453: the mcpx darwin module's agent
+        # restart must survive an activation that failed before
+        # postActivation (2026-11-17: the daemon stayed on a config three
+        # switches stale). Runs the module's real install/restart blocks
+        # from this host's evaluated activation scripts against stubs.
+        # Only coverage of that module behaviour: developing-today/code
+        # has no darwin evaluation of its own.
+        mcpx-agent-restart =
+          let
+            activation = inputs.self.darwinConfigurations.MGM9JJ4V3R.config.system.activationScripts;
+            extra = pkgs.writeText "extra-activation" activation.extraActivation.text;
+            post = pkgs.writeText "post-activation" activation.postActivation.text;
+          in
+          pkgs.runCommandLocal "mcpx-agent-restart-test"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.coreutils
+                pkgs.diffutils
+                pkgs.gnugrep
+                pkgs.gnused
+              ];
+            }
+            ''
+              bash ${./mcpx-agent-restart.test.sh} ${extra} ${post}
+              touch $out
+            '';
         sidepulse = (mkPackages pkgs).sidepulse;
         sidepulse-wrapper =
           let

@@ -137,6 +137,39 @@ else
   fi
 fi
 
+# --- Incomplete archives refuse deletion and clean up all staging. ------
+db="$fx/incomplete-archive.db"; mk_fixture "$db"
+arch="$fx/incomplete-archive.ndjson.zst"
+trunc_stub="$fx/trunc-stub"; mkdir -p "$trunc_stub"
+real_gzip="$(command -v gzip)"
+cat >"$trunc_stub/zstd" <<EOF
+#!$(command -v bash)
+case "\${1:-}" in
+  -19) head -n 1 | "$real_gzip" -c ;;
+  -dc) "$real_gzip" -dc "\$2" ;;
+  *) echo "unexpected zstd arguments: \$*" >&2; exit 2 ;;
+esac
+EOF
+chmod +x "$trunc_stub/zstd"
+out="$(PATH="$trunc_stub:$PATH" bash "$PRUNE" --db "$db" --protect-days 0 --apply -y --no-backup --archive "$arch" 2>&1)"; rc=$?
+if [ "$rc" -eq 0 ]; then
+  fail "incomplete archive unexpectedly succeeded: $out"
+else
+  [[ "$out" == *"refusing to delete rows that are not archived"* ]] \
+    || fail "incomplete archive lacked refusal diagnostic: $out"
+  [ "$(count_of "$db")" = "10" ] \
+    || fail "incomplete archive changed fixture event count to $(count_of "$db"), expected 10"
+  [ ! -e "$arch" ] || fail "incomplete archive left final archive $arch"
+  [ ! -e "$arch.partial" ] || fail "incomplete archive left partial file $arch.partial"
+  staged="$(sqlite3 "$db" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='opencode_db_prune_targets';")"
+  [ "$staged" = "0" ] || fail "incomplete archive left staging table behind"
+  if [[ "$out" == *"refusing to delete rows that are not archived"* ]] \
+    && [ "$(count_of "$db")" = "10" ] && [ ! -e "$arch" ] \
+    && [ ! -e "$arch.partial" ] && [ "$staged" = "0" ]; then
+    ok "incomplete archive refuses deletion and cleans archive files and staging table"
+  fi
+fi
+
 
 # --- Many-line integrity_check must not SIGPIPE the capture (#1460). --
 # Both integrity captures used to read through `| head -1` under

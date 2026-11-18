@@ -1556,6 +1556,7 @@ COLIMA_HOME="$COLIMA_TEST/home"
 COLIMA_APP="$COLIMA_TEST/app"
 COLIMA_BASH="$(command -v bash)"
 REAL_DU="$(command -v du)"
+export REAL_DU
 mkdir -p "$COLIMA_BIN" "$COLIMA_HOME/.colima/default" \
   "$COLIMA_HOME/.colima/_lima/_disks/colima" "$COLIMA_APP/lib"
 # Keep this full-script integration fixture hermetic: omitting the Homebrew

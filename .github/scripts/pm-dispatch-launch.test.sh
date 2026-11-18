@@ -69,6 +69,7 @@ if [ -n "$stage" ] && [ "${STUB_HANG:-}" = "$stage" ]; then
     ''|*[!0-9]*) echo "stub curl: $stage call has no --max-time (would hang)" >&2; exit 99 ;;
   esac
   if [ "$max" -ge 600 ]; then echo "stub curl: $stage --max-time $max >= job timeout" >&2; exit 99; fi
+  printf '%s\n' "$stage" >> "$STUB_DEADLINE_VALIDATION_FILE"
   exit 28
 fi
 case "$url" in
@@ -98,6 +99,7 @@ chmod +x "$work/bin/curl"
 
 run_launch() { # extra env assignments as args; sets rc, out, err
   : > "$work/github-output"
+  : > "$work/deadline-validation"
   env -i PATH="$work/bin:$PATH" HOME="$work" \
     INPUT_REPO="dezren39/darwin-nix" INPUT_TASK="bolt" \
     INPUT_PROMPT_URL="https://example.test/prompts/bolt.md" \
@@ -105,6 +107,7 @@ run_launch() { # extra env assignments as args; sets rc, out, err
     ACTIONS_ID_TOKEN_REQUEST_TOKEN="req-token" \
     GITHUB_OUTPUT="$work/github-output" \
     STUB_PAYLOAD_FILE="$work/payload.json" \
+    STUB_DEADLINE_VALIDATION_FILE="$work/deadline-validation" \
     STUB_RESPONSE_BODY='{"task_id":"T-1","session_id":"S-1","issue_number":42}' \
     "$@" bash "$SCRIPT" > "$work/out" 2> "$work/err"
   echo $?
@@ -163,6 +166,8 @@ check "empty token error says the mint failed" "$?"
 for stage in prompt oidc dispatch; do
   rc=$(run_launch STUB_HANG="$stage")
   [ "$rc" -eq 1 ]; check "hung $stage call exits 1 (bounded, not hung)" "$?"
+  grep -qx "$stage" "$work/deadline-validation"
+  check "hung $stage stub accepted a sub-600-second --max-time" "$?"
 done
 rc=$(run_launch STUB_HANG=prompt)
 grep -q "failed to fetch prompt for task 'bolt'" "$work/err"; check "hung prompt fetch names the stage" "$?"

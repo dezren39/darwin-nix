@@ -15,6 +15,9 @@
 #   empty prompt -> exit 1, error says the prompt is empty
 #   no OIDC env  -> exit 1, error names the missing runner variables
 #   empty token  -> exit 1, error says the mint failed
+#   hung calls   -> each of the three requests is bounded by a
+#                   --max-time shorter than the 10-minute job timeout;
+#                   a stalled call exits 28 and the error names its stage
 #
 # Run: bash .github/scripts/pm-dispatch-launch.test.sh (exit 0 = passed)
 set -u
@@ -49,6 +52,25 @@ for a in "$@"; do
   case "$a" in http*) url=$a ;; esac
   prev=$a
 done
+stage=""
+case "$url" in
+  *prompts/*) stage=prompt ;;
+  *audience=pm-dispatch*) stage=oidc ;;
+  *dispatch.security.cab*) stage=dispatch ;;
+esac
+if [ -n "$stage" ] && [ "${STUB_HANG:-}" = "$stage" ]; then
+  max=""
+  prev=""
+  for a in "$@"; do
+    if [ "$prev" = "--max-time" ]; then max=$a; fi
+    prev=$a
+  done
+  case "$max" in
+    ''|*[!0-9]*) echo "stub curl: $stage call has no --max-time (would hang)" >&2; exit 99 ;;
+  esac
+  if [ "$max" -ge 600 ]; then echo "stub curl: $stage --max-time $max >= job timeout" >&2; exit 99; fi
+  exit 28
+fi
 case "$url" in
   *prompts/*)
     [ "${STUB_PROMPT_FAIL:-0}" = "1" ] && exit 22
@@ -137,6 +159,17 @@ rc=$(run_launch STUB_TOKEN_EMPTY=1)
 [ "$rc" -eq 1 ]; check "empty minted token exits 1" "$?"
 grep -q 'failed to mint a GitHub Actions OIDC token' "$work/err"
 check "empty token error says the mint failed" "$?"
+
+for stage in prompt oidc dispatch; do
+  rc=$(run_launch STUB_HANG="$stage")
+  [ "$rc" -eq 1 ]; check "hung $stage call exits 1 (bounded, not hung)" "$?"
+done
+rc=$(run_launch STUB_HANG=prompt)
+grep -q "failed to fetch prompt for task 'bolt'" "$work/err"; check "hung prompt fetch names the stage" "$?"
+rc=$(run_launch STUB_HANG=oidc)
+grep -q 'OIDC token request failed or timed out' "$work/err"; check "hung OIDC request names the stage" "$?"
+rc=$(run_launch STUB_HANG=dispatch)
+grep -q 'pm-dispatch POST /v1/sessions failed or timed out' "$work/err"; check "hung dispatch POST names the stage" "$?"
 
 if [ "$failures" -gt 0 ]; then
   echo "FAILURES: $failures"

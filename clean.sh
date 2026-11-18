@@ -803,11 +803,26 @@ if have colima && have docker; then
     # VM full of real containers and volumes looked exactly like an empty one,
     # and got deleted without verification. Probe that profile's socket first.
     if DOCKER_HOST="unix://$sock" docker info >/dev/null 2>&1; then
-      nc="$(DOCKER_HOST="unix://$sock" docker ps -q 2>/dev/null | wc -l | tr -d ' ')"
-      nv="$(DOCKER_HOST="unix://$sock" docker volume ls -q 2>/dev/null | wc -l | tr -d ' ')"
+      listing_ok=1
+      if container_listing="$(DOCKER_HOST="unix://$sock" docker ps -q 2>/dev/null)"; then
+        nc="$(printf '%s\n' "$container_listing" | awk 'NF { n++ } END { print n+0 }')"
+      else
+        listing_status=$?
+        nc=""
+        listing_ok=0
+        info "colima[$prof]: docker ps -q failed (status $listing_status) -- cannot verify containers"
+      fi
+      if volume_listing="$(DOCKER_HOST="unix://$sock" docker volume ls -q 2>/dev/null)"; then
+        nv="$(printf '%s\n' "$volume_listing" | awk 'NF { n++ } END { print n+0 }')"
+      else
+        listing_status=$?
+        nv=""
+        listing_ok=0
+        info "colima[$prof]: docker volume ls -q failed (status $listing_status) -- cannot verify volumes"
+      fi
       reachable=1
     else
-      nc=""; nv=""; reachable=0
+      nc=""; nv=""; listing_ok=0; reachable=0
     fi
 
     if [ "$reachable" = "0" ]; then
@@ -826,7 +841,7 @@ if have colima && have docker; then
         info "colima[$prof]: daemon not reachable -- cannot verify it is empty, leaving it alone"
         info "              (\`colima start -p $prof\` if you want this VM reclaimed)"
       fi
-    elif [ "${nc:-1}" = "0" ] && [ "${nv:-1}" = "0" ] && [ "$size_kb" -gt 1048576 ]; then
+    elif [ "$listing_ok" = "1" ] && [ "${nc:-1}" = "0" ] && [ "${nv:-1}" = "0" ] && [ "$size_kb" -gt 1048576 ]; then
       echo "🐳 colima[$prof]: $(human_size $((size_kb * 1024))) of disk, 0 containers, 0 volumes — recreating"
       run as_user colima stop -p "$prof"      || warn "colima stop -p $prof failed"
       run as_user colima delete -f -p "$prof" || warn "colima delete -p $prof failed"

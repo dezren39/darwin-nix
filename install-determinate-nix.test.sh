@@ -196,7 +196,7 @@ before=$failures
 run_install_case success
 [ "$STATUS" -eq 0 ] || fail "install success case exited $STATUS (want 0): $OUT"
 case "$OUT" in *"segment-ok"*) ;; *) fail "install success case did not complete the segment: $OUT" ;; esac
-case "$STUB" in *"curl connect-timeout=10 max-time=300 output=$TMP_ROOT/case/stubtmpdir/determinate-nix.pkg"*) ;; *) fail "install success case: curl timeouts missing or changed: $STUB" ;; esac
+case "$STUB" in *"curl connect-timeout=30 max-time=600 output=$TMP_ROOT/case/stubtmpdir/determinate-nix.pkg"*) ;; *) fail "install success case: curl timeouts missing or changed: $STUB" ;; esac
 case "$STUB" in *"installer -pkg $TMP_ROOT/case/stubtmpdir/determinate-nix.pkg -target /"*) ;; *) fail "install success case: installer not called with the stub pkg: $STUB" ;; esac
 [ ! -e "$TMP_ROOT/case/stubtmpdir" ] || fail "install success case left the temp directory behind"
 [ "$failures" -eq "$before" ] && ok "install success: pkg installed, temp directory removed (#1821)"
@@ -204,7 +204,7 @@ case "$STUB" in *"installer -pkg $TMP_ROOT/case/stubtmpdir/determinate-nix.pkg -
 before=$failures
 run_install_case curltimeout
 [ "$STATUS" -eq 28 ] || fail "curl timeout case exited $STATUS (want 28, CURLE_OPERATION_TIMEDOUT): $OUT"
-case "$STUB" in *"curl connect-timeout=10 max-time=300 output=$TMP_ROOT/case/stubtmpdir/determinate-nix.pkg"*) ;; *) fail "curl timeout case: curl timeouts missing or changed: $STUB" ;; esac
+case "$STUB" in *"curl connect-timeout=30 max-time=600 output=$TMP_ROOT/case/stubtmpdir/determinate-nix.pkg"*) ;; *) fail "curl timeout case: curl timeouts missing or changed: $STUB" ;; esac
 [ ! -e "$TMP_ROOT/case/stubtmpdir" ] || fail "curl timeout case left the temp directory (and partial pkg) behind"
 [ "$failures" -eq "$before" ] && ok "curl timeout: exit 28 preserved, temp directory and partial pkg removed"
 

@@ -687,4 +687,109 @@ for (const bad of [NaN, Infinity, -Infinity]) {
   console.log("pass: getConfig clamps debounceMs to the timer-safe range (#1594)");
 }
 
+
+// 24. Symlinked day-directory, write path (#1603, oracle: the real
+//     utcDayDir / backupDoc extracted verbatim, driven against
+//     fixture dirs): a live symlinked day-dir must never be written
+//     through (the backup would land outside the backup dir, where
+//     listBackups never lists it), a dangling symlinked day-dir must
+//     fail as a named refusal instead of a raw ENOENT, backupDoc
+//     contains both failures, backupAll still backs up the other
+//     documents in the pass, and a normal day-dir is unchanged.
+{
+  const stripBackupTypes = (code) =>
+    stripTypes(code)
+      .replace(/: vscode\.TextDocument/g, "")
+      .replace(/: BackupTrigger/g, "");
+  const lastHash24 = new Map();
+  const lastBackupPath24 = new Map();
+  const writeFactory = new Function(
+    "fs",
+    "path",
+    "contentHash",
+    "buildMeta",
+    "formatMetaLine",
+    "langToExtension",
+    "lastHash",
+    "lastBackupPath",
+    `${stripBackupTypes(extractFunction("utcDayDir"))}
+     ${stripBackupTypes(extractFunction("backupDoc"))}
+     return { utcDayDir, backupDoc };`,
+  );
+  const { utcDayDir: utcDayDir24, backupDoc: backupDoc24 } = writeFactory(
+    fs,
+    path,
+    (s) => `h${s.length}`,
+    () => ({}),
+    () => "META",
+    () => ".txt",
+    lastHash24,
+    lastBackupPath24,
+  );
+  const today24 = new Date().toISOString().slice(0, 10);
+  const doc24 = (id, text) => ({
+    uri: {
+      scheme: "untitled",
+      path: `/Untitled-${id}`,
+      toString: () => `untitled:Untitled-${id}`,
+    },
+    getText: () => text,
+    languageId: "plaintext",
+  });
+
+  // Normal day-dir: backup lands inside, is listed, hash recorded.
+  const baseOk = fs.mkdtempSync(path.join(os.tmpdir(), "buffer-backup-ok-"));
+  backupDoc24(doc24(1, "hello"), baseOk, "change");
+  assert.strictEqual(listBackups(baseOk).length, 1, "normal backup must be listed");
+  assert.ok(lastHash24.has("untitled:Untitled-1"), "normal backup must record its hash");
+  fs.rmSync(baseOk, { recursive: true, force: true });
+
+  // Live symlink: utcDayDir refuses by name, backupDoc contains the
+  // refusal, and nothing is created in the outside target.
+  const baseLive = fs.mkdtempSync(path.join(os.tmpdir(), "buffer-backup-live-"));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "buffer-backup-outside-"));
+  fs.symlinkSync(outside, path.join(baseLive, today24), "dir");
+  assert.throws(() => utcDayDir24(baseLive), /symlinked day directory/);
+  backupDoc24(doc24(2, "secret"), baseLive, "change");
+  assert.deepStrictEqual(fs.readdirSync(outside), [], "no backup may be written through a live symlink");
+  assert.ok(!lastHash24.has("untitled:Untitled-2"), "a refused backup must not record its hash");
+  fs.rmSync(baseLive, { recursive: true, force: true });
+  fs.rmSync(outside, { recursive: true, force: true });
+
+  // Dangling symlink: named refusal, never a raw ENOENT, and
+  // backupDoc contains it too.
+  const baseDead = fs.mkdtempSync(path.join(os.tmpdir(), "buffer-backup-dead-"));
+  fs.symlinkSync(path.join(baseDead, "no-such-target"), path.join(baseDead, today24), "dir");
+  let deadErr = null;
+  try {
+    utcDayDir24(baseDead);
+  } catch (err) {
+    deadErr = err;
+  }
+  assert.ok(deadErr, "dangling symlink must be refused");
+  assert.match(deadErr.message, /symlinked day directory/);
+  assert.ok(!/ENOENT/.test(deadErr.message), "dangling symlink must not surface a raw ENOENT");
+  backupDoc24(doc24(3, "hello again"), baseDead, "change");
+  fs.rmSync(baseDead, { recursive: true, force: true });
+
+  // backupAll: one document's failure does not lose the others.
+  const seen24 = [];
+  const allFactory = new Function(
+    "vscode",
+    "backupDoc",
+    `${stripBackupTypes(extractFunction("backupAll"))}
+     return { backupAll };`,
+  );
+  const { backupAll: backupAll24 } = allFactory(
+    { workspace: { textDocuments: ["a", "b"] } },
+    (doc) => {
+      seen24.push(doc);
+      if (doc === "a") throw new Error("boom");
+    },
+  );
+  backupAll24({ backupDir: "/unused" }, "change");
+  assert.deepStrictEqual(seen24, ["a", "b"], "backupAll must attempt every document");
+  console.log("pass: symlinked day-dir is refused on the write path and failures are contained (#1603)");
+}
+
 console.log("cleanup-count.test.mjs: all assertions passed");

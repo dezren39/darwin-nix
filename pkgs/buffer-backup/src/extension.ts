@@ -400,7 +400,35 @@ function utcDayDir(base: string): string {
   const d = new Date();
   const day = d.toISOString().slice(0, 10);
   const dir = path.join(base, day);
+  // lstat, not stat (#1603): a symlinked day-directory must never be
+  // written through. Its target lives outside the backup dir, and
+  // listBackups (#1524) deliberately never lists anything under it,
+  // so a backup written there would be invisible to every cleanup
+  // and recovery path. A dangling link gets the same refusal: lstat
+  // sees the link itself, so it is refused here with a named error
+  // instead of surfacing as the raw ENOENT mkdir would throw.
+  try {
+    if (fs.lstatSync(dir).isSymbolicLink()) {
+      throw new Error(
+        "buffer-backup: refusing to write through symlinked day directory"
+      );
+    }
+  } catch (err) {
+    if (
+      err instanceof Error &&
+      err.message.startsWith("buffer-backup:")
+    ) {
+      throw err;
+    }
+    // Any other lstat failure means the day dir does not exist yet;
+    // mkdir below creates it.
+  }
   fs.mkdirSync(dir, { recursive: true });
+  if (fs.lstatSync(dir).isSymbolicLink()) {
+    throw new Error(
+      "buffer-backup: refusing to write through symlinked day directory"
+    );
+  }
   return dir;
 }
 
@@ -562,20 +590,34 @@ function backupDoc(
   const name = doc.uri.path.replace(/[^a-zA-Z0-9]/g, "_") || "untitled";
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
   const ext = langToExtension(doc.languageId || "txt");
-  const dayDir = utcDayDir(dir);
+  // Contained failure (#1603): a day-dir or write failure (above all
+  // the symlinked day-dir refusal in utcDayDir) skips this backup
+  // instead of throwing out of the event handlers or activate().
+  // lastHash is left untouched, so a later trigger retries.
+  try {
+    const dayDir = utcDayDir(dir);
 
-  const meta = buildMeta(doc, text, h, trigger);
-  const content = formatMetaLine(meta) + "\n" + text;
+    const meta = buildMeta(doc, text, h, trigger);
+    const content = formatMetaLine(meta) + "\n" + text;
 
-  const backupFilePath = path.join(dayDir, `${name}_${ts}${ext}`);
-  fs.writeFileSync(backupFilePath, content);
-  lastHash.set(key, h);
-  lastBackupPath.set(key, backupFilePath);
+    const backupFilePath = path.join(dayDir, `${name}_${ts}${ext}`);
+    fs.writeFileSync(backupFilePath, content);
+    lastHash.set(key, h);
+    lastBackupPath.set(key, backupFilePath);
+  } catch {
+    return;
+  }
 }
 
 function backupAll(cfg: Config, trigger: BackupTrigger): void {
   for (const doc of vscode.workspace.textDocuments) {
-    backupDoc(doc, cfg.backupDir, trigger);
+    try {
+      backupDoc(doc, cfg.backupDir, trigger);
+    } catch {
+      // Contained per document (#1603): one document's backup
+      // failure must not lose the rest of the pass.
+      continue;
+    }
   }
 }
 

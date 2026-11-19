@@ -5,6 +5,8 @@ Run with: python3 -m unittest discover -s pkgs/laptop-agent/tests
 Wired as the flake check `laptop-agent-tests` (Linux).
 """
 import contextlib
+import base64
+import hashlib
 import http.client
 import io
 import json
@@ -2384,3 +2386,185 @@ class ExecBatchBoundsTest(unittest.TestCase):
         self.assertTrue(second.get("timeout"), second)
         self.assertFalse(os.path.exists(marker))
 
+
+class FileRoutesTest(unittest.TestCase):
+    """The /files RPC matches fleet-proxy::files semantics.
+
+    Oracle: route replies and on-disk bytes must implement deterministic
+    resumable temps, offset-idempotent writes, hash-checked atomic commit,
+    abort, and bounded reads; a full 2 MiB client chunk must fit the HTTP
+    request cap.
+    """
+
+    def setUp(self):
+        self.token = "file-routes-test-token"
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.root = Path(self.tempdir.name)
+        token_path = self.root / "token"
+        token_path.write_text(self.token + "\n")
+        self.port = free_port()
+        env = dict(os.environ,
+                   LAPTOP_AGENT_TOKEN_FILE=str(token_path),
+                   LAPTOP_AGENT_HOST="127.0.0.1",
+                   LAPTOP_AGENT_PORT=str(self.port),
+                   LAPTOP_AGENT_STATE=str(self.root / "state"))
+        self.proc = subprocess.Popen([sys.executable, str(AGENT)], env=env,
+                                     stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE)
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            try:
+                status, body = self._call("/health")
+                if status == 200 and body.get("ok"):
+                    return
+            except Exception:
+                time.sleep(0.1)
+        self.tearDown()
+        self.fail("agent did not start")
+
+    def tearDown(self):
+        proc = getattr(self, "proc", None)
+        if proc is not None:
+            proc.terminate()
+            proc.wait(timeout=10)
+            proc.stdout.close()
+            proc.stderr.close()
+        tempdir = getattr(self, "tempdir", None)
+        if tempdir is not None:
+            tempdir.cleanup()
+
+    def _call(self, route, body=None):
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}{route}", data=data,
+            headers={"X-Agent-Token": self.token,
+                     "Content-Type": "application/json"},
+            method="POST" if body is not None else "GET")
+        try:
+            with urllib.request.urlopen(req, timeout=15) as response:
+                return response.status, json.loads(response.read())
+        except urllib.error.HTTPError as error:
+            with error:
+                return error.code, json.loads(error.read())
+
+    def test_full_transfer_resume_hash_abort_and_read(self):
+        target = self.root / "payload.bin"
+        missing = self._call("/files/stat", {"path": str(target)})
+        self.assertEqual(missing, (200, {"exists": False,
+                                         "type": "missing", "size": 0}))
+
+        data = b"hello world"
+        digest = hashlib.sha256(data).hexdigest()
+        temp = target.with_name(f".{target.name}.fleet-part-{digest[:12]}")
+        status, body = self._call("/files/begin", {
+            "path": str(target), "size": len(data), "sha256": digest,
+            "mode": 0o640})
+        self.assertEqual((status, body), (200, {"ok": True}))
+        self.assertTrue(temp.exists())
+
+        write = {"path": str(target), "sha256": digest, "offset": 0,
+                 "data_b64": base64.b64encode(data[:5]).decode("ascii")}
+        self.assertEqual(self._call("/files/write", write),
+                         (200, {"size": 5}))
+        # Retries at the same offset are safe; begin preserves the prefix.
+        self.assertEqual(self._call("/files/write", write),
+                         (200, {"size": 5}))
+        self.assertEqual(self._call("/files/begin", {
+            "path": str(target), "size": len(data), "sha256": digest}),
+            (200, {"ok": True}))
+        conflict = dict(write, data_b64=base64.b64encode(b"HELLO").decode())
+        status, body = self._call("/files/write", conflict)
+        self.assertEqual(status, 400, body)
+        self.assertIn("conflicting rewrite", body["error"])
+
+        tail = {"path": str(target), "sha256": digest, "offset": 5,
+                "data_b64": base64.b64encode(data[5:]).decode("ascii")}
+        self.assertEqual(self._call("/files/write", tail),
+                         (200, {"size": len(data)}))
+        bad_digest = "0" * 64
+        # A separate transfer proves mismatch retains its temp and never
+        # replaces the destination.
+        mismatch_temp = target.with_name(
+            f".{target.name}.fleet-part-{bad_digest[:12]}")
+        self.assertEqual(self._call("/files/begin", {
+            "path": str(target), "size": len(data), "sha256": bad_digest}),
+            (200, {"ok": True}))
+        self.assertEqual(self._call("/files/write", {
+            "path": str(target), "sha256": bad_digest, "offset": 0,
+            "data_b64": base64.b64encode(data).decode("ascii")}),
+            (200, {"size": len(data)}))
+        status, body = self._call("/files/commit", {
+            "path": str(target), "sha256": bad_digest})
+        self.assertEqual(status, 200)
+        self.assertEqual(body, {"error": "sha256 mismatch",
+                                "actual": digest})
+        self.assertFalse(target.exists())
+        self.assertTrue(mismatch_temp.exists())
+
+        status, body = self._call("/files/commit", {
+            "path": str(target), "sha256": digest})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body, {"size": len(data), "sha256": digest})
+        self.assertEqual(target.read_bytes(), data)
+        self.assertFalse(temp.exists())
+        stat = self._call("/files/stat", {
+            "path": str(target), "sha256": True})
+        self.assertEqual(stat, (200, {"exists": True, "type": "file",
+                                     "size": len(data),
+                                     "mtime": int(target.stat().st_mtime),
+                                     "sha256": digest}))
+
+        first = self._call("/files/read", {
+            "path": str(target), "offset": 0, "length": 5})
+        self.assertEqual(first, (200, {
+            "data_b64": base64.b64encode(data[:5]).decode("ascii"),
+            "eof": False, "size": len(data),
+            "mtime": int(target.stat().st_mtime)}))
+        last = self._call("/files/read", {
+            "path": str(target), "offset": 5, "length": 100})
+        self.assertEqual(last[0], 200)
+        self.assertEqual(base64.b64decode(last[1]["data_b64"]), data[5:])
+        self.assertTrue(last[1]["eof"])
+
+        aborted = self.root / "aborted"
+        abort_sha = hashlib.sha256(b"partial").hexdigest()
+        abort_temp = aborted.with_name(
+            f".{aborted.name}.fleet-part-{abort_sha[:12]}")
+        self.assertEqual(self._call("/files/begin", {
+            "path": str(aborted), "size": 7, "sha256": abort_sha}),
+            (200, {"ok": True}))
+        self.assertEqual(self._call("/files/abort", {
+            "path": str(aborted), "sha256": abort_sha}), (200, {"ok": True}))
+        self.assertFalse(abort_temp.exists())
+
+    def test_full_two_mib_chunk_fits_request_limit(self):
+        target = self.root / "large.bin"
+        data = b"x" * (2 * 1024 * 1024)
+        digest = hashlib.sha256(data).hexdigest()
+        self.assertEqual(self._call("/files/begin", {
+            "path": str(target), "size": len(data), "sha256": digest}),
+            (200, {"ok": True}))
+        status, body = self._call("/files/write", {
+            "path": str(target), "sha256": digest, "offset": 0,
+            "data_b64": base64.b64encode(data).decode("ascii")})
+        self.assertEqual((status, body), (200, {"size": len(data)}))
+        status, body = self._call("/files/commit", {
+            "path": str(target), "sha256": digest})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["sha256"], digest)
+        self.assertEqual(target.stat().st_size, len(data))
+
+    def test_file_routes_reject_bad_fields_without_killing_daemon(self):
+        path = str(self.root / "bad-fields")
+        Path(path).write_bytes(b"")
+        for body in ({"path": path, "offset": True, "length": 0},
+                     {"path": path, "offset": 0,
+                      "length": 2 * 1024 * 1024 + 1}):
+            status, result = self._call("/files/read", body)
+            self.assertEqual(status, 400, result)
+            self.assertIn("error", result)
+        status, result = self._call("/files/read", {
+            "path": path, "offset": 0, "length": 0})
+        self.assertEqual(status, 200, result)
+        self.assertEqual(result["data_b64"], "")
+        self.assertEqual(self._call("/health")[0], 200)

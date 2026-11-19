@@ -22,6 +22,9 @@ daemon restart does not lose results: job metadata is persisted next to
 the output and the index is rebuilt on startup. Finished jobs reaped
 after 24h, spool directory included.
 """
+import base64
+import binascii
+import hashlib
 import hmac
 import json
 import math
@@ -73,6 +76,8 @@ STATE_DIR = Path(os.environ.get(
     "LAPTOP_AGENT_STATE", Path.home() / ".local/state/laptop-agent"))
 MAX_OUT = 1 << 20            # per-stream capture cap for /exec (tail kept)
 MAX_BODY = 1 << 20           # request body cap for /exec and /jobs
+MAX_FILE_CHUNK = 2 * 1024 * 1024
+MAX_FILE_BODY = 3 * 1024 * 1024  # one base64-encoded 2 MiB /files/write chunk
 EXEC_TIMEOUT_DEFAULT = 120
 EXEC_TIMEOUT_MAX = 600
 # Batch bounds (#1842): MAX_EXEC_COMMANDS caps how many commands one
@@ -100,6 +105,29 @@ STARTED = time.time()
 
 JOBS = {}                    # job_id -> dict
 JOBS_LOCK = threading.Lock()
+FILES_LOCK = threading.Lock()
+
+
+def file_temp_path(path, sha256):
+    """Return the deterministic sibling temp used by fleet-proxy files v1."""
+    if not isinstance(path, str) or not path or "\x00" in path:
+        raise ValueError("path must be a non-empty string without NUL")
+    if (not isinstance(sha256, str) or len(sha256) != 64
+            or any(c not in "0123456789abcdef" for c in sha256)):
+        raise ValueError("sha256 must be 64 lowercase hex characters")
+    target = Path(path)
+    if not target.name:
+        raise ValueError("path must name a file")
+    return target.with_name(f".{target.name}.fleet-part-{sha256[:12]}")
+
+
+def file_int(body, name, maximum=None):
+    value = body.get(name)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{name} must be a non-negative integer")
+    if maximum is not None and value > maximum:
+        raise ValueError(f"{name} exceeds maximum {maximum}")
+    return value
 
 
 def read_token(path: Path) -> str:
@@ -693,14 +721,14 @@ class Handler(BaseHTTPRequestHandler):
             pass
         return any(hmac.compare_digest(c, expected) for c in candidates)
 
-    def _body(self):
+    def _body(self, max_body=MAX_BODY):
         try:
             n = int(self.headers.get("Content-Length") or 0)
         except (TypeError, ValueError):
             raise FramingError("invalid Content-Length header")
         if n < 0:
             raise FramingError("invalid Content-Length header")
-        if n > MAX_BODY:
+        if n > max_body:
             raise FramingError("request body too large")
         raw = self.rfile.read(n) if n else b"{}"
         try:
@@ -797,6 +825,14 @@ class Handler(BaseHTTPRequestHandler):
             # request boundary is known (same contract as FramingError).
             return self._send(401, {"error": "bad token"}, close=True)
         path = urlparse(self.path).path
+        if path in ("/files/stat", "/files/begin", "/files/write",
+                    "/files/commit", "/files/abort", "/files/read"):
+            limit = MAX_FILE_BODY if path == "/files/write" else MAX_BODY
+            body = self._body(max_body=limit)
+            try:
+                return self._files_post(path, body)
+            except OSError as e:
+                return self._send(400, {"error": f"{type(e).__name__}: {e}"})
         if path == "/exec":
             body = self._body()
             try:
@@ -941,6 +977,143 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"ok": True, "job_id": job_id})
         # #1916: same drain before answering an unknown POST route.
         self._drain_body()
+        return self._send(404, {"error": "no such route"})
+
+    def _files_post(self, route, body):
+        """Implement the fleet-proxy /files RPC (code#5759, v1)."""
+        path = body.get("path")
+        if not isinstance(path, str) or not path or "\x00" in path:
+            raise ValueError("path must be a non-empty string without NUL")
+        target = Path(path)
+
+        if route == "/files/stat":
+            want_sha = body.get("sha256", False)
+            if not isinstance(want_sha, bool):
+                raise ValueError("sha256 must be a boolean")
+            try:
+                info = target.stat()
+            except FileNotFoundError:
+                return self._send(200, {"exists": False, "type": "missing",
+                                        "size": 0})
+            kind = "dir" if target.is_dir() else "file"
+            result = {"exists": True, "type": kind,
+                      "size": info.st_size, "mtime": int(info.st_mtime)}
+            if want_sha and kind == "file":
+                digest = hashlib.sha256()
+                with target.open("rb") as f:
+                    for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                result["sha256"] = digest.hexdigest()
+            return self._send(200, result)
+
+        if route == "/files/begin":
+            file_int(body, "size")
+            sha = body.get("sha256")
+            temp = file_temp_path(path, sha)
+            mode = body.get("mode")
+            if mode is not None and (isinstance(mode, bool)
+                                     or not isinstance(mode, int)
+                                     or mode < 0 or mode > 0o7777):
+                raise ValueError("mode must be an integer from 0 to 4095")
+            with FILES_LOCK:
+                if temp.is_symlink():
+                    raise ValueError("transfer temp must not be a symlink")
+                if not temp.exists():
+                    with temp.open("xb"):
+                        pass
+                elif temp.stat().st_size > body["size"]:
+                    # A temp larger than the declared source cannot be a
+                    # resumable prefix. Reset it so the client's offset-zero
+                    # retry can recover instead of conflicting forever.
+                    with temp.open("r+b") as f:
+                        f.truncate(0)
+                if mode is not None:
+                    temp.chmod(mode)
+            return self._send(200, {"ok": True})
+
+        if route == "/files/write":
+            sha = body.get("sha256")
+            temp = file_temp_path(path, sha)
+            offset = file_int(body, "offset")
+            encoded = body.get("data_b64")
+            if not isinstance(encoded, str):
+                raise ValueError("data_b64 must be a string")
+            try:
+                data = base64.b64decode(encoded, validate=True)
+            except (binascii.Error, ValueError) as e:
+                raise ValueError("data_b64 is not valid base64") from e
+            if len(data) > MAX_FILE_CHUNK:
+                raise ValueError(f"write chunk exceeds {MAX_FILE_CHUNK} bytes")
+            with FILES_LOCK:
+                if temp.is_symlink() or not temp.is_file():
+                    raise ValueError("transfer temp does not exist")
+                with temp.open("r+b") as f:
+                    size = os.fstat(f.fileno()).st_size
+                    if offset > size:
+                        raise ValueError("offset beyond end of temp")
+                    overlap = min(size - offset, len(data))
+                    f.seek(offset)
+                    if f.read(overlap) != data[:overlap]:
+                        raise ValueError("conflicting rewrite at offset")
+                    if overlap < len(data):
+                        f.seek(offset + overlap)
+                        f.write(data[overlap:])
+                        f.flush()
+                        os.fsync(f.fileno())
+                    size = os.fstat(f.fileno()).st_size
+            return self._send(200, {"size": size})
+
+        if route == "/files/commit":
+            sha = body.get("sha256")
+            temp = file_temp_path(path, sha)
+            with FILES_LOCK:
+                if temp.is_symlink() or not temp.is_file():
+                    raise ValueError("transfer temp does not exist")
+                digest = hashlib.sha256()
+                with temp.open("rb") as f:
+                    for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                actual = digest.hexdigest()
+                if actual != sha:
+                    return self._send(200, {"error": "sha256 mismatch",
+                                            "actual": actual})
+                size = temp.stat().st_size
+                os.replace(temp, target)
+                try:
+                    directory_fd = os.open(target.parent or Path("."),
+                                           os.O_RDONLY)
+                    try:
+                        os.fsync(directory_fd)
+                    finally:
+                        os.close(directory_fd)
+                except OSError:
+                    pass
+            return self._send(200, {"size": size, "sha256": actual})
+
+        if route == "/files/abort":
+            sha = body.get("sha256")
+            temp = file_temp_path(path, sha)
+            with FILES_LOCK:
+                if temp.is_symlink():
+                    temp.unlink()
+                else:
+                    temp.unlink(missing_ok=True)
+            return self._send(200, {"ok": True})
+
+        if route == "/files/read":
+            offset = file_int(body, "offset")
+            length = file_int(body, "length", maximum=MAX_FILE_CHUNK)
+            if target.is_symlink() or not target.is_file():
+                return self._send(200, {"error": "no such file"})
+            info = target.stat()
+            with target.open("rb") as f:
+                f.seek(offset)
+                data = f.read(length)
+            return self._send(200, {"data_b64": base64.b64encode(data).decode("ascii"),
+                                    "eof": offset + len(data) >= info.st_size,
+                                    "size": info.st_size,
+                                    "mtime": int(info.st_mtime)})
+
         return self._send(404, {"error": "no such route"})
 
 

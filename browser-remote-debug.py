@@ -208,6 +208,17 @@ def ensure_browser(name, user_data_dir):
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(encoded)
         shutil.copymode(dest, tmp)
+        # The browser can start after the initial check above while the JSON is
+        # being prepared. Recheck at the commit boundary so a newly-live
+        # browser keeps ownership of Local State instead of having its file
+        # replaced underneath it.
+        running = browser_running_reason(user_data_dir)
+        if running is not None:
+            os.unlink(tmp)
+            print(
+                f"browser-remote-debug: {name}: SKIP (browser is running: {running}; Local State left untouched)"
+            )
+            return
         os.replace(tmp, dest)
     except Exception:
         try:

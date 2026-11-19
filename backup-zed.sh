@@ -74,13 +74,25 @@ had_settings=0
 had_index=0
 had_installed=0
 if [[ -e ./.zed/settings.json ]]; then
-    cp -f ./.zed/settings.json "$settings_bak" && had_settings=1
+    cp -f ./.zed/settings.json "$settings_bak" || {
+        echo "backup-zed: cannot back up prior output: ./.zed/settings.json" >&2
+        exit 1
+    }
+    had_settings=1
 fi
 if [[ -e ./.zed/index.json ]]; then
-    cp -f ./.zed/index.json "$index_bak" && had_index=1
+    cp -f ./.zed/index.json "$index_bak" || {
+        echo "backup-zed: cannot back up prior output: ./.zed/index.json" >&2
+        exit 1
+    }
+    had_index=1
 fi
 if [[ -e ./.zed/installed.txt ]]; then
-    cp -f ./.zed/installed.txt "$installed_bak" && had_installed=1
+    cp -f ./.zed/installed.txt "$installed_bak" || {
+        echo "backup-zed: cannot back up prior output: ./.zed/installed.txt" >&2
+        exit 1
+    }
+    had_installed=1
 fi
 
 published_settings=0
@@ -99,21 +111,38 @@ fi
 if [[ $publish_failed -ne 0 ]]; then
     # A publish rename failed partway: restore whichever outputs were
     # already replaced so the snapshot is the prior one, not a mix.
+    restore_failed=0
     if [[ $published_settings -eq 1 ]]; then
         if [[ $had_settings -eq 1 ]]; then
-            cp -f "$settings_bak" ./.zed/settings.json || true
+            cp -f "$settings_bak" ./.zed/settings.json || {
+                echo "backup-zed: inconsistent output: could not restore ./.zed/settings.json" >&2
+                restore_failed=1
+            }
         else
-            rm -f ./.zed/settings.json
+            rm -f ./.zed/settings.json || {
+                echo "backup-zed: inconsistent output: could not remove new ./.zed/settings.json" >&2
+                restore_failed=1
+            }
         fi
     fi
     if [[ $published_index -eq 1 ]]; then
         if [[ $had_index -eq 1 ]]; then
-            cp -f "$index_bak" ./.zed/index.json || true
+            cp -f "$index_bak" ./.zed/index.json || {
+                echo "backup-zed: inconsistent output: could not restore ./.zed/index.json" >&2
+                restore_failed=1
+            }
         else
-            rm -f ./.zed/index.json
+            rm -f ./.zed/index.json || {
+                echo "backup-zed: inconsistent output: could not remove new ./.zed/index.json" >&2
+                restore_failed=1
+            }
         fi
     fi
-    echo "backup-zed: publishing the snapshot failed; prior snapshot restored" >&2
+    if [[ $restore_failed -eq 0 ]]; then
+        echo "backup-zed: publishing the snapshot failed; prior snapshot restored" >&2
+    else
+        echo "backup-zed: publishing the snapshot failed; prior snapshot was not fully restored" >&2
+    fi
     exit 1
 fi
 

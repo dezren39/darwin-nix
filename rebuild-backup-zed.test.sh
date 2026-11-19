@@ -46,6 +46,9 @@ check() { # check <description> <command...>
 BIN="$TMP_ROOT/bin"
 HOME_DIR="$TMP_ROOT/home"
 LOG="$TMP_ROOT/steps.log"
+REAL_CP="$(command -v cp)"
+REAL_MV="$(command -v mv)"
+export REAL_CP REAL_MV
 mkdir -p "$BIN" "$HOME_DIR"
 : > "$LOG"
 
@@ -63,6 +66,27 @@ done
 # list would win over $BIN in a non-sandbox run.
 mkdir -p "$HOME_DIR/.nix-profile/bin"
 cp "$BIN/git" "$BIN/nix" "$HOME_DIR/.nix-profile/bin/"
+# Failure-injection wrappers for backup-zed.sh. Delegate all non-injected
+# operations to the real commands so each regression exercises the script's
+# ordinary filesystem behavior.
+cat > "$HOME_DIR/.nix-profile/bin/cp" <<'EOF'
+#!/bin/sh
+if [ "${FAIL_BACKUP_CP:-0}" = 1 ] && [ "$2" = "./.zed/settings.json" ]; then
+  case "$3" in ./.zed/.settings.json.bak.*) exit 1 ;; esac
+fi
+if [ "${FAIL_RESTORE_CP:-0}" = 1 ]; then
+  case "$2:$3" in ./.zed/.settings.json.bak.*:./.zed/settings.json) exit 1 ;; esac
+fi
+exec "$REAL_CP" "$@"
+EOF
+cat > "$HOME_DIR/.nix-profile/bin/mv" <<'EOF'
+#!/bin/sh
+if [ "${FAIL_PUBLISH_MV:-0}" = 1 ] && [ "$3" = "./.zed/index.json" ]; then
+  exit 1
+fi
+exec "$REAL_MV" "$@"
+EOF
+chmod +x "$HOME_DIR/.nix-profile/bin/cp" "$HOME_DIR/.nix-profile/bin/mv"
 
 # --- rebuild.sh fixture -------------------------------------------------------
 REBUILD_WORK="$TMP_ROOT/rebuild"
@@ -219,6 +243,38 @@ check_prior_snapshot() { # check_prior_snapshot <desc-prefix>
 check_no_zed_leftovers() { # check_no_zed_leftovers <desc>
   check "$1" test "$(ls -A "$ZED_OUT" | LC_ALL=C sort | tr '\n' ' ')" = "index.json installed.txt settings.json "
 }
+
+# A failed backup copy must stop before publishing, leaving the pre-existing
+# output (and the rest of the snapshot) untouched.
+seed_prior_snapshot
+FAIL_BACKUP_CP=1 run_script "$BACKUP_WORK" backup-zed.sh
+expect_rc "backup-zed.sh failed backup cp exits nonzero" 1
+check "backup-zed.sh failed backup cp names the prior output" \
+  grep -q "cannot back up prior output: ./.zed/settings.json" "$TMP_ROOT/err"
+check_prior_snapshot "backup-zed.sh failed backup cp"
+check_no_zed_leftovers "backup-zed.sh failed backup cp leaves no temp files"
+
+# A failed publish rename restores every already-published output.
+seed_prior_snapshot
+FAIL_PUBLISH_MV=1 run_script "$BACKUP_WORK" backup-zed.sh
+expect_rc "backup-zed.sh failed publish mv exits nonzero" 1
+check "backup-zed.sh failed publish mv reports successful rollback" \
+  grep -q "prior snapshot restored" "$TMP_ROOT/err"
+check_prior_snapshot "backup-zed.sh failed publish mv"
+check_no_zed_leftovers "backup-zed.sh failed publish mv leaves no temp files"
+
+# If restoration itself fails, the script must identify the inconsistent file
+# and must not claim that the prior snapshot was restored.
+seed_prior_snapshot
+FAIL_PUBLISH_MV=1 FAIL_RESTORE_CP=1 run_script "$BACKUP_WORK" backup-zed.sh
+expect_rc "backup-zed.sh failed restore cp exits nonzero" 1
+check "backup-zed.sh failed restore cp names inconsistent settings output" \
+  grep -q "inconsistent output: could not restore ./.zed/settings.json" "$TMP_ROOT/err"
+check "backup-zed.sh failed restore cp does not claim prior snapshot restored" \
+  test "$(grep -c "prior snapshot restored" "$TMP_ROOT/err" || true)" -eq 0
+check "backup-zed.sh failed restore cp preserves unaffected outputs" \
+  grep -qx 'OLD index' "$ZED_OUT/index.json"
+check_no_zed_leftovers "backup-zed.sh failed restore cp leaves no temp files"
 
 # Missing source index: settings source is NEW, the index copy fails.
 seed_prior_snapshot

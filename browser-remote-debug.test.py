@@ -27,6 +27,8 @@ Covers:
    at the same time (barrier-synced at os.replace via a sitecustomize gate)
    both exit 0, leave a valid Local State with user-enabled = true, and
    leave no temp files behind.
+9. Browser-start race: a browser becoming live after the initial running-state
+   check but before final replacement leaves Local State byte-for-byte intact.
 
 Run: python3 browser-remote-debug.test.py  (exit 0 = all probes passed)
 """
@@ -345,6 +347,43 @@ def test_concurrent_writes(root):
     )
 
 
+def test_browser_starts_during_write_preparation(root):
+    home = os.path.join(root, "browser-start-race")
+    original = '{"profile":{"keep":true}}'
+    chrome_ls = seed_local_state(home, CHROME_REL, original)
+    stub_dir = os.path.join(root, "browser-start-race-stub")
+    os.makedirs(stub_dir, exist_ok=True)
+    with open(os.path.join(stub_dir, "sitecustomize.py"), "w", encoding="utf-8") as fh:
+        fh.write(
+            "import os, shutil, socket\n"
+            "_real_copymode = shutil.copymode\n"
+            "def _start_browser(src, dst, *args, **kwargs):\n"
+            "    result = _real_copymode(src, dst, *args, **kwargs)\n"
+            "    user_data_dir = os.path.dirname(dst)\n"
+            "    os.symlink(f'{socket.gethostname()}-{os.getpid()}',\n"
+            "               os.path.join(user_data_dir, 'SingletonLock'))\n"
+            "    return result\n"
+            "shutil.copymode = _start_browser\n"
+        )
+    env = dict(os.environ, HOME=home, PYTHONPATH=stub_dir)
+    res = subprocess.run(
+        [sys.executable, SCRIPT], env=env, capture_output=True, text=True, check=False
+    )
+
+    check("browser-start race exits 0", res.returncode == 0, res.stderr)
+    check(
+        "browser-start race skips newly live browser",
+        "Google Chrome: SKIP" in res.stdout and "Local State left untouched" in res.stdout,
+        res.stdout,
+    )
+    check("browser-start race leaves Local State byte-unchanged", open(chrome_ls, "rb").read() == original.encode())
+    check(
+        "browser-start race cleans its temporary file",
+        sorted(os.listdir(os.path.dirname(chrome_ls))) == ["Local State", "SingletonLock"],
+        str(sorted(os.listdir(os.path.dirname(chrome_ls)))),
+    )
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="browser-remote-debug-test-") as root:
         test_cli_contract(root)
@@ -352,6 +391,7 @@ def main():
         test_running_skip_and_stale_lock_recovery(root)
         test_failure_isolation_and_symlinks(root)
         test_concurrent_writes(root)
+        test_browser_starts_during_write_preparation(root)
 
     if FAILURES:
         print(f"\n{len(FAILURES)} probe(s) failed.", file=sys.stderr)

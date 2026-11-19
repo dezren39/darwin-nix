@@ -718,9 +718,9 @@ rec {
               mkdir -p lib
               cp $src/lib/common.sh lib/
               cp $src/lib/arg-probe.sh lib/
+              cp $src/lib/test-harness.sh lib/
               chmod u+w ./opencode-db-vacuum.sh ./opencode-db-prune.sh ./opencode-db-backup-prune.sh ./opencode-db-args.test.sh
-              export HOME="$TMPDIR/home"
-              mkdir -p "$HOME"
+              export HARNESS_CHECK=1
               bash ./opencode-db-args.test.sh
               touch $out
             '';
@@ -776,9 +776,9 @@ rec {
               mkdir -p lib
               cp $src/lib/common.sh lib/
               cp $src/lib/arg-probe.sh lib/
+              cp $src/lib/test-harness.sh lib/
               chmod u+w ./opencode-db-vacuum.sh ./opencode-db-vacuum.test.sh
-              export HOME="$TMPDIR/home"
-              mkdir -p "$HOME"
+              export HARNESS_CHECK=1
               bash ./opencode-db-vacuum.test.sh
               touch $out
             '';

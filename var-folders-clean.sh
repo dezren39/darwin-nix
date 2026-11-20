@@ -54,6 +54,9 @@ fi
 folders="${1:?usage: var-folders-clean.sh <folders-root>}"
 
 failed=0
+if [ ! -d "$folders" ]; then
+  echo "var-folders-clean.sh: $folders does not exist (nothing to do)"
+fi
 if [ -d "$folders" ]; then
   if ! find "$folders" -mindepth 1 -maxdepth 1 -print0 2>/dev/null >/dev/null; then
     failed=$((failed + 1))

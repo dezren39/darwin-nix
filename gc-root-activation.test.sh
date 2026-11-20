@@ -41,11 +41,13 @@ check() {
 # --- 1. the anchor -------------------------------------------------------
 
 # Extract the rootActivatedGeneration entry (declaration through its
-# closing line) from homeUser.nix by line numbers. The closing line is
-# six spaces, two quote characters and a semicolon; the pattern uses
-# wildcards for the quotes so no shell-quoting gymnastics are needed.
-decl_line=$(grep -n 'rootActivatedGeneration = lib\.hm\.dag\.' "$home_user" | cut -d: -f1)
-close_line=$(awk -v s="$decl_line" 'NR > s && /^      ..;$/ { print NR; exit }' "$home_user")
+# closing line) from homeUser.nix by line numbers. The declaration may
+# be one line or split (nixfmt puts `lib.hm.dag.entryAfter` on the next
+# line), so the entry is located by name; the closing line is two quote
+# characters and a semicolon at a deeper-or-equal indent; the pattern
+# uses wildcards for the quotes so no shell-quoting gymnastics are needed.
+decl_line=$(grep -n 'rootActivatedGeneration' "$home_user" | cut -d: -f1)
+close_line=$(awk -v s="$decl_line" 'NR > s && /^  *..;$/ { print NR; exit }' "$home_user")
 entry_block="$tmp/entry-block.txt"
 sed -n "${decl_line},${close_line}p" "$home_user" >"$entry_block"
 
@@ -94,8 +96,8 @@ check "entry still uses --indirect and --realise" \
 # indirect gcroot) and logging the call.
 mkdir -p "$tmp/bin"
 cat >"$tmp/bin/nix-store" <<'STUB'
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 root="" target=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -111,16 +113,18 @@ chmod +x "$tmp/bin/nix-store"
 
 # The entry body, adapted for the harness the way tmux-navigator.test.sh
 # adapts its block: `run` executes directly and the profile's absolute
-# nix-store path is rewritten to the stub. The body starts on the line
-# after the anchor list's closing bracket and ends before the entry's
-# closing line.
-body_start=$(awk '/^      \] / { print NR + 1; exit }' "$entry_block")
-body_end=$(awk '/^      ..;$/ { print NR - 1; exit }' "$entry_block")
+# nix-store path is rewritten to the stub. The body starts two lines
+# after the anchor list's closing bracket (the string's opening '' sits
+# between them) and ends before the entry's closing line. Indents are
+# wildcards: nixfmt indents the bracket, body and closing line deeper
+# when the declaration is split.
+body_start=$(awk '/^  *] *$/ { print NR + 2; exit }' "$entry_block")
+body_end=$(awk '/^  *..;$/ { print NR - 1; exit }' "$entry_block")
 entry_body="$tmp/entry-body.sh"
 sed -n "${body_start},${body_end}p" "$entry_block" | sed \
   -e 's|/nix/var/nix/profiles/default/bin/nix-store|nix-store|' \
   -e 's|/bin/mkdir|mkdir|' \
-  -e 's/^        run /run /' >"$entry_body"
+  -e 's/^ *run /run /' >"$entry_body"
 check "entry body extracted" grep -q 'nix-store --add-root' "$entry_body"
 
 # run_activation <dir> <root-entry-position: first|last> <fail-at: mid|none>

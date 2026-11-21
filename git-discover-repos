@@ -504,7 +504,14 @@ OUT_FILE="$(mktemp)"
 QUEUE_FILE="$(mktemp)"
 trap 'rm -f "$SEEN_FILE" "$OUT_FILE" "$QUEUE_FILE" "$ARTIFACTS_FILE" "$BARE_CANDIDATES_FILE"' EXIT
 
-seen() { grep -qxF "$1" "$SEEN_FILE" 2>/dev/null; }
+# The seed stream is already sort -u'd, so searching the growing seen file for
+# every seed would only spawn redundant grep processes. Keep grep for following,
+# where paths can be reached again through Git's repo/worktree links.
+SEED_PHASE=1
+seen() {
+  [ "$SEED_PHASE" = "1" ] && return 1
+  grep -qxF "$1" "$SEEN_FILE" 2>/dev/null
+}
 mark_seen() { printf '%s\n' "$1" >> "$SEEN_FILE"; }
 
 # classify PATH -> prints "repo" or "worktree", or nothing if neither
@@ -658,6 +665,7 @@ do
   consider "$d"
 done
 rm -f "$SEED_FILE"
+SEED_PHASE=0
 
 # ---------------------------------------------------------------------------
 # Following: hop along git's own links until nothing new turns up.

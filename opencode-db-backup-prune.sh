@@ -161,7 +161,7 @@ if [ "$DB_DIR_SET" -eq 1 ]; then
       if [ "$APPLY" -eq 1 ]; then
         echo "opencode-db-backup-prune: deleted $loose_listed of $loose_total loose backup(s) in $DB_DIR (kept newest $KEEP)"
       else
-        echo "opencode-db-backup-prune: dry run — $loose_listed of $loose_total loose backup(s) in $DB_DIR would be deleted (kept newest $KEEP)"
+        echo "opencode-db-backup-prune: dry run — $loose_listed of $loose_total loose backup(s) in $DB_DIR would be deleted (kept newest $KEEP); re-run with --apply to delete"
       fi
       if [ "$loose_failed" -gt 0 ]; then
         echo "opencode-db-backup-prune: $loose_failed loose deletion(s) failed" >&2

@@ -174,6 +174,7 @@ replacements = {
     "${config.environment.systemPath}": "$PATH",
     "${toString port}": "3000",
     "/run/current-system/sw/bin/service-event": "$ROOT/service-event",
+    "/run/current-system/sw/bin/mcpx": "$ROOT/mcpx-stub",
     "/bin/sleep": "sleep",
 }
 for old, new in replacements.items():
@@ -206,8 +207,17 @@ prepare_start() { # $1 fixture root; $2 password text or missing
   local root=$1
   mkdir -p "$root/home/.config/openchamber" "$root/state/bin"
   printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "$ROOT/events.log"\n' > "$root/service-event"
-  printf '#!/bin/sh\nprintf "password=%%s\\n" "${OPENCHAMBER_UI_PASSWORD-<unset>}" > "$ROOT/exec.log"\n' > "$root/openchamber-stub"
-  chmod +x "$root/service-event" "$root/openchamber-stub"
+  printf '#!/bin/sh\nprintf "password=%%s\\n" "${OPENCHAMBER_UI_PASSWORD-<unset>}" > "$ROOT/exec.log"\nprintf "mcpx=%%s\\n" "${MCPX_CONFIG-<unset>}" >> "$ROOT/exec.log"\n' > "$root/openchamber-stub"
+  # The oracle is readiness, independent of the implementation: a stub
+  # gateway reports failure until the specified check (or forever).
+  cat > "$root/mcpx-stub" <<'EOF'
+#!/bin/sh
+[ "$1" = --config ] && [ "$2" = "$HOME/.config/mcpx/config.json" ] && [ "$3" = health ] || exit 2
+n=$(( $(cat "$ROOT/health-checks" 2>/dev/null || echo 0) + 1 ))
+echo "$n" > "$ROOT/health-checks"
+[ "${MCPX_READY_AFTER:-1}" != never ] && [ "$n" -ge "${MCPX_READY_AFTER:-1}" ]
+EOF
+  chmod +x "$root/service-event" "$root/openchamber-stub" "$root/mcpx-stub"
   if [ "$2" != missing ]; then
     printf '%s' "$2" > "$root/home/.config/openchamber/ui-password"
   fi
@@ -227,6 +237,23 @@ rc=$(run_start "$present" "")
 grep -qx 'password=hunter2' "$present/exec.log" 2>/dev/null
 check "start: present password is passed to OpenChamber" $?
 [ ! -e "$present/sleeps" ]; check "start: present password does not wait" $?
+grep -Fxq "mcpx=$present/home/.config/mcpx/config.json" "$present/exec.log"
+check "start: passes the stable mcpx config even without launchctl's environment" $?
+[ "$(cat "$present/health-checks")" = 1 ]; check "start: checks mcpx readiness before launch" $?
+
+gateway_late="$work/gateway-late"
+prepare_start "$gateway_late" hunter2
+rc=$(MCPX_READY_AFTER=5 run_start "$gateway_late" "")
+[ "$rc" -eq 0 ] && [ -e "$gateway_late/exec.log" ] && [ "$(cat "$gateway_late/health-checks")" = 5 ]
+check "start: waits for a late gateway, then starts OpenChamber" $?
+
+gateway_never="$work/gateway-never"
+prepare_start "$gateway_never" hunter2
+rc=$(MCPX_READY_AFTER=never run_start "$gateway_never" "")
+[ "$rc" -eq 1 ] && [ ! -e "$gateway_never/exec.log" ]
+check "start: never launches OpenCode ahead of an unavailable gateway" $?
+[ "$(cat "$gateway_never/health-checks")" = 301 ]
+check "start: bounds gateway readiness polls so launchd can retry" $?
 
 late="$work/start-late"
 prepare_start "$late" missing

@@ -1677,6 +1677,23 @@ rec {
           ) "mac-app-util requires SBCL >= 2.6.6 on newer macOS";
           inputs.mac-app-util.packages.${pkgs.stdenv.hostPlatform.system}.default;
         mcpx = (mkPackages pkgs).mcpx;
+        # Oracle: the canonical module's evaluated configFile. The home
+        # client link must target that exact path, not equal bytes elsewhere:
+        # mcpx keys daemons by resolved config paths (2026-11-22 outage).
+        mcpx-client-config-path =
+          let
+            darwin = inputs.self.darwinConfigurations.MGM9JJ4V3R.config;
+            daemon = builtins.unsafeDiscardStringContext (toString darwin.services.mcpx.configFile);
+            activation =
+              builtins.unsafeDiscardStringContext
+                darwin.home-manager.users."drewry.pope".home.activation.mcpxConfig.data;
+          in
+          assert pkgs.lib.assertMsg (pkgs.lib.hasInfix "new=${daemon}" activation)
+            "home mcpxConfig must link to services.mcpx.configFile";
+          assert pkgs.lib.assertMsg (
+            darwin.launchd.user.envVariables.MCPX_CONFIG == "/Users/drewry.pope/.config/mcpx/config.json"
+          ) "launchd MCPX_CONFIG must name the persistent client link";
+          pkgs.runCommandLocal "mcpx-client-config-path" { } "touch $out";
         # developing-today/code PR 11453: the mcpx darwin module's agent
         # restart must survive an activation that failed before
         # postActivation (2026-11-17: the daemon stayed on a config three

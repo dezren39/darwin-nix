@@ -44,8 +44,10 @@ check() {
 # closing line) from homeUser.nix by line numbers. The closing line is
 # six spaces, two quote characters and a semicolon; the pattern uses
 # wildcards for the quotes so no shell-quoting gymnastics are needed.
-decl_line=$(grep -n 'rootActivatedGeneration = lib\.hm\.dag\.' "$home_user" | cut -d: -f1)
-close_line=$(awk -v s="$decl_line" 'NR > s && /^      ..;$/ { print NR; exit }' "$home_user")
+# nixfmt splits the declaration and indents the closing string according to
+# the multiline call; neither whitespace choice changes the DAG behavior.
+decl_line=$(grep -n '^[[:space:]]*rootActivatedGeneration[[:space:]]*=' "$home_user" | cut -d: -f1)
+close_line=$(awk -v s="$decl_line" 'NR > s && /^[[:space:]]+..;$/ { print NR; exit }' "$home_user")
 entry_block="$tmp/entry-block.txt"
 sed -n "${decl_line},${close_line}p" "$home_user" >"$entry_block"
 
@@ -114,13 +116,13 @@ chmod +x "$tmp/bin/nix-store"
 # nix-store path is rewritten to the stub. The body starts on the line
 # after the anchor list's closing bracket and ends before the entry's
 # closing line.
-body_start=$(awk '/^      \] / { print NR + 1; exit }' "$entry_block")
-body_end=$(awk '/^      ..;$/ { print NR - 1; exit }' "$entry_block")
+body_start=$(awk "/^[[:space:]]*(\\] )?''[[:space:]]*$/ { print NR + 1; exit }" "$entry_block")
+body_end=$(awk '/^[[:space:]]+..;$/ { print NR - 1; exit }' "$entry_block")
 entry_body="$tmp/entry-body.sh"
 sed -n "${body_start},${body_end}p" "$entry_block" | sed \
   -e 's|/nix/var/nix/profiles/default/bin/nix-store|nix-store|' \
   -e 's|/bin/mkdir|mkdir|' \
-  -e 's/^        run /run /' >"$entry_body"
+  -e 's/^[[:space:]]*run /run /' >"$entry_body"
 check "entry body extracted" grep -q 'nix-store --add-root' "$entry_body"
 
 # run_activation <dir> <root-entry-position: first|last> <fail-at: mid|none>

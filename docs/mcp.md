@@ -11,8 +11,9 @@ date in its heading; re-run its checks before relying on them.
 
 - **One list.** `mcpx.config.nix` defines every server and how mcpx pools it.
   `homeUser.nix` (`home.activation.mcpxConfig`) writes it to
-  `~/.config/mcpx/config.json` as a real file. See `services.md` for why it is not a
-  home-manager link.
+  `~/.config/mcpx/config.json` as a symlink to the canonical module's rendered
+  store file. The daemon and every explicit client must resolve to that same
+  file, because config paths, not contents, identify the daemon. See `services.md`.
 - **Absolute commands.** Every stdio server is started by its
   `/run/current-system/sw/bin/...` path. A daemon inherits the PATH of whatever
   started it, and a bare name could fail with "executable file not found" under

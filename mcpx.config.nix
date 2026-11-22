@@ -8,8 +8,9 @@
 # the OAuth login in a browser (`just mcp-login <name>`) and keeps the tokens
 # in ~/.mcp-auth, so nothing secret is in this repo.
 #
-# This file is generated into the nix store, so it is read-only: `mcpx servers
-# add` cannot write to it. Add servers here, or in a project's .mcpx.json.
+# homeUser.nix links the user path to the same rendered store config used by
+# the daemon. It is read-only: make persistent changes here, not with
+# `mcpx servers add` (or use a project .mcpx.json with its own daemon).
 #
 # Commands are absolute paths: a daemon inherits the PATH of whatever started
 # it, and a bare name that the launchd agent's PATH resolves can fail with
@@ -222,10 +223,11 @@ let
     # under the default policy.write=ask navigating a page needs a
     # confirmation, and a caller with no one to answer (an agent, a script)
     # is refused after elicit.askTimeout. The two isolated headless browsers
-    # start from an empty profile with no sign-ins, so a call can reach only
-    # what any anonymous visitor can: they allow writes, which lets agents
-    # test web UIs on their own. The live browsers carry the user's signed-in
-    # sessions and keep asking.
+    # start from an empty profile with no sign-ins. They still have local
+    # filesystem and network access (including loopback/LAN services), so
+    # this is not a sandbox: allow writes to support UI testing, not because
+    # isolated profiles eliminate risk. The live browsers carry the user's
+    # signed-in sessions and keep asking.
     chrome-devtools = {
       sharing = "exclusive";
       scope = "session";

@@ -119,25 +119,24 @@ after model routes were saved) and `start (no-state)`.
 
 ### mcpx
 
-- **A new mcpx build** changes the wrapper's store path, so the plist changes and
-  nix-darwin restarts the agent. There is no in-place upgrade on macOS (see below).
-- **A config change** is picked up by the running daemon in place: it polls its
-  config files on each reap tick (`daemon.watchConfig`, `daemon.reapInterval`
-  30 s) and reloads without restarting servers whose definition did not change.
-- **The config file** `~/.config/mcpx/config.json` is a real file written by
-  `home.activation.mcpxConfig` (`homeUser.nix`), not a home-manager link, because
-  of how mcpx names its socket:
+- **The daemon config** is the canonical darwin module's rendered store file.
+  A new mcpx build or config changes the fixed-path wrapper copy
+  (`/usr/local/libexec/mcpx/mcpx`), and the module's marker restarts the agent
+  in postActivation. The plist does not need to change.
+- **The client config** `~/.config/mcpx/config.json` is a link to that exact
+  store file (`home.activation.mcpxConfig`). The socket hash uses the
+  symlink-resolved config path, not its content. A byte-identical real copy gave
+  explicit `--config ~/.config/mcpx/config.json` clients a different socket and
+  "no daemon reachable" on 2026-11-22. `MCPX_CONFIG` names the same link in
+  launchd, login shells and OpenChamber's start script.
 
-  The socket is `<state dir>/daemon-<hash>.sock`, the hash taken over the state
-  directory and the **symlink-resolved** path of every config file in use
-  (`FingerprintConfig`, `internal/daemon/paths.go`). A home-manager link resolves
-  to a store path that changes with the content, so each config change gave a new
-  socket name while a daemon started earlier stayed on the old one. At a fixed
-  real path the name never changes. Upstream: developing-today/code#368.
-
-  The step rewrites the file only when its content differs, and restarts the
-  agent only when the file was absent or still a link (a first switch onto this
-  layout, or a fresh machine), the only cases where the socket name changes.
+At login, OpenChamber waits for both the sops UI password and mcpx health
+before starting its managed OpenCode. Each wait is bounded to 300 polls with
+0.1 s sleeps; on failure KeepAlive retries. LaunchAgents start at user login,
+not before login or FileVault unlock. This does not guarantee zero startup
+latency: decryption, service initialization and network availability still take
+time. The headless browser servers are lazy and session-isolated, and live
+browser tools still require the user's running browser/approval.
 
 ## Only one of each
 

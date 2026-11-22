@@ -22,7 +22,7 @@ pins above are kept as the record of what this page was written against.
 |---|---|---|---|---|
 | OpenChamber | `org.nixos.openchamber` (`openchamber.nix`) | `~/.local/state/openchamber/start`, a link to the start script in the store | `127.0.0.1:3000` | `~/Library/Logs/openchamber.log` |
 | OpenCode (the one OpenChamber manages) | none: a child of OpenChamber, left running across OpenChamber restarts (`AbandonProcessGroup = true`) | `~/.local/state/openchamber/bin/opencode`, a link to the wrapped fork build | a random `127.0.0.1` port | `~/.local/share/opencode/log/` |
-| mcpx | `org.nixos.mcpx` (`configuration.nix`) | `/usr/local/libexec/mcpx/mcpx`, a root-owned copy of a store wrapper refreshed at activation (fixed path, so macOS lists it as "mcpx"; activation restarts the agent when the copy changes), that runs `mcpx --config ~/.config/mcpx/config.json stop`, then `exec mcpx daemon --config …` | a unix socket `~/.local/state/mcpx/daemon-<hash>.sock`, plus a loopback HTTP port | `~/Library/Logs/mcpx.log` (was `/tmp/mcpx.err.log`, emptied at boot), `~/.local/state/mcpx/logs/mcpx-<date>.jsonl` |
+| mcpx | `org.nixos.mcpx` (canonical darwin module, program overridden in `mcpx-agent.nix`) | `/usr/local/libexec/mcpx-user/mcpx`, a root-owned copy of a store wrapper refreshed at activation (fixed path, so macOS lists it as "mcpx"; activation restarts the agent when it or the module's copy changes), that runs `mcpx --config ~/.config/mcpx/config.json stop`, then `exec mcpx daemon --config ~/.config/mcpx/config.json` | a unix socket `~/.local/state/mcpx/daemon-<hash>.sock`, plus a loopback HTTP port | `~/Library/Logs/mcpx.log` (was `/tmp/mcpx.err.log`, emptied at boot), `~/.local/state/mcpx/logs/mcpx-<date>.jsonl` |
 | service-monitor | `org.nixos.service-events` (`configuration.nix`) | `service-monitor` from `pkgs/service-events` | nothing | `~/Library/Logs/nix-services/events.jsonl` (see [the service event log](#the-service-event-log)) |
 
 The desktop app (`/Applications/Nix Apps/OpenChamber.app`) is meant to be only a
@@ -119,24 +119,37 @@ after model routes were saved) and `start (no-state)`.
 
 ### mcpx
 
-- **The daemon config** is the canonical darwin module's rendered store file.
-  A new mcpx build or config changes the fixed-path wrapper copy
-  (`/usr/local/libexec/mcpx/mcpx`), and the module's marker restarts the agent
-  in postActivation. The plist does not need to change.
-- **The client config** `~/.config/mcpx/config.json` is a link to that exact
-  store file (`home.activation.mcpxConfig`). The socket hash uses the
-  symlink-resolved config path, not its content. A byte-identical real copy gave
-  explicit `--config ~/.config/mcpx/config.json` clients a different socket and
-  "no daemon reachable" on 2026-11-22. `MCPX_CONFIG` names the same link in
-  launchd, login shells and OpenChamber's start script.
+- **The daemon's config** is `~/.config/mcpx/config.json`, the same path
+  every client names: `mcpx-agent.nix` overrides the canonical module's agent
+  program (`/usr/local/libexec/mcpx-user/mcpx`) to run on it, because mcpx keys
+  its socket on the config path **as given**, not its content and not its
+  symlink target. Measured 2026-11-22 against a daemon started on the module's
+  store file: `--config <store path>` reached it; `--config <symlink to the
+  same store path>` and `--config ~/.config/mcpx/config.json` (same bytes) did
+  not. The check `mcpx-client-config-path` pins both the rule (against the real
+  binary) and this host's paths.
+- **The file** is a real file written by `home.activation.mcpxConfig`
+  (`homeUser.nix`), replaced when its content differs. A running daemon picks a
+  change up in place (`daemon.watchConfig`, polled each `daemon.reapInterval`,
+  30 s).
+- **Restarts:** the module still installs its own wrapper copy, and its
+  restart marker (set whenever the mcpx build or the rendered config changes,
+  and by `mcpx-agent.nix` when its own wrapper changes) restarts the agent in
+  postActivation. There is no in-place upgrade on macOS (see below).
+- **`MCPX_CONFIG`** names the same path in launchd, login shells
+  (`environment.variables`; `launchctl setenv` is gone after a reboot) and
+  OpenChamber's start script.
 
-At login, OpenChamber waits for both the sops UI password and mcpx health
-before starting its managed OpenCode. Each wait is bounded to 300 polls with
-0.1 s sleeps; on failure KeepAlive retries. LaunchAgents start at user login,
-not before login or FileVault unlock. This does not guarantee zero startup
-latency: decryption, service initialization and network availability still take
-time. The headless browser servers are lazy and session-isolated, and live
-browser tools still require the user's running browser/approval.
+### At login
+
+All three are user LaunchAgents (`RunAtLoad`, `KeepAlive`), so they start when
+the user logs in, not at boot before login; with FileVault on, the first login
+is also the unlock. launchd does not order agents, so OpenChamber's start
+script waits for its UI password (sops-nix) and then for `mcpx health`, each up
+to 300 x 0.1 s, before starting OpenChamber and its managed OpenCode; if either
+never arrives it exits 1 and KeepAlive retries. Waiting for mcpx stops an
+OpenCode that starts first from spawning its own daemon
+(developing-today/opencode#134).
 
 ## Only one of each
 

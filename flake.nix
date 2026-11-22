@@ -1677,23 +1677,62 @@ rec {
           ) "mac-app-util requires SBCL >= 2.6.6 on newer macOS";
           inputs.mac-app-util.packages.${pkgs.stdenv.hostPlatform.system}.default;
         mcpx = (mkPackages pkgs).mcpx;
-        # Oracle: the canonical module's evaluated configFile. The home
-        # client link must target that exact path, not equal bytes elsewhere:
-        # mcpx keys daemons by resolved config paths (2026-11-22 outage).
+        # The daemon and every client must name the SAME config path: mcpx
+        # keys its socket on the path as given, so a symlink or a byte-equal
+        # copy elsewhere is another daemon (2026-11-22). Two oracles: the
+        # real mcpx binary (a daemon on <path> answers `--config <path>`, and
+        # not `--config <link to path>` — the positive control that the
+        # identity rule this guards still holds), and this host's evaluated
+        # agent wrapper, launchd MCPX_CONFIG and mcp-clients.py --config.
         mcpx-client-config-path =
           let
             darwin = inputs.self.darwinConfigurations.MGM9JJ4V3R.config;
-            daemon = builtins.unsafeDiscardStringContext (toString darwin.services.mcpx.configFile);
-            activation =
-              builtins.unsafeDiscardStringContext
-                darwin.home-manager.users."drewry.pope".home.activation.mcpxConfig.data;
+            mcpxBin = "${(mkPackages pkgs).mcpx}/bin/mcpx";
+            extra = pkgs.writeText "extra-activation" darwin.system.activationScripts.extraActivation.text;
           in
-          assert pkgs.lib.assertMsg (pkgs.lib.hasInfix "new=${daemon}" activation)
-            "home mcpxConfig must link to services.mcpx.configFile";
-          assert pkgs.lib.assertMsg (
-            darwin.launchd.user.envVariables.MCPX_CONFIG == "/Users/drewry.pope/.config/mcpx/config.json"
-          ) "launchd MCPX_CONFIG must name the persistent client link";
-          pkgs.runCommandLocal "mcpx-client-config-path" { } "touch $out";
+          pkgs.runCommandLocal "mcpx-client-config-path"
+            {
+              nativeBuildInputs = [
+                pkgs.coreutils
+                pkgs.gnugrep
+                pkgs.gnused
+                pkgs.python3
+              ];
+              envPath = darwin.launchd.user.envVariables.MCPX_CONFIG;
+              agentArgs = builtins.toJSON darwin.launchd.user.agents.mcpx.serviceConfig.ProgramArguments;
+              clients = ./mcp-clients.py;
+            }
+            ''
+              set -euo pipefail
+              want=/Users/drewry.pope/.config/mcpx/config.json
+              [ "$envPath" = "$want" ] || { echo "MCPX_CONFIG=$envPath, want $want"; exit 1; }
+              [ "$agentArgs" = '["/usr/local/libexec/mcpx-user/mcpx"]' ] || { echo "agent runs $agentArgs"; exit 1; }
+              wrapper=$(sed -n '/# mcpx-user-agent-install-begin/,/# mcpx-user-agent-install-end/p' ${extra} \
+                | grep -o '/nix/store/[^ ]*-mcpx' | head -n 1)
+              [ -n "$wrapper" ] || { echo "user agent install block not found"; exit 1; }
+              grep -Fqx "cfg='$want'" "$wrapper" || { echo "wrapper does not run on $want"; cat "$wrapper"; exit 1; }
+              client=$(HOME=/Users/drewry.pope python3 -I -c 'import importlib.util,sys
+              s=importlib.util.spec_from_file_location("c",sys.argv[1]); m=importlib.util.module_from_spec(s); s.loader.exec_module(m)
+              a=m.ARGS; print(a[a.index("--config")+1])' "$clients")
+              [ "$client" = "$want" ] || { echo "mcp-clients --config $client, want $want"; exit 1; }
+
+              # The binary's rule. A short state dir: macOS caps socket paths.
+              export HOME=$TMPDIR/h MCPX_STATE_DIR=$(mktemp -d /tmp/mcpxg.XXXX)
+              mkdir -p $HOME
+              echo '{"daemon":{"autostart":false},"mcpServers":{}}' > $HOME/c.json
+              ln -s $HOME/c.json $HOME/link.json
+              cd $HOME
+              ${mcpxBin} --config $HOME/c.json daemon >daemon.log 2>&1 &
+              pid=$!
+              trap 'kill $pid 2>/dev/null || true; rm -rf "$MCPX_STATE_DIR"' EXIT
+              for _ in $(seq 1 100); do ${mcpxBin} --config $HOME/c.json health >/dev/null 2>&1 && break; sleep 0.1; done
+              ${mcpxBin} --config $HOME/c.json ls >/dev/null || { cat daemon.log; echo "same path did not reach the daemon"; exit 1; }
+              if ${mcpxBin} --config $HOME/link.json ls >/dev/null 2>&1; then
+                echo "control: a symlinked path reached the daemon; mcpx's identity rule changed, revisit mcpx-agent.nix"
+                exit 1
+              fi
+              touch $out
+            '';
         # developing-today/code PR 11453: the mcpx darwin module's agent
         # restart must survive an activation that failed before
         # postActivation (2026-11-17: the daemon stayed on a config three

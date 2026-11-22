@@ -32,6 +32,7 @@ lib.recursiveUpdate {
     ./services.nix
     # OpenChamber server agent + desktop client; see the header there.
     ./openchamber.nix
+    ./mcpx-agent.nix
     ./opencode-tmp-guard.nix
     ./opencode-prune-report.nix
     # ./home.nix
@@ -93,9 +94,6 @@ lib.recursiveUpdate {
   # launchd.user.envVariables and homeUser.nix sessionVariables because each
   # reaches a context the others do not.
   environment.variables.OPENCODE_DB = "/Users/drewry.pope/.local/share/opencode/opencode.db";
-  # launchctl setenv does not persist across boots; login shells need this
-  # stable link too, so mcpx never discovers a different project daemon.
-  environment.variables.MCPX_CONFIG = "/Users/drewry.pope/.config/mcpx/config.json";
   # The OpenChamber desktop app reads these from the login shell's environment
   # (packages/electron/README.md: "Desktop imports this from the user's
   # login-shell environment"), not only from launchd's. launchd.user.envVariables
@@ -1050,10 +1048,10 @@ lib.recursiveUpdate {
   # ExitTimeOut, $HOME as working directory, logs at
   # ~/Library/Logs/mcpx.log, and a wrapper that stops whatever
   # already serves the config's socket before starting. The module
-  # starts the daemon on its rendered configFile. homeUser.nix links the
-  # client path ~/.config/mcpx/config.json to that SAME store file: equal
-  # content at another real path is another daemon identity. MCPX_CONFIG
-  # below uses the stable client link so long-lived processes follow it.
+  # renders the store config, but mcpx-agent.nix overrides its program to
+  # start on the real home config all clients explicitly use. mcpx keys on
+  # the config path as given: equal bytes or a symlink are NOT the same
+  # daemon identity. See mcpx-agent.nix for the measured failure.
   #
   # settings is mcpx.config.nix verbatim: the module renders it to
   # config.json exactly as homeUser.nix does (builtins.toJSON of the
@@ -1083,9 +1081,6 @@ lib.recursiveUpdate {
   };
 
   launchd.user.envVariables = {
-    # Store config is the daemon identity; this home-manager link resolves
-    # to it and survives generation changes in long-lived client processes.
-    MCPX_CONFIG = lib.mkForce "/Users/drewry.pope/.config/mcpx/config.json";
     EDITOR = "zed --wait";
     LANG = "en_US.UTF-8";
     COPILOT_MODEL = "claude-opus-5.5";

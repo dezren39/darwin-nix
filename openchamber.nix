@@ -124,7 +124,7 @@ let
     export OPENCHAMBER_UI_PASSWORD
     export OPENCODE_BINARY="${state}/bin/opencode"
     export OPENCODE_DB="$HOME/.local/share/opencode/opencode.db"
-    # launchctl setenv is lost at reboot. Use the stable client link here,
+    # launchctl setenv is lost at reboot. Use the stable client file here,
     # not the generation's store path: a running OpenChamber then follows
     # mcpx config changes without needing an unrelated OpenChamber restart.
     export MCPX_CONFIG="$HOME/.config/mcpx/config.json"

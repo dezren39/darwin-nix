@@ -8,9 +8,9 @@
 # the OAuth login in a browser (`just mcp-login <name>`) and keeps the tokens
 # in ~/.mcp-auth, so nothing secret is in this repo.
 #
-# homeUser.nix links the user path to the same rendered store config used by
-# the daemon. It is read-only: make persistent changes here, not with
-# `mcpx servers add` (or use a project .mcpx.json with its own daemon).
+# homeUser.nix copies this rendering to the real home config. It is writable,
+# but activation replaces hand-edits: make persistent changes here (or in
+# a project .mcpx.json with its own daemon), not with `mcpx servers add`.
 #
 # Commands are absolute paths: a daemon inherits the PATH of whatever started
 # it, and a bare name that the launchd agent's PATH resolves can fail with

@@ -158,14 +158,19 @@ def launchctl(action: str) -> None:
     uid = os.getuid()
     plist = Path.home() / "Library/LaunchAgents" / f"{STATUS_BAR_JOB}.plist"
     if action == "stop":
-        subprocess.run(
+        result = subprocess.run(
             ["launchctl", "bootout", f"gui/{uid}/{STATUS_BAR_JOB}"],
             capture_output=True,
         )
     else:
-        subprocess.run(
+        result = subprocess.run(
             ["launchctl", "bootstrap", f"gui/{uid}", str(plist)],
             capture_output=True,
+        )
+    if result.returncode:
+        detail = result.stderr.decode(errors="replace").strip()
+        raise RuntimeError(
+            detail or f"launchctl exited with status {result.returncode}"
         )
 
 
@@ -412,12 +417,26 @@ def main() -> int:
     target = device_path(args.device)
     print(f"device: {target}")
     print("stopping the status bar so it does not fight for the device...")
-    launchctl("stop")
+    try:
+        launchctl("stop")
+    except RuntimeError as error:
+        print(
+            f"Could not stop the status bar; demo not started: {error}",
+            file=sys.stderr,
+        )
+        return 1
 
     def restore(*_args):
         write_program(target, "off")
-        launchctl("start")
-        print("\nstatus bar restarted; device handed back.")
+        try:
+            launchctl("start")
+        except RuntimeError as error:
+            print(
+                f"\nCould not restart the status bar; device was not handed back: {error}",
+                file=sys.stderr,
+            )
+        else:
+            print("\nstatus bar restarted; device handed back.")
 
     signal.signal(signal.SIGINT, lambda *_: (restore(), sys.exit(130)))
     if args.palette:

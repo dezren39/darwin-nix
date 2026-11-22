@@ -217,9 +217,19 @@ let
   pooling = {
     # A browser holds page state; two agents sharing one corrupt each other.
     # One per agent session instead.
+    #
+    # writePolicy: every browser tool but a few reads lacks readOnlyHint, so
+    # under the default policy.write=ask navigating a page needs a
+    # confirmation, and a caller with no one to answer (an agent, a script)
+    # is refused after elicit.askTimeout. The two isolated headless browsers
+    # start from an empty profile with no sign-ins, so a call can reach only
+    # what any anonymous visitor can: they allow writes, which lets agents
+    # test web UIs on their own. The live browsers carry the user's signed-in
+    # sessions and keep asking.
     chrome-devtools = {
       sharing = "exclusive";
       scope = "session";
+      writePolicy = "allow";
     };
     chrome-live = {
       sharing = "exclusive";
@@ -236,6 +246,7 @@ let
     playwright = {
       sharing = "exclusive";
       scope = "session";
+      writePolicy = "allow";
     };
     # uvx resolves and downloads the proxy on first start, which can outlast
     # the default 60s start timeout.

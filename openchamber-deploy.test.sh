@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Regression test for the post-poll password guard in openchamber.nix.
 # Extracts and executes the real home.activation.openchamberDeploy body with
-# local tool stubs, covering poll expiry, unchanged credentials, and rotation.
+# local tool stubs, covering poll expiry, unchanged credentials, and rotation;
+# and the real openchamber-serve start script, covering a password that is
+# present, arrives late (the post-reboot sops-nix race), or never arrives.
 set -u
 
 cd "$(dirname "$0")" || exit 1
@@ -147,6 +149,101 @@ grep -q 'kickstart -k' "$rotation/calls.log"
 check "real password rotation restarts the running service" $?
 [ "$(cat "$rotation/state/deployed")" = "$rotation/start-script:$real_hash" ]
 check "rotation stores the real password hash" $?
+
+# The start script (launchd's ProgramArguments) and the boot race: after a
+# reboot sops-nix can decrypt the password after this agent starts, and the
+# script used to start OpenChamber without it. Extract the real script, stub
+# its sleep, service-event and the OpenChamber binary, and drive it with the
+# password present, arriving late, and never arriving.
+python3 - "$work/start.sh" <<'PYEOF'
+import re, sys
+
+src = open("openchamber.nix").read()
+m = re.search(
+    r'start = pkgs\.writeShellScript "openchamber-serve" \'\'\n(.*?)\n  \'\';',
+    src,
+    re.S,
+)
+if not m:
+    sys.exit("could not extract the openchamber-serve start script")
+body = m.group(1).replace("''${", "${")
+replacements = {
+    "exec ${openchamber}/bin/openchamber": 'exec "$ROOT/openchamber-stub"',
+    "${openchamber}": "openchamber-pkg",
+    "${state}": "$ROOT/state",
+    "${config.environment.systemPath}": "$PATH",
+    "${toString port}": "3000",
+    "/run/current-system/sw/bin/service-event": "$ROOT/service-event",
+    "/bin/sleep": "sleep",
+}
+for old, new in replacements.items():
+    body = body.replace(old, new)
+if "${" in body.replace("${OPENCHAMBER", ""):
+    sys.exit("unsubstituted Nix interpolation left in the start script")
+lines = body.split("\n")
+indent = min(len(line) - len(line.lstrip(" ")) for line in lines if line.strip())
+body = "\n".join(
+    line[indent:] if line.startswith(" " * indent) else line for line in lines
+)
+open(sys.argv[1], "w").write(body + "\n")
+PYEOF
+[ -s "$work/start.sh" ]; check "start script extracted from the Nix module" $?
+
+mkdir -p "$work/startbin"
+# Counts polls; with LATE_AFTER set, writes the password on that poll, the
+# way sops-nix's agent lands it mid-wait after a reboot.
+cat > "$work/startbin/sleep" <<'EOF'
+#!/bin/sh
+n=$(( $(cat "$ROOT/sleeps" 2>/dev/null || echo 0) + 1 ))
+echo "$n" > "$ROOT/sleeps"
+if [ -n "${LATE_AFTER:-}" ] && [ "$n" -ge "$LATE_AFTER" ]; then
+  printf '%s' hunter2 > "$HOME/.config/openchamber/ui-password"
+fi
+EOF
+chmod +x "$work/startbin/sleep"
+
+prepare_start() { # $1 fixture root; $2 password text or missing
+  local root=$1
+  mkdir -p "$root/home/.config/openchamber" "$root/state/bin"
+  printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "$ROOT/events.log"\n' > "$root/service-event"
+  printf '#!/bin/sh\nprintf "password=%%s\\n" "${OPENCHAMBER_UI_PASSWORD-<unset>}" > "$ROOT/exec.log"\n' > "$root/openchamber-stub"
+  chmod +x "$root/service-event" "$root/openchamber-stub"
+  if [ "$2" != missing ]; then
+    printf '%s' "$2" > "$root/home/.config/openchamber/ui-password"
+  fi
+}
+
+run_start() { # $1 fixture root; $2 LATE_AFTER or empty; echoes exit status
+  local root=$1
+  ROOT="$root" HOME="$root/home" LATE_AFTER="$2" PATH="$work/startbin:$PATH" \
+    bash "$work/start.sh" > "$root/out" 2>&1
+  echo $?
+}
+
+present="$work/start-present"
+prepare_start "$present" hunter2
+rc=$(run_start "$present" "")
+[ "$rc" -eq 0 ]; check "start: present password starts OpenChamber" $?
+grep -qx 'password=hunter2' "$present/exec.log" 2>/dev/null
+check "start: present password is passed to OpenChamber" $?
+[ ! -e "$present/sleeps" ]; check "start: present password does not wait" $?
+
+late="$work/start-late"
+prepare_start "$late" missing
+rc=$(run_start "$late" 5)
+[ "$rc" -eq 0 ]; check "start: late password still starts OpenChamber" $?
+grep -qx 'password=hunter2' "$late/exec.log" 2>/dev/null
+check "start: late password is waited for, not skipped" $?
+
+never="$work/start-never"
+prepare_start "$never" missing
+rc=$(run_start "$never" "")
+[ "$rc" -eq 1 ]; check "start: password that never arrives exits for launchd to retry" $?
+[ ! -e "$never/exec.log" ]; check "start: OpenChamber never starts without its password" $?
+grep -q 'agent.no-ui-password' "$never/events.log" 2>/dev/null
+check "start: missing password is recorded in the service event log" $?
+grep -Fq "$never/home/.config/openchamber/ui-password" "$never/out"
+check "start: failure names the unreadable password path" $?
 
 if [ "$failures" -gt 0 ]; then
   echo "FAILURES: $failures"

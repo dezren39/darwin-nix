@@ -1667,8 +1667,12 @@ esac
 # does not, and the single-word control still flags exactly as before.
 DC_DIR="$TMP_ROOT/dead-cask"
 mkdir -p "$DC_DIR/apps/Present Multi.app"
+# The nix build sandbox has no /usr/bin/env, so this runtime-generated stub
+# must use a shebang that exists there (same failure class as the unpatched
+# script copies flake.nix patches with patchShebangs). /bin/sh suffices: the
+# stub only uses printf/case/exit.
 cat > "$DC_DIR/brew" <<'EOF'
-#!/usr/bin/env bash
+#!/bin/sh
 if [ "$1" = list ]; then printf '%s\n' dead-multi present-multi single-word; exit 0; fi
 if [ "$1" = info ]; then
   case "$3" in
@@ -1685,6 +1689,11 @@ sed -n '/^  _dead=""/,/MISSING from disk/p' "$SCRIPT" > "$DC_DIR/block.sh"
 [ -s "$DC_DIR/block.sh" ] || fail "could not extract the dead-cask block from clean.sh"
 grep -q 'info --cask' "$DC_DIR/block.sh" || fail "extracted dead-cask block lacks the brew info extraction"
 grep -q 'CLEAN_APPS_DIR:-/Applications' "$SCRIPT" || fail "dead-cask extraction lost its /Applications default"
+# This section runs under set -e, and the extracted block ends in a
+# `[ -n "$_dead" ] && {...}` list: an empty _dead makes it return 1, which
+# under set -e would abort the whole suite with no diagnostic. Capture
+# without letting that status kill the run; the case checks below still
+# report a real failure (mirrors the CACHE_OUT capture above).
 DC_OUT="$(
   as_user() { "$@"; }
   warn() { printf 'WARN: %s\n' "$*"; }
@@ -1692,6 +1701,7 @@ DC_OUT="$(
   _cask_list="dead-multi present-multi single-word"
   export CLEAN_APPS_DIR="$DC_DIR/apps"
   . "$DC_DIR/block.sh"
+  exit 0
 )"
 case "$DC_OUT" in
   *"MISSING from disk"*) echo "ok: dead-cask block warns on missing apps" ;;

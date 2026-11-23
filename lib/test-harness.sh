@@ -105,9 +105,11 @@ harness_ps_double_end() {
 }
 
 # harness_skip REASON — record a skip. In check mode every skip is a
-# failure, reported at summary time.
+# failure, reported at summary time. The counter default must be inline
+# (`${HARNESS_SKIPS:-0}`): the real suites run `set -u`, and a bare
+# `$((HARNESS_SKIPS + 1))` aborts on the first skip (#1914).
 harness_skip() {
-  HARNESS_SKIPS=$((HARNESS_SKIPS + 1))
+  HARNESS_SKIPS=$((${HARNESS_SKIPS:-0} + 1))
   echo "skip: $1"
 }
 

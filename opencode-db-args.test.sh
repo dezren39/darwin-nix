@@ -405,6 +405,18 @@ harness_summary
 check_harness_probe "direct-mode skip passes with reason" 0 "skip: no second filesystem" 0 "$HARNESS_SKIP_BODY"
 check_harness_probe "check-mode skip fails" 1 "check mode forbids skips" 1 "$HARNESS_SKIP_BODY"
 
+# The real suites run `set -u` (opencode-db-args, opencode-db-vacuum);
+# a skip must record itself there too — a bare counter increment
+# aborts on the first skip under `-u` (#1914). Same body, plus `set -u`.
+HARNESS_SKIP_U_BODY='set -u
+. "$1"
+harness_init || exit 10
+harness_skip "no second filesystem"
+harness_summary
+'
+check_harness_probe "set -u direct-mode skip passes" 0 "skip: no second filesystem" 0 "$HARNESS_SKIP_U_BODY"
+check_harness_probe "set -u check-mode skip fails" 1 "check mode forbids skips" 1 "$HARNESS_SKIP_U_BODY"
+
 # The scratch root is gone after the child exits (the EXIT trap ran).
 check_harness_cleanup() {
   local root rc

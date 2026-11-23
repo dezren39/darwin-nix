@@ -158,7 +158,7 @@ rec {
       # mcpx-src) carry every fix this flake used to pin forward
       # (opencode #1547 route overrides, the #1791 node_modules hash,
       # code #11443/#11453/#11476 for mcpx on aarch64-darwin), as of
-      # openchamber 598b455 / opencode ce61597 / code 6f4696b (2026-11-23).
+      # openchamber 186d8f0 / opencode a6c1e21 / code 0c9827b (2026-11-23).
       # If the chain regresses, pin here again with
       # inputs.opencode.url / inputs.opencode.inputs.mcpx-src.url.
     };
@@ -217,11 +217,11 @@ rec {
     nixpkgs-hoisted-4.url = "github:NixOS/nixpkgs/nixos-unstable";
     nixpkgs-hoisted-5.follows = "nixpkgs-23-11";
     systems-hoisted.url = "github:nix-systems/default-darwin";
-    determinate-nixd-aarch64-darwin.url = "file+https://install.determinate.systems/determinate-nixd/tag/v3.23.2/macOS";
+    determinate-nixd-aarch64-darwin.url = "file+https://install.determinate.systems/determinate-nixd/tag/v3.24.3/macOS";
     determinate-nixd-aarch64-darwin.flake = false;
-    determinate-nixd-aarch64-linux.url = "file+https://install.determinate.systems/determinate-nixd/tag/v3.23.2/aarch64-linux";
+    determinate-nixd-aarch64-linux.url = "file+https://install.determinate.systems/determinate-nixd/tag/v3.24.3/aarch64-linux";
     determinate-nixd-aarch64-linux.flake = false;
-    determinate-nixd-x86_64-linux.url = "file+https://install.determinate.systems/determinate-nixd/tag/v3.23.2/x86_64-linux";
+    determinate-nixd-x86_64-linux.url = "file+https://install.determinate.systems/determinate-nixd/tag/v3.24.3/x86_64-linux";
     determinate-nixd-x86_64-linux.flake = false;
     nixpkgs-23-11-hoisted.follows = "nixpkgs-23-11";
     nixpkgs-regression-hoisted.follows = "nixpkgs-23-11";

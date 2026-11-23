@@ -28,7 +28,15 @@ Per-workflow application in this repo:
 - `flake packages build` — #49: class 4 like `mcpx nix build`.
   The full per-package `nix build` matrix runs nightly (06:47 UTC)
   and on `workflow_dispatch`.
-  mcpx is excluded — it stays owned by `mcpx nix build` above.
+  mcpx is excluded from the x86_64-linux list — it stays owned by
+  `mcpx nix build` above. Coverage is partitioned by system
+  (#1850): each system's package list is derived from the flake
+  for that system (`nix eval --json .#packages.x86_64-linux` /
+  `.#packages.aarch64-darwin`), never hardcoded, and Darwin
+  packages build on a native macOS runner (macos-15), Linux
+  packages on ubuntu-latest. The darwin list is the flake's full
+  aarch64-darwin package set — the darwin mcpx output has no
+  other build owner, so it is not excluded there.
 - `flake checks build` — #1134: class 4 like `flake packages build`.
   The full per-check `nix build` matrix (fail-fast off) runs nightly
   (07:17 UTC) and on `workflow_dispatch`, covering every

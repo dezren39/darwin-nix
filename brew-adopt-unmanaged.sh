@@ -63,7 +63,30 @@
 set -uo pipefail
 PATH=${BREW_ADOPT_PATH:-/run/current-system/sw/bin:/usr/bin:/bin:/usr/sbin:/sbin}
 
-PRIMARY_USER=${1:?usage: brew-adopt-unmanaged.sh PRIMARY_USER}
+# Argument contract (#1884): exactly one positional argument, the
+# primary user. Anything else is a usage error (exit 2) BEFORE any side
+# effects - this script runs as root during activation, so a stray
+# argument must never be silently ignored. --help/-h prints usage and
+# exits 0, also without side effects.
+usage() {
+  echo "usage: brew-adopt-unmanaged.sh PRIMARY_USER"
+}
+
+case ${1:-} in
+  --help | -h)
+    if [ $# -ne 1 ]; then
+      usage >&2
+      exit 2
+    fi
+    usage
+    exit 0
+    ;;
+esac
+if [ $# -ne 1 ]; then
+  usage >&2
+  exit 2
+fi
+PRIMARY_USER=$1
 BREW=${BREW_ADOPT_BREW:-/opt/homebrew/bin/brew}
 SUDO=${BREW_ADOPT_SUDO:-/usr/bin/sudo}
 PLISTBUDDY=${BREW_ADOPT_PLISTBUDDY:-/usr/libexec/PlistBuddy}
@@ -112,14 +135,22 @@ vercmp() {
   echo 0
 }
 
+# The owner of a path. darwin activation puts coreutils' GNU stat ahead
+# of /usr/bin/stat on PATH, and GNU reads BSD's `-f %Su` as --file-system:
+# it printed filesystem info as the "owner" and failed the switch
+# (switch-20261116T052331.log). Try GNU's form, then BSD's.
+file_owner() {
+  stat -c %U "$1" 2>/dev/null || stat -f %Su "$1"
+}
+
 # ---------------------------------------------------------------- chrome
 chrome_app="$APPLICATIONS/Google Chrome.app"
 if [ -d "$chrome_app" ]; then
-  owner=$(stat -f %Su "$chrome_app")
+  owner=$(file_owner "$chrome_app")
   if [ "$owner" != "$PRIMARY_USER" ]; then
     log "google-chrome: $chrome_app is owned by '$owner', not $PRIMARY_USER — brew cannot replace a bundle it does not own (#1791). Taking ownership: chown -R $PRIMARY_USER \"$chrome_app\""
     chown -R "$PRIMARY_USER" "$chrome_app" || true
-    owner=$(stat -f %Su "$chrome_app")
+    owner=$(file_owner "$chrome_app")
     if [ "$owner" = "$PRIMARY_USER" ]; then
       log "google-chrome: bundle now owned by $PRIMARY_USER (profile data in ~/Library/Application Support/Google/Chrome is untouched — it was never in the bundle)"
     else
@@ -165,9 +196,17 @@ fi
 if brew_has_cask dezren39/local/onedrive; then
   log "onedrive: already brew-managed via the vendored cask (dezren39/local/onedrive); nothing to do"
 elif [ -d "$APPLICATIONS/OneDrive.app" ]; then
-  installed_version=$("$PLISTBUDDY" -c "Print :CFBundleVersion" "$APPLICATIONS/OneDrive.app/Contents/Info.plist" 2>/dev/null || true)
-  if [ -z "$installed_version" ]; then
-    installed_version=$("$PLISTBUDDY" -c "Print :CFBundleShortVersionString" "$APPLICATIONS/OneDrive.app/Contents/Info.plist" 2>/dev/null || true)
+  bundle_version=$("$PLISTBUDDY" -c "Print :CFBundleVersion" "$APPLICATIONS/OneDrive.app/Contents/Info.plist" 2>/dev/null || true)
+  short_version=$("$PLISTBUDDY" -c "Print :CFBundleShortVersionString" "$APPLICATIONS/OneDrive.app/Contents/Info.plist" 2>/dev/null || true)
+  # The cask version (and Microsoft's pkg URL) is the three-part short
+  # version plus the build's last component. CFBundleVersion alone is not
+  # that: from 26.212 it drops the first dot (26212.1029.0006 for
+  # 26.212.1029.0006), which compared as 26212 > 26 against every cask.
+  # A four-part CFBundleVersion (the older format) is used as-is.
+  if [[ "$bundle_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && [[ "$short_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    installed_version="$short_version.${bundle_version##*.}"
+  else
+    installed_version=${bundle_version:-$short_version}
   fi
   if [ -z "$installed_version" ]; then
     log "ERROR: OneDrive is present at $APPLICATIONS/OneDrive.app but its version could not be read: both CFBundleVersion and CFBundleShortVersionString are missing or unreadable in $APPLICATIONS/OneDrive.app/Contents/Info.plist."

@@ -15,8 +15,11 @@ let
   serviceEventAsPrimaryUser = pkgs.writeShellScript "service-event-as-primary-user" ''
     set -euo pipefail
     primary_uid=$(/usr/bin/id -u ${config.system.primaryUser})
+    # -H: sudo keeps root's HOME (/var/root) otherwise, and service-event
+    # writes under $HOME/Library/Logs (switch-20261117T180205.log: "cannot
+    # write /var/root/Library/Logs/nix-services/events.jsonl").
     exec /bin/launchctl asuser "$primary_uid" \
-      /usr/bin/sudo -u ${config.system.primaryUser} \
+      /usr/bin/sudo -H -u ${config.system.primaryUser} \
       ${serviceEvent} "$@"
   '';
 in
@@ -29,6 +32,7 @@ lib.recursiveUpdate {
     ./services.nix
     # OpenChamber server agent + desktop client; see the header there.
     ./openchamber.nix
+    ./mcpx-agent.nix
     ./opencode-tmp-guard.nix
     ./opencode-prune-report.nix
     # ./home.nix
@@ -953,7 +957,10 @@ lib.recursiveUpdate {
     system_activation_helper=${./system-activation-helper.sh}
     service_event=${serviceEvent}
     service_event_as_user=${serviceEventAsPrimaryUser}
-    as_user="/bin/launchctl asuser $primary_uid /usr/bin/sudo -u ${config.system.primaryUser}"
+    # -H so the user-scope helpers get the user's HOME, not /var/root: without
+    # it git-maintain-repos wrote /var/root/.config/git and service-event
+    # /var/root/Library/Logs, both refused, which failed the switch.
+    as_user="/bin/launchctl asuser $primary_uid /usr/bin/sudo -H -u ${config.system.primaryUser}"
     helper_env="/usr/bin/env PATH=/run/current-system/sw/bin:/usr/bin:/bin"
 
     # exclude: --system re-asserts the static list only (~40 ms). Consider
@@ -1041,11 +1048,10 @@ lib.recursiveUpdate {
   # ExitTimeOut, $HOME as working directory, logs at
   # ~/Library/Logs/mcpx.log, and a wrapper that stops whatever
   # already serves the config's socket before starting. The module
-  # starts the daemon on its rendered configFile and points clients
-  # at it with MCPX_CONFIG, so every client computes the same daemon
-  # socket without the ~/.config/mcpx/config.json path having to be
-  # the daemon's config. homeUser.nix still writes that file from the
-  # same mcpx.config.nix for the clients that name it explicitly.
+  # renders the store config, but mcpx-agent.nix overrides its program to
+  # start on the real home config all clients explicitly use. mcpx keys on
+  # the config path as given: equal bytes or a symlink are NOT the same
+  # daemon identity. See mcpx-agent.nix for the measured failure.
   #
   # settings is mcpx.config.nix verbatim: the module renders it to
   # config.json exactly as homeUser.nix does (builtins.toJSON of the
@@ -1082,6 +1088,11 @@ lib.recursiveUpdate {
     GOPATH = "/Users/drewry.pope/go";
     GOBIN = "/Users/drewry.pope/go/bin";
     OPENCODE_DB = "/Users/drewry.pope/.local/share/opencode/opencode.db";
+    # Claude Code through the APIM proxy, for GUI-launched apps; see the
+    # matching homeUser.nix sessionVariables. `cai-claude-apim-proxy debug`
+    # checks ANTHROPIC_BASE_URL here ("launchd env").
+    ANTHROPIC_BASE_URL = "http://127.0.0.1:8787";
+    ANTHROPIC_API_KEY = "placeholder-replaced-by-proxy";
     # Makes any OpenChamber desktop app a client of the openchamber agent's
     # server (launchd.user.agents.openchamber) instead of starting a server
     # and OpenCode of its own: one server, one OpenCode, one database, and the
@@ -1091,6 +1102,30 @@ lib.recursiveUpdate {
   };
 
   launchd.user.agents = {
+    # The Vertex APIM proxy Claude Code talks to (127.0.0.1:8787). Replaces the
+    # plist `cai-claude-apim-proxy install-service` writes, which hardcodes the
+    # package's store path (dangling after a proxy update and GC) and a PATH
+    # without /run/current-system/sw/bin, so the proxy could not find `az`
+    # ("token_refresh_failed: spawn az ENOENT"). Declared here, the program
+    # path follows every rebuild. Do not also run install-service: both would
+    # bind :8787. Config and key are the proxy's own, in
+    # ~/.config/cai-claude-apim-proxy (written by `setup`, never by Nix).
+    cai-claude-apim-proxy = {
+      serviceConfig = {
+        ProgramArguments = [
+          "${inputs.self.packages.${system}.cai-claude-apim-proxy}/bin/cai-claude-apim-proxy"
+          "run"
+        ];
+        EnvironmentVariables = {
+          HOME = "/Users/drewry.pope";
+          PATH = "/run/current-system/sw/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+        };
+        KeepAlive = true;
+        RunAtLoad = true;
+        StandardOutPath = "/Users/drewry.pope/Library/Logs/cai-claude-apim-proxy.log";
+        StandardErrorPath = "/Users/drewry.pope/Library/Logs/cai-claude-apim-proxy.err.log";
+      };
+    };
     colima = {
       path = [ pkgs.colima ];
       script = ''

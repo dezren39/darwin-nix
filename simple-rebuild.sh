@@ -535,11 +535,20 @@ xcode_mas() {
 # asynchronously; OpenChamber answered about 10 s after a cold start when
 # measured.
 #
+# The mcpx check reads MCPX_CONFIG from launchd, not from this shell: the
+# darwin module points clients at the daemon's config with launchd's
+# MCPX_CONFIG, which this switch has just changed, and a shell started
+# before the switch still carries the old value (or none). Using this
+# shell's copy reported a healthy daemon as not up (switch gen 314,
+# 2026-11-17).
+#
 # Add new long-running agents here. One-shot agents (KeepAlive = false, such
 # as colima and naturalScrollingToggle) exit by design and do not belong.
 health_services=(
   "org.nixos.openchamber http://127.0.0.1:3000/"
-  "org.nixos.mcpx cmd:cd ~ && mcpx ls"
+  # Single quotes: the launchctl lookup must run when the check runs, after
+  # activation, not when this array is defined at script start.
+  'org.nixos.mcpx cmd:cd ~ && MCPX_CONFIG="$(/bin/launchctl getenv MCPX_CONFIG)" mcpx ls'
 )
 
 # HEALTH_TIMEOUT was already validated at parse time, before any side

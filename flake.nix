@@ -154,33 +154,23 @@ rec {
     # differently and miss the fixed-output hash.
     openchamber = {
       url = "github:developing-today-forks/openchamber";
-      # Pin the chain's mcpx source forward again: the 2026-11-10 full
-      # flake update rolled it back a week (developing-today/code
-      # 031cde2, 2026-11-03), whose pool handoff reads /proc and fails
-      # its tests on aarch64-darwin (no /proc on macOS). The source this
-      # flake carried before the update (code f8957ac, 2026-11-10) is
-      # green on aarch64-darwin. Drop this override once the fork's own
-      # mcpx-src pin catches up.
-      # Pinned forward 2026-11-11 to the merge of developing-today/code
-      # PR 8775 (darwin-nix issue 1815): at f8957ac the mcpx
-      # touch-reopen test expired its own task before the reopen
-      # under builder load and failed the mcpx-home-manager-module
-      # flake check (run 43098524363).
-      inputs.opencode.inputs.mcpx-src.url =
-        "github:developing-today/code/67d9d908b080cba7231ef668e0a8692928e7cbd3";
-      # Pin the chain's opencode to the #1791 hash-fix rev: the rev the
-      # chain otherwise resolves (6c43550) records an aarch64-darwin
-      # node_modules fixed-output hash that does not match its own
-      # content — two independent native darwin builds (the Mac in
-      # #1791 and darwin-nix run 42965438016) agree the output is
-      # sha256-g9J6PY3Bv1i8K6e8chtUwj/lvdVifAGf/VbtAnxnp2A=. The fork's
-      # pin branch for that tree (fork PR #2269, merged) carries the
-      # corrected nix/hashes.json and nothing else. Drop this override
-      # once the chain's own opencode resolution moves past 6c43550.
-      inputs.opencode.url = "github:developing-today-forks/opencode/b80e509fed9dce48d739887b3821cbba36ccc5d8";
+      # No overrides: the chain's own pins (openchamber -> opencode ->
+      # mcpx-src) carry every fix this flake used to pin forward
+      # (opencode #1547 route overrides, the #1791 node_modules hash,
+      # code #11443/#11453/#11476 for mcpx on aarch64-darwin), as of
+      # openchamber 88ca37a / opencode dfa989e / code 2dc8cb8 (2026-11-23).
+      # If the chain regresses, pin here again with
+      # inputs.opencode.url / inputs.opencode.inputs.mcpx-src.url.
     };
     sidepulse-src = {
       url = "github:inteliwear/sidepulse/ffb1d3c2f3eed3b7e80e32d7876a7e1d67bd5dfb";
+      flake = false;
+    };
+    # Vertex's APIM proxy for Claude Code (internal repo). Source-only and pinned
+    # by flake.lock; `nix flake update` moves it to the newest main commit, and
+    # pkgs/cai-claude-apim-proxy builds it from the lockfile.
+    cai-claude-apim-proxy-src = {
+      url = "github:vertexinc/cai-claude-apim-proxy/main";
       flake = false;
     };
     # nixpkgs-helium = {
@@ -227,11 +217,11 @@ rec {
     nixpkgs-hoisted-4.url = "github:NixOS/nixpkgs/nixos-unstable";
     nixpkgs-hoisted-5.follows = "nixpkgs-23-11";
     systems-hoisted.url = "github:nix-systems/default-darwin";
-    determinate-nixd-aarch64-darwin.url = "file+https://install.determinate.systems/determinate-nixd/tag/v3.23.2/macOS";
+    determinate-nixd-aarch64-darwin.url = "file+https://install.determinate.systems/determinate-nixd/tag/v3.24.3/macOS";
     determinate-nixd-aarch64-darwin.flake = false;
-    determinate-nixd-aarch64-linux.url = "file+https://install.determinate.systems/determinate-nixd/tag/v3.23.2/aarch64-linux";
+    determinate-nixd-aarch64-linux.url = "file+https://install.determinate.systems/determinate-nixd/tag/v3.24.3/aarch64-linux";
     determinate-nixd-aarch64-linux.flake = false;
-    determinate-nixd-x86_64-linux.url = "file+https://install.determinate.systems/determinate-nixd/tag/v3.23.2/x86_64-linux";
+    determinate-nixd-x86_64-linux.url = "file+https://install.determinate.systems/determinate-nixd/tag/v3.24.3/x86_64-linux";
     determinate-nixd-x86_64-linux.flake = false;
     nixpkgs-23-11-hoisted.follows = "nixpkgs-23-11";
     nixpkgs-regression-hoisted.follows = "nixpkgs-23-11";
@@ -328,7 +318,6 @@ rec {
     nixosModules.mcpx = inputs.openchamber.nixosModules.mcpx;
     homeManagerModules.mcpx = inputs.openchamber.homeManagerModules.mcpx;
     darwinModules.mcpx = inputs.openchamber.darwinModules.mcpx;
-    homeManagerModules.fleet-brokers = import ./pkgs/fleet-brokers/home-module.nix;
     homeManagerModules.meta-quota-export = import ./pkgs/meta-quota-export/home-module.nix;
     homeManagerModules.rustdesk-units = import ./pkgs/rustdesk-units/home-module.nix;
 
@@ -411,13 +400,13 @@ rec {
         codedb = pkgs.callPackage ./pkgs/codedb/package.nix { };
         flake-tidy = import ./pkgs/flake-tidy { inherit pkgs; };
         twg-cli = pkgs.callPackage ./pkgs/twg-cli/package.nix { };
-        # code#5362: the laptop fleet brokers (secrets + queue) and
-        # the repo-queue client, as one workspace package.
-        fleet-brokers = pkgs.callPackage ./pkgs/fleet-brokers/package.nix { };
         # code#5343: the resident laptop execution agent daemon.
         laptop-agent = pkgs.callPackage ./pkgs/laptop-agent/package.nix { };
         # mcp-remote and chrome-devtools-mcp, which mcpx.config.nix runs.
         npm-mcp-servers = pkgs.callPackage ./pkgs/npm-mcp-servers { };
+        cai-claude-apim-proxy = pkgs.callPackage ./pkgs/cai-claude-apim-proxy {
+          src = inputs.cai-claude-apim-proxy-src;
+        };
         opencode-share = import ./pkgs/opencode-share { inherit pkgs; };
         # The service lifecycle event log (org.nixos.service-events).
         service-events = pkgs.callPackage ./pkgs/service-events { };
@@ -902,6 +891,32 @@ rec {
               export HOME="$TMPDIR/home"
               mkdir -p "$HOME"
               bash ./tmux-navigator.test.sh
+              touch $out
+            '';
+        # #1851: gc-root-activation.test.sh extracts the
+        # rootActivatedGeneration entry from homeUser.nix and pins its
+        # end-of-DAG anchor (entryAfter every other entry in the built
+        # activate script) plus the behaviour that anchor buys: a
+        # later-entry failure leaves the prior activated generation's
+        # GC root intact, a successful activation advances it.
+        gc-root-activation-tests =
+          pkgs.runCommandLocal "gc-root-activation-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.coreutils
+                pkgs.gawk
+                pkgs.gnugrep
+                pkgs.gnused
+              ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/homeUser.nix $src/gc-root-activation.test.sh ./
+              chmod u+w ./homeUser.nix ./gc-root-activation.test.sh
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./gc-root-activation.test.sh
               touch $out
             '';
         # #967: symlink-scripts.test.sh drives the real symlink-commands
@@ -1518,7 +1533,7 @@ rec {
               src = inputs.self;
             }
             ''
-              cp $src/system-activation-helper.sh $src/system-activation-helper.test.sh ./
+              cp $src/system-activation-helper.sh $src/system-activation-helper.test.sh $src/configuration.nix ./
               chmod u+w ./system-activation-helper.test.sh
               bash ./system-activation-helper.test.sh
               touch $out
@@ -1658,6 +1673,89 @@ rec {
           ) "mac-app-util requires SBCL >= 2.6.6 on newer macOS";
           inputs.mac-app-util.packages.${pkgs.stdenv.hostPlatform.system}.default;
         mcpx = (mkPackages pkgs).mcpx;
+        # The daemon and every client must name the SAME config path: mcpx
+        # keys its socket on the path as given, so a symlink or a byte-equal
+        # copy elsewhere is another daemon (2026-11-22). Two oracles: the
+        # real mcpx binary (a daemon on <path> answers `--config <path>`, and
+        # not `--config <link to path>` — the positive control that the
+        # identity rule this guards still holds), and this host's evaluated
+        # agent wrapper, launchd MCPX_CONFIG and mcp-clients.py --config.
+        mcpx-client-config-path =
+          let
+            darwin = inputs.self.darwinConfigurations.MGM9JJ4V3R.config;
+            mcpxBin = "${(mkPackages pkgs).mcpx}/bin/mcpx";
+            extra = pkgs.writeText "extra-activation" darwin.system.activationScripts.extraActivation.text;
+          in
+          pkgs.runCommandLocal "mcpx-client-config-path"
+            {
+              nativeBuildInputs = [
+                pkgs.coreutils
+                pkgs.gnugrep
+                pkgs.gnused
+                pkgs.python3
+              ];
+              envPath = darwin.launchd.user.envVariables.MCPX_CONFIG;
+              agentArgs = builtins.toJSON darwin.launchd.user.agents.mcpx.serviceConfig.ProgramArguments;
+              clients = ./mcp-clients.py;
+            }
+            ''
+              set -euo pipefail
+              want=/Users/drewry.pope/.config/mcpx/config.json
+              [ "$envPath" = "$want" ] || { echo "MCPX_CONFIG=$envPath, want $want"; exit 1; }
+              [ "$agentArgs" = '["/usr/local/libexec/mcpx-user/mcpx"]' ] || { echo "agent runs $agentArgs"; exit 1; }
+              wrapper=$(sed -n '/# mcpx-user-agent-install-begin/,/# mcpx-user-agent-install-end/p' ${extra} \
+                | grep -o '/nix/store/[^ ]*-mcpx' | head -n 1)
+              [ -n "$wrapper" ] || { echo "user agent install block not found"; exit 1; }
+              grep -Fqx "cfg='$want'" "$wrapper" || { echo "wrapper does not run on $want"; cat "$wrapper"; exit 1; }
+              client=$(HOME=/Users/drewry.pope python3 -I -c 'import importlib.util,sys
+              s=importlib.util.spec_from_file_location("c",sys.argv[1]); m=importlib.util.module_from_spec(s); s.loader.exec_module(m)
+              a=m.ARGS; print(a[a.index("--config")+1])' "$clients")
+              [ "$client" = "$want" ] || { echo "mcp-clients --config $client, want $want"; exit 1; }
+
+              # The binary's rule. A short state dir: macOS caps socket paths.
+              export HOME=$TMPDIR/h MCPX_STATE_DIR=$(mktemp -d /tmp/mcpxg.XXXX)
+              mkdir -p $HOME
+              echo '{"daemon":{"autostart":false},"mcpServers":{}}' > $HOME/c.json
+              ln -s $HOME/c.json $HOME/link.json
+              cd $HOME
+              ${mcpxBin} --config $HOME/c.json daemon >daemon.log 2>&1 &
+              pid=$!
+              trap 'kill $pid 2>/dev/null || true; rm -rf "$MCPX_STATE_DIR"' EXIT
+              for _ in $(seq 1 100); do ${mcpxBin} --config $HOME/c.json health >/dev/null 2>&1 && break; sleep 0.1; done
+              ${mcpxBin} --config $HOME/c.json ls >/dev/null || { cat daemon.log; echo "same path did not reach the daemon"; exit 1; }
+              if ${mcpxBin} --config $HOME/link.json ls >/dev/null 2>&1; then
+                echo "control: a symlinked path reached the daemon; mcpx's identity rule changed, revisit mcpx-agent.nix"
+                exit 1
+              fi
+              touch $out
+            '';
+        # developing-today/code PR 11453: the mcpx darwin module's agent
+        # restart must survive an activation that failed before
+        # postActivation (2026-11-17: the daemon stayed on a config three
+        # switches stale). Runs the module's real install/restart blocks
+        # from this host's evaluated activation scripts against stubs.
+        # Only coverage of that module behaviour: developing-today/code
+        # has no darwin evaluation of its own.
+        mcpx-agent-restart =
+          let
+            activation = inputs.self.darwinConfigurations.MGM9JJ4V3R.config.system.activationScripts;
+            extra = pkgs.writeText "extra-activation" activation.extraActivation.text;
+            post = pkgs.writeText "post-activation" activation.postActivation.text;
+          in
+          pkgs.runCommandLocal "mcpx-agent-restart-test"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.coreutils
+                pkgs.diffutils
+                pkgs.gnugrep
+                pkgs.gnused
+              ];
+            }
+            ''
+              bash ${./mcpx-agent-restart.test.sh} ${extra} ${post}
+              touch $out
+            '';
         sidepulse = (mkPackages pkgs).sidepulse;
         sidepulse-wrapper =
           let
@@ -1866,93 +1964,6 @@ rec {
                 || { echo "rendered config.json mismatch:" >&2; cat "$configFile" >&2; exit 1; }
               touch $out
             '';
-        # code#5362: the fleet-brokers home-manager module must render
-        # all three fleet service units pointing at the flake's own packages.
-        fleet-brokers-home-manager-module =
-          # The module's service config is guarded by hostPlatform.isLinux,
-          # so the check must not evaluate it on Darwin (codex P1 on #1459).
-          if !pkgs.stdenv.hostPlatform.isLinux then
-            pkgs.runCommandLocal "fleet-brokers-home-manager-module-check" { } "touch $out"
-          else
-            let
-              selfPkgs = mkPackages pkgs;
-              eval = inputs.home-manager.lib.homeManagerConfiguration {
-                inherit pkgs;
-                modules = [
-                  inputs.self.homeManagerModules.fleet-brokers
-                  {
-                    services.fleet-brokers = {
-                      enable = true;
-                      package = selfPkgs.fleet-brokers;
-                      laptopAgentPackage = selfPkgs.laptop-agent;
-                      # nixpkgs' bws is unfree; the check only needs a
-                      # package on the unit PATH, so a stub stands in.
-                      bwsPackage = pkgs.coreutils;
-                    };
-                    home = {
-                      username = "fleet-test";
-                      homeDirectory = "/home/fleet-test";
-                      stateVersion = "25.11";
-                    };
-                  }
-                ];
-              };
-              qb = eval.config.systemd.user.services.queue-broker.Service;
-              sb = eval.config.systemd.user.services.secrets-broker.Service;
-              la = eval.config.systemd.user.services.laptop-agent.Service;
-              repoQueueAlias = eval.config.home.file.".local/bin/repo-queue".source;
-            in
-            pkgs.runCommandLocal "fleet-brokers-home-manager-module-check"
-              {
-                qbExec = qb.ExecStart;
-                sbExec = sb.ExecStart;
-                sbPath = pkgs.lib.concatStringsSep ":" sb.Environment;
-                bwsBin = "${pkgs.coreutils}/bin";
-                laExec = la.ExecStart;
-                inherit repoQueueAlias;
-                repoQueueBinary = "${selfPkgs.fleet-brokers}/bin/repo-queue";
-                wantedBy = pkgs.lib.concatStringsSep " " eval.config.systemd.user.services.queue-broker.Install.WantedBy;
-              }
-              ''
-                case "$qbExec" in
-                *"/bin/queue-broker") ;;
-                *)
-                  echo "queue-broker ExecStart wrong: $qbExec" >&2
-                  exit 1
-                  ;;
-                esac
-                case "$sbExec" in
-                *"/bin/secrets-broker") ;;
-                *)
-                  echo "secrets-broker ExecStart wrong: $sbExec" >&2
-                  exit 1
-                  ;;
-                esac
-                case "$sbPath" in
-                *"$bwsBin"*) ;;
-                *)
-                  echo "secrets-broker PATH lacks bwsPackage: $sbPath" >&2
-                  exit 1
-                  ;;
-                esac
-                case "$laExec" in
-                *"/bin/laptop-agent") ;;
-                *)
-                  echo "laptop-agent ExecStart wrong: $laExec" >&2
-                  exit 1
-                  ;;
-                esac
-                [ "$repoQueueAlias" = "$repoQueueBinary" ] || {
-                  echo "repo-queue alias target=$repoQueueAlias, want packaged binary $repoQueueBinary" >&2
-                  exit 1
-                }
-                [ -x "$repoQueueAlias" ] || {
-                  echo "repo-queue alias target is not an executable provisioned binary: $repoQueueAlias" >&2
-                  exit 1
-                }
-                [ "$wantedBy" = "default.target" ] || { echo "WantedBy=$wantedBy, want default.target" >&2; exit 1; }
-                touch $out
-              '';
         # darwin-nix#1776: the meta-quota-export home-manager module must
         # render the service + timer faithful to the live hand-installed
         # units on amd (oneshot, TimeoutStartSec=120, same ExecStart;
@@ -2065,6 +2076,8 @@ rec {
             ''
               cp -r ${./pkgs/laptop-agent/src} src
               cp -r ${./pkgs/laptop-agent/tests} tests
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
               python3 -m unittest discover -s tests -v
               touch $out
             '';

@@ -304,6 +304,42 @@ for mode in bsd gnu; do
   esac
 done
 
+# ─── Unknown-scratch sweep honors VAR_FOLDERS_ROOT (#1865) ───────
+# Both unknown-scratch scans (the --only-unknown-scratch early exit
+# and the full-run catch-all) used to iterate the literal
+# /private/var/folders/*/*/T, ignoring the VAR_FOLDERS_ROOT seam
+# (#1346) -- so fixtures could not exercise the var/folders leg, and
+# --prune-unknown-scratch could delete host entries outside the
+# caller's intended root. Fixture: an eligible entry under a
+# configured root's */*/T, and a twin under an unconfigured root.
+VF_ROOT="$TMP_ROOT/vf-root-1865"
+VF_T="$VF_ROOT/ab/cd/T"
+mkdir -p "$VF_T"
+VF_ENTRY="$VF_T/zzvf1865"
+mkdir -p "$VF_ENTRY"
+dd if=/dev/zero of="$VF_ENTRY/blob" bs=1024 count=1536 2>/dev/null
+touch -d '2020-01-02 03:04:05' "$VF_ENTRY"
+VF_OTHER="$TMP_ROOT/vf-other-1865/ef/gh/T"
+mkdir -p "$VF_OTHER"
+VF_OTHER_ENTRY="$VF_OTHER/zzvf1865other"
+mkdir -p "$VF_OTHER_ENTRY"
+dd if=/dev/zero of="$VF_OTHER_ENTRY/blob" bs=1024 count=1536 2>/dev/null
+touch -d '2020-01-02 03:04:05' "$VF_OTHER_ENTRY"
+OUT="$(PATH="$LSOF_STUB_DIR:$PATH" VAR_FOLDERS_ROOT="$VF_ROOT" UNKNOWN_SCRATCH_MIN_MB=1 UNKNOWN_SCRATCH_STALE_DAYS=1 bash "$SCRIPT" --only-unknown-scratch 2>"$TMP_ROOT/err")"; STATUS=$?
+ERR="$(cat "$TMP_ROOT/err")"
+[ "$STATUS" -eq 0 ] || fail "vf-root (#1865): --only-unknown-scratch exited $STATUS (stderr: $ERR)"
+case "$OUT" in
+  *zzvf1865*) echo "ok: vf-root (#1865): --only-unknown-scratch reports the configured root's entry" ;;
+  *) fail "vf-root (#1865): configured root's entry not reported (got: $OUT)" ;;
+esac
+[ -d "$VF_ENTRY" ] || fail "vf-root (#1865): flagged-only run deleted the fixture entry"
+OUT="$(PATH="$LSOF_STUB_DIR:$PATH" VAR_FOLDERS_ROOT="$VF_ROOT" UNKNOWN_SCRATCH_MIN_MB=1 UNKNOWN_SCRATCH_STALE_DAYS=1 bash "$SCRIPT" --only-unknown-scratch --prune-unknown-scratch 2>"$TMP_ROOT/err")"; STATUS=$?
+ERR="$(cat "$TMP_ROOT/err")"
+[ "$STATUS" -eq 0 ] || fail "vf-root prune (#1865): exited $STATUS (stderr: $ERR)"
+[ -d "$VF_ENTRY" ] && fail "vf-root prune (#1865): eligible entry under the configured root survived" || echo "ok: vf-root prune (#1865): eligible entry under the configured root deleted"
+[ -d "$VF_OTHER_ENTRY" ] || fail "vf-root prune (#1865): entry under an UNCONFIGURED root was deleted"
+echo "ok: vf-root prune (#1865): unconfigured root untouched"
+
 # Pytest newest-run guard fires under BSD and GNU stat alike. Both
 # runs are older than PYTEST_KEEP_HOURS, so only the guard keeps the
 # newest (pytest-2). --dry-run makes del() report instead of remove:
@@ -1425,6 +1461,202 @@ grep -q 'tidy_file_to_bucket' "$SW_DIR/tidy_file_to_bucket.sh" \
 rm -rf "$SW_DIR"
 
 
+# ─── brew_cask_drift_check fails closed when brew list --cask fails (#1918) ───
+# The orphan/dead-cask drift checks used to enumerate via process/command
+# substitution with 2>/dev/null, so a present-but-failing brew produced
+# empty results and the run claimed "no drift" at exit 0. Pin the
+# fail-closed contract with a stub brew, extracting the real
+# brew_cask_drift_check from clean.sh at test time (the brew_cleanup
+# extraction pattern, #1422 -- sourced and driven in this shell, not a
+# subshell: this suite's EXIT trap fires in subshells and would delete
+# TMP_ROOT mid-section): a failing enumeration warns naming the step,
+# surfaces brew's stderr, and records BREW_DRIFT_FAILURES (the run's
+# final gate turns that into a non-zero exit); a successful enumeration
+# is the control -- no failure recorded, orphans reported.
+DRIFT_DIR="$TMP_ROOT/brew-drift"
+mkdir -p "$DRIFT_DIR"
+cat > "$DRIFT_DIR/casks.nix" <<'NIX'
+_: {
+  homebrew.casks = [
+    "docker-desktop"
+  ];
+}
+NIX
+printf '#!%s\n' "$(command -v bash)" > "$DRIFT_DIR/brew"
+cat >> "$DRIFT_DIR/brew" <<'STUB'
+if [ "$1 $2" = "list --cask" ]; then
+  if [ "${DRIFT_BREW_FAIL:-0}" = "1" ]; then
+    echo "Error: brew exploded" >&2
+    exit 1
+  fi
+  printf 'docker-desktop\norphan-cask\n'
+  exit 0
+fi
+exit 0
+STUB
+chmod +x "$DRIFT_DIR/brew"
+sed -n '/^brew_cask_drift_check() {/,/^}/p' "$SCRIPT" > "$DRIFT_DIR/drift.sh"
+[ -s "$DRIFT_DIR/drift.sh" ] || fail "could not extract brew_cask_drift_check from clean.sh (#1918)"
+DRIFT_SELF_DIR_SAVE="$SELF_DIR"
+SELF_DIR="$DRIFT_DIR"
+BREW_DRIFT_FAILURES=0
+warn() { printf '%s\n' "$*" >&2; }
+real_brew() { printf '%s' "$DRIFT_DIR/brew"; }
+as_user() { "$@"; }
+. "$DRIFT_DIR/drift.sh"
+# Section-local TMPDIR (the line-1324 precedent): an earlier section
+# exports a TMPDIR it later removes, and brew_cask_drift_check's mktemp
+# would fail against the removed dir -- under this suite's set -e that
+# failing assignment would exit the whole suite mid-section.
+DRIFT_TMPDIR_SAVE="${TMPDIR:-}"
+TMPDIR="$DRIFT_DIR"
+export TMPDIR
+# Direct calls with file capture (not $(...)): the failure counter is a
+# shell variable, and a command substitution would run the function in
+# a subshell and lose the increment.
+DRIFT_BREW_FAIL=1 brew_cask_drift_check >"$DRIFT_DIR/out-fail" 2>"$DRIFT_DIR/err-fail"
+DRIFT_FAILURES_FAIL=$BREW_DRIFT_FAILURES
+DRIFT_ERR_FAIL="$(cat "$DRIFT_DIR/err-fail")"
+BREW_DRIFT_FAILURES=0
+DRIFT_BREW_FAIL=0 brew_cask_drift_check >"$DRIFT_DIR/out-ok" 2>"$DRIFT_DIR/err-ok"
+DRIFT_FAILURES_OK=$BREW_DRIFT_FAILURES
+DRIFT_OUT_OK="$(cat "$DRIFT_DIR/out-ok")"
+DRIFT_ERR_OK="$(cat "$DRIFT_DIR/err-ok")"
+SELF_DIR="$DRIFT_SELF_DIR_SAVE"
+if [ -n "$DRIFT_TMPDIR_SAVE" ]; then TMPDIR="$DRIFT_TMPDIR_SAVE"; else unset TMPDIR; fi
+export TMPDIR
+[ "$DRIFT_FAILURES_FAIL" -eq 1 ] \
+  || fail "failing brew list --cask recorded $DRIFT_FAILURES_FAIL drift failure(s) (want 1) (#1918)"
+case "$DRIFT_ERR_FAIL" in
+  *"brew list --cask failed"*) echo "ok: drift check names the failed step on enumeration failure" ;;
+  *) fail "drift check did not name the failed step (got: $DRIFT_ERR_FAIL) (#1918)" ;;
+esac
+case "$DRIFT_ERR_FAIL" in
+  *"brew exploded"*) echo "ok: drift check surfaces brew's own stderr" ;;
+  *) fail "drift check swallowed brew's stderr (got: $DRIFT_ERR_FAIL) (#1918)" ;;
+esac
+case "$DRIFT_ERR_FAIL" in
+  *"not in casks.nix"*) fail "drift check reported orphans from a failed enumeration (#1918)" ;;
+  *) echo "ok: drift check reports no orphans from a failed enumeration" ;;
+esac
+[ "$DRIFT_FAILURES_OK" -eq 0 ] \
+  || fail "successful brew list --cask recorded a drift failure (#1918)"
+case "$DRIFT_OUT_OK" in
+  *"orphan-cask"*) echo "ok: drift check control reports the orphan cask" ;;
+  *) fail "drift check control did not report orphan-cask (got: $DRIFT_OUT_OK / $DRIFT_ERR_OK) (#1918)" ;;
+esac
+
+# --- Colima recreation requires two complete Docker listings (#1831) --------
+# Run the real cleanup script in dry-run mode with a fake Colima profile and
+# Docker CLI. The daemon probe succeeds; each listing can independently fail,
+# so an empty wc result must never be mistaken for a verified zero.
+COLIMA_TEST="$TMP_ROOT/colima-listings"
+COLIMA_BIN="$COLIMA_TEST/bin"
+COLIMA_HOME="$COLIMA_TEST/home"
+COLIMA_APP="$COLIMA_TEST/app"
+COLIMA_BASH="$(command -v bash)"
+REAL_DU="$(command -v du)"
+export REAL_DU
+mkdir -p "$COLIMA_BIN" "$COLIMA_HOME/.colima/default" \
+  "$COLIMA_HOME/.colima/_lima/_disks/colima" "$COLIMA_APP/lib"
+# Keep this full-script integration fixture hermetic: omitting the Homebrew
+# manifest files skips unrelated host brew/mas probes, while copying runtime
+# dependencies keeps SELF_DIR's relative references valid.
+cp "$SELF_DIR/clean.sh" "$SELF_DIR/git-discover-repos" "$SELF_DIR/var-folders-clean.sh" "$COLIMA_APP/"
+cp "$SELF_DIR/lib/common.sh" "$SELF_DIR/lib/arg-probe.sh" "$SELF_DIR/lib/outcome-probe.sh" "$COLIMA_APP/lib/"
+{
+  printf '#!%s\n' "$COLIMA_BASH"
+  cat <<'STUB'
+if [ -n "${DOCKER_HOST:-}" ]; then
+  case "$1" in
+    info) exit 0 ;;
+    ps)
+      case "${DOCKER_PS_MODE:-empty}" in
+        fail) printf 'partial-container\n'; exit 7 ;;
+        silent-fail) exit 7 ;;
+        nonempty) printf 'container-id\n'; exit 0 ;;
+        *) exit 0 ;;
+      esac
+      ;;
+    volume)
+      case "${DOCKER_VOLUME_MODE:-empty}" in
+        fail) printf 'partial-volume\n'; exit 8 ;;
+        silent-fail) exit 8 ;;
+        nonempty) printf 'volume-name\n'; exit 0 ;;
+        *) exit 0 ;;
+      esac
+      ;;
+  esac
+fi
+exit 0
+STUB
+} > "$COLIMA_BIN/docker"
+{
+  printf '#!%s\n' "$COLIMA_BASH"
+  cat <<'STUB'
+exit 0
+STUB
+} > "$COLIMA_BIN/colima"
+{
+  printf '#!%s\n' "$COLIMA_BASH"
+  cat <<'STUB'
+case "$*" in
+  *"/.colima/_lima/_disks/colima"*) printf '1048577\t%s\n' "${*: -1}" ;;
+  *) "$REAL_DU" "$@" ;;
+esac
+STUB
+} > "$COLIMA_BIN/du"
+chmod +x "$COLIMA_BIN/docker" "$COLIMA_BIN/colima" "$COLIMA_BIN/du"
+run_colima_case() { # <ps mode> <volume mode> — sets output and status
+  DOCKER_PS_MODE="$1" DOCKER_VOLUME_MODE="$2" HOME="$COLIMA_HOME" \
+    PATH="$COLIMA_BIN:$PATH" bash "$COLIMA_APP/clean.sh" --system --dry-run \
+      >"$COLIMA_TEST/out" 2>"$COLIMA_TEST/err"
+  COLIMA_STATUS=$?
+  COLIMA_OUT="$(cat "$COLIMA_TEST/out")"
+  COLIMA_ERR="$(cat "$COLIMA_TEST/err")"
+}
+expect_colima_no_delete() {
+  case "$COLIMA_OUT" in
+    *"would run: as_user colima stop -p default"*|*"would run: as_user colima delete -f -p default"*)
+      fail "$1 attempted the Colima deletion path (status $COLIMA_STATUS)" ;;
+    *) echo "ok: $1 leaves the Colima profile intact" ;;
+  esac
+}
+run_colima_case fail empty
+expect_colima_no_delete "failed docker ps with successful empty volume listing"
+case "$COLIMA_OUT$COLIMA_ERR" in
+  *"docker ps"*) echo "ok: failed docker ps is diagnosed" ;;
+  *) fail "failed docker ps was not diagnosed (got: $COLIMA_OUT / $COLIMA_ERR)" ;;
+esac
+run_colima_case silent-fail empty
+expect_colima_no_delete "silent failed docker ps with successful empty volume listing"
+case "$COLIMA_OUT$COLIMA_ERR" in
+  *"docker ps"*) echo "ok: silent failed docker ps is diagnosed" ;;
+  *) fail "silent failed docker ps was not diagnosed (got: $COLIMA_OUT / $COLIMA_ERR)" ;;
+esac
+run_colima_case empty fail
+expect_colima_no_delete "failed docker volume ls with successful empty container listing"
+case "$COLIMA_OUT$COLIMA_ERR" in
+  *"docker volume ls"*) echo "ok: failed docker volume ls is diagnosed" ;;
+  *) fail "failed docker volume ls was not diagnosed (got: $COLIMA_OUT / $COLIMA_ERR)" ;;
+esac
+run_colima_case empty silent-fail
+expect_colima_no_delete "silent failed docker volume ls with successful empty container listing"
+case "$COLIMA_OUT$COLIMA_ERR" in
+  *"docker volume ls"*) echo "ok: silent failed docker volume ls is diagnosed" ;;
+  *) fail "silent failed docker volume ls was not diagnosed (got: $COLIMA_OUT / $COLIMA_ERR)" ;;
+esac
+run_colima_case nonempty empty
+expect_colima_no_delete "verified non-empty container listing"
+run_colima_case empty nonempty
+expect_colima_no_delete "verified non-empty volume listing"
+run_colima_case empty empty
+case "$COLIMA_OUT" in
+  *"would run: as_user colima stop -p default"*"would run: as_user colima delete -f -p default"*)
+    echo "ok: two verified empty listings permit Colima recreation" ;;
+  *) fail "two verified empty listings did not enter recreation path (got: $COLIMA_OUT)" ;;
+esac
+
 # ─── #1902: dead-cask extraction spans multi-word app names ─────────────
 # The dead-cask check extracted the installed app path from `brew info`
 # with grep -oE '/Applications/[^ ]*\.app'. [^ ]* cannot span the space in
@@ -1457,6 +1689,7 @@ DC_OUT="$(
   as_user() { "$@"; }
   warn() { printf 'WARN: %s\n' "$*"; }
   _b="$DC_DIR/brew"
+  _cask_list="dead-multi present-multi single-word"
   export CLEAN_APPS_DIR="$DC_DIR/apps"
   . "$DC_DIR/block.sh"
 )"
@@ -1476,6 +1709,7 @@ case "$DC_OUT" in
   *single-word*) echo "ok: single-word dead cask still flagged (control)" ;;
   *) fail "single-word dead cask was not flagged (got: $DC_OUT)" ;;
 esac
+
 
 
 [ "$failures" -eq 0 ] || { echo "$failures failure(s)" >&2; exit 1; }

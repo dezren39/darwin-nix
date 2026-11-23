@@ -81,12 +81,46 @@ lib.recursiveUpdate {
       # not: that is how a `nix store gc` deleted mcpx's mcp-remote on
       # 2026-10-21 (config written Oct 20 02:38 by a build that never became
       # a generation). One indirect root, replaced by each activation.
-      rootActivatedGeneration = lib.hm.dag.entryBefore [ "writeBoundary" ] ''
-        run /bin/mkdir -p "$HOME/.local/state/nix/gcroots"
-        run /nix/var/nix/profiles/default/bin/nix-store --add-root \
-          "$HOME/.local/state/nix/gcroots/home-manager-last-activated" --indirect \
-          --realise "$newGenPath" >/dev/null
-      '';
+      # The advance is anchored after every other entry in this
+      # configuration's activation DAG (the list is the built activate
+      # script's entry set, verified 2026-11-17 for issue #1851), so the
+      # durable root moves only once the whole activation has succeeded.
+      # It used to be entryBefore writeBoundary: a failure in any later
+      # entry (mcpxConfig, say) then left the root pointing at a
+      # generation that never finished activating, and the last good
+      # generation lost this protection. During the run itself the new
+      # generation stays protected by the caller's ./result link on the
+      # hand-run path and by profile registration on the rebuild path,
+      # so deferring the durable advance to the end loses nothing. When
+      # a new activation entry appears in this configuration, add its
+      # name here; gc-root-activation.test.sh pins this list.
+      rootActivatedGeneration =
+        lib.hm.dag.entryAfter
+          [
+            "browserRemoteDebug"
+            "checkFilesChanged"
+            "checkLinkTargets"
+            "createScreenshotsDir"
+            "installAltTab"
+            "installPackages"
+            "linkGeneration"
+            "mcpClients"
+            "mcpxConfig"
+            "onFilesChange"
+            "openchamberDeploy"
+            "removeStaleNpmPlaywright"
+            "setupLaunchAgents"
+            "setupSidePulse"
+            "sops-nix"
+            "trampolineApps"
+            "writeBoundary"
+          ]
+          ''
+            run /bin/mkdir -p "$HOME/.local/state/nix/gcroots"
+            run /nix/var/nix/profiles/default/bin/nix-store --add-root \
+              "$HOME/.local/state/nix/gcroots/home-manager-last-activated" --indirect \
+              --realise "$newGenPath" >/dev/null
+          '';
       # ~/.config/mcpx/config.json (every MCP server; see mcpx.config.nix) is
       # a real file written here, not a home.file link into the store. mcpx
       # names its daemon's socket after the config file's path *with symlinks
@@ -209,6 +243,13 @@ lib.recursiveUpdate {
       # configuration.nix. The opencode wrapper forces it regardless.
       OPENCODE_DB = "$HOME/.local/share/opencode/opencode.db";
 
+      # Claude Code through the Vertex APIM proxy (launchd.user.agents in
+      # configuration.nix). `cai-claude-apim-proxy setup` would append these to
+      # ~/.zshrc, which home-manager owns read-only, so they live here. The API
+      # key is the proxy's literal placeholder, not a secret: the proxy swaps in
+      # the real key from ~/.config/cai-claude-apim-proxy/key.<env>.
+      ANTHROPIC_BASE_URL = "http://127.0.0.1:8787";
+      ANTHROPIC_API_KEY = "placeholder-replaced-by-proxy";
       # OpenCode feature flags (Drew, 2026-10-20): both web-search backends
       # (Exa + Parallel) so the websearch tool works with any provider, and
       # the interesting experimental features. OPENCODE_EXPERIMENTAL is the

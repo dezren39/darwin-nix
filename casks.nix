@@ -53,6 +53,7 @@ _: {
     "google-chrome"
     "hammerspoon"
     "handbrake-app"
+    "helium-browser"
     # "homebrew/cask/docker-desktop" # removed 2026-09: uninstalled on request.
     # The app bundle was already missing from /Applications before removal --
     # only the cask registration remained. colima provides the docker runtime.

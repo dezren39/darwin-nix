@@ -8,8 +8,9 @@
 # the OAuth login in a browser (`just mcp-login <name>`) and keeps the tokens
 # in ~/.mcp-auth, so nothing secret is in this repo.
 #
-# This file is generated into the nix store, so it is read-only: `mcpx servers
-# add` cannot write to it. Add servers here, or in a project's .mcpx.json.
+# homeUser.nix copies this rendering to the real home config. It is writable,
+# but activation replaces hand-edits: make persistent changes here (or in
+# a project .mcpx.json with its own daemon), not with `mcpx servers add`.
 #
 # Commands are absolute paths: a daemon inherits the PATH of whatever started
 # it, and a bare name that the launchd agent's PATH resolves can fail with
@@ -133,7 +134,9 @@ let
     };
     context7 = remote "https://mcp.context7.com/mcp";
     datadog = remote "https://mcp.datadoghq.com/v1/mcp?toolsets=core,workflows,alerting&omit_tools=delete_datadog_workflow";
-    # Pin staticOAuthClientMetadata.scope to the 20 read/search scopes granted
+    # Pin staticOAuthClientMetadata.scope to the 20 read/search scopes plus
+    # write:jira:agent-interface (Jira writes, added 2026-11-16; it was in
+    # the hand-edited ~/.config/mcpx/config.json since 2026-11-11) granted
     # during OAuth consent so mcp-remote's scopeRequestChanged(tokens) never
     # wipes ~/.mcp-auth/mcp-remote-v1/884934a228803babc1724091e0d7956a_tokens.json
     # when /.well-known/oauth-protected-resource/v2/mcp changes or times out.
@@ -143,7 +146,7 @@ let
         "https://mcp.atlassian.com/v2/mcp?tools=all"
         "--static-oauth-client-metadata"
         (builtins.toJSON {
-          scope = "email offline_access read:account read:all:twg read:artifacts:agent-interface read:assets:agent-interface read:capacity-planning:agent-interface read:confluence:agent-interface read:focus:agent-interface read:goals:agent-interface read:jira:agent-interface read:loom:agent-interface read:me read:projects:agent-interface read:talent:agent-interface read:teams:agent-interface search:code:agent-interface search:confluence:agent-interface search:jira:agent-interface search:rovo:agent-interface";
+          scope = "email offline_access read:account read:all:twg read:artifacts:agent-interface read:assets:agent-interface read:capacity-planning:agent-interface read:confluence:agent-interface read:focus:agent-interface read:goals:agent-interface read:jira:agent-interface read:loom:agent-interface read:me read:projects:agent-interface read:talent:agent-interface read:teams:agent-interface search:code:agent-interface search:confluence:agent-interface search:jira:agent-interface search:rovo:agent-interface write:jira:agent-interface";
         })
       ];
     };
@@ -215,9 +218,20 @@ let
   pooling = {
     # A browser holds page state; two agents sharing one corrupt each other.
     # One per agent session instead.
+    #
+    # writePolicy: every browser tool but a few reads lacks readOnlyHint, so
+    # under the default policy.write=ask navigating a page needs a
+    # confirmation, and a caller with no one to answer (an agent, a script)
+    # is refused after elicit.askTimeout. The two isolated headless browsers
+    # start from an empty profile with no sign-ins. They still have local
+    # filesystem and network access (including loopback/LAN services), so
+    # this is not a sandbox: allow writes to support UI testing, not because
+    # isolated profiles eliminate risk. The live browsers carry the user's
+    # signed-in sessions and keep asking.
     chrome-devtools = {
       sharing = "exclusive";
       scope = "session";
+      writePolicy = "allow";
     };
     chrome-live = {
       sharing = "exclusive";
@@ -234,6 +248,7 @@ let
     playwright = {
       sharing = "exclusive";
       scope = "session";
+      writePolicy = "allow";
     };
     # uvx resolves and downloads the proxy on first start, which can outlast
     # the default 60s start timeout.

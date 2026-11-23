@@ -189,6 +189,9 @@
   // in v2: lsp, plan_enter, plan_exit, and the rule for the removed `custom`
   // subagent.
   "permissions": [
+    // Override the built-in agent denies too (explore, general, title,
+    // summary). Specific ask rules below remain in force; order matters.
+    {"action":"*","resource":"*","effect":"allow"},
     {"action":"read","resource":"*","effect":"allow"},
     {"action":"todowrite","resource":"*","effect":"allow"},
     {"action":"edit","resource":"*","effect":"allow"},

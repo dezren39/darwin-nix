@@ -452,7 +452,28 @@ ensure_scheduler() {
     # A failed install must not be swallowed (#1402): let git's own error
     # reach stderr, name the step, and report failure to the caller the
     # way the #1327 registration block does, so the exit code reflects it.
-    if ! git maintenance start; then                                  # install/refresh launchd timers
+    # `git maintenance start` must run inside a repository (it registers
+    # the current one), and activation runs this from /, where it died
+    # with "fatal: not a git repository" on every switch. Run it from a
+    # repository that is already registered (in maintenance.config, where
+    # this script registers, or the global config), so it adds nothing new;
+    # with none registered there is nothing for the timers to do yet.
+    local anchor_repo="" candidate
+    while IFS= read -r candidate; do
+      if [ -n "$candidate" ] && git -C "$candidate" rev-parse --git-dir >/dev/null 2>&1; then
+        anchor_repo=$candidate
+        break
+      fi
+    done <<EOF_REPOS
+$(git config --file "$mc" --get-all maintenance.repo 2>/dev/null || true)
+$(git config --get-all maintenance.repo 2>/dev/null || true)
+EOF_REPOS
+    if [ -z "$anchor_repo" ] && git rev-parse --git-dir >/dev/null 2>&1; then
+      anchor_repo=$(pwd)
+    fi
+    if [ -z "$anchor_repo" ]; then
+      echo "  scheduler: no registered repository to install timers from; skipping git maintenance start"
+    elif ! git -C "$anchor_repo" maintenance start; then             # install/refresh launchd timers
       echo "git-maintain-repos: scheduler install failed: git maintenance start" >&2
       install_failed=1
     fi

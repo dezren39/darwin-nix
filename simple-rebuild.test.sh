@@ -188,6 +188,24 @@ else
   fail "HEALTH_TIMEOUT=abc exited $STATUS (want 2)"
 fi
 
+# The mcpx health check must read MCPX_CONFIG from launchd when it runs
+# (a pre-switch shell carries the old value), so the entry must name
+# `launchctl getenv MCPX_CONFIG` and be single-quoted: a double-quoted
+# entry expands the lookup when the array is defined, before activation.
+MCPX_ENTRY=$(grep -E "^[[:space:]]*['\"]org\.nixos\.mcpx cmd:" "$SCRIPT" || true)
+if [ -z "$MCPX_ENTRY" ]; then
+  fail "mcpx health entry not found in simple-rebuild.sh"
+else
+  case "$MCPX_ENTRY" in
+    *"launchctl getenv MCPX_CONFIG"*) ok "mcpx health check reads MCPX_CONFIG from launchd" ;;
+    *) fail "mcpx health check does not read MCPX_CONFIG from launchd (got: $MCPX_ENTRY)" ;;
+  esac
+  case "$MCPX_ENTRY" in
+    *"'org.nixos.mcpx"*) ok "mcpx health entry is single-quoted (lookup runs at check time)" ;;
+    *) fail "mcpx health entry is not single-quoted (got: $MCPX_ENTRY)" ;;
+  esac
+fi
+
 if [ "$failures" -gt 0 ]; then
   echo "$failures simple-rebuild parser check(s) failed" >&2
   exit 1

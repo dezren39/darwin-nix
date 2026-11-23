@@ -96,13 +96,52 @@ let
     # OPENCHAMBER_UI_PASSWORD, from sops (see home-manager.users below):
     # required before OpenChamber will serve a public tunnel. Loopback-only
     # either way, so this is defence in depth, not what keeps it private.
+    #
+    # sops-nix decrypts it into the per-user temp directory from its own
+    # RunAtLoad agent, and after a reboot that can finish after this agent
+    # starts: on 2026-11-22 this agent started at 02:40:34 and sops-nix created
+    # its secrets directory at 02:40:41. Reading the file only `if [ -r ]`
+    # then served the UI with no password, silently, until the next restart.
+    # So wait for it, and if it never appears exit instead: KeepAlive retries
+    # every ThrottleInterval, so OpenChamber starts once the decrypt lands and
+    # never runs without its password. openchamberDeploy refuses the same way
+    # (#1438).
     pw="$HOME/.config/openchamber/ui-password"
-    if [ -r "$pw" ]; then
-      OPENCHAMBER_UI_PASSWORD="$(< "$pw")"
-      export OPENCHAMBER_UI_PASSWORD
+    waited=0
+    while [ ! -r "$pw" ] && [ "$waited" -lt 300 ]; do
+      /bin/sleep 0.1
+      waited=$((waited + 1))
+    done
+    if [ ! -r "$pw" ]; then
+      echo "openchamber-serve: UI password file $pw is not readable after $waited polls; exiting so launchd retries" >&2
+      if [ -x /run/current-system/sw/bin/service-event ]; then
+        /run/current-system/sw/bin/service-event openchamber-agent agent.no-ui-password \
+          pid=$$ polls="$waited" || true
+      fi
+      exit 1
     fi
+    OPENCHAMBER_UI_PASSWORD="$(< "$pw")"
+    export OPENCHAMBER_UI_PASSWORD
     export OPENCODE_BINARY="${state}/bin/opencode"
     export OPENCODE_DB="$HOME/.local/share/opencode/opencode.db"
+    # launchctl setenv is lost at reboot. Use the stable client file here,
+    # not the generation's store path: a running OpenChamber then follows
+    # mcpx config changes without needing an unrelated OpenChamber restart.
+    export MCPX_CONFIG="$HOME/.config/mcpx/config.json"
+    # launchd has no ordering between these two RunAtLoad agents. Starting
+    # OpenCode first lets its plugin spawn a competing daemon (opencode#134).
+    # Wait for the managed gateway, without autostart, then launch OpenCode.
+    # Bound the wait to 300 polls as for sops above; KeepAlive retries if the
+    # gateway stays unavailable. No credential or stateful browser is opened.
+    waited=0
+    while ! /run/current-system/sw/bin/mcpx --config "$MCPX_CONFIG" health >/dev/null 2>&1; do
+      if [ "$waited" -ge 300 ]; then
+        echo "openchamber-serve: mcpx is not healthy for $MCPX_CONFIG; exiting so launchd retries" >&2
+        exit 1
+      fi
+      /bin/sleep 0.1
+      waited=$((waited + 1))
+    done
     export OPENCHAMBER_SELF_HANDOFF=0
     # OpenChamber's terminals and git run with this PATH, so it is the full
     # system path, with the OpenCode link and the system profile's bin (mcpx,

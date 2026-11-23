@@ -416,6 +416,8 @@ in
       # mcp-remote and chrome-devtools-mcp, which are only on npm (pinned by
       # pkgs/npm-mcp-servers/package-lock.json).
       inputs.self.packages.${system}.npm-mcp-servers
+      # Vertex's APIM proxy for Claude Code, built from the pinned source input.
+      inputs.self.packages.${system}.cai-claude-apim-proxy
       # service-event, for scripts that record into the service event log
       # (configuration.nix launchd.user.agents.service-events).
       inputs.self.packages.${system}.service-events

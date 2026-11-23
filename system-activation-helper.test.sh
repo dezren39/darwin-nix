@@ -120,6 +120,21 @@ check "event-write failure is diagnosed" contains \
   "$tmp/log-failure.err"
 check "event-write failure is not reported as recorded" test ! -e "$tmp/log-failure.events"
 
+# The user-scope helpers and their event writer run through
+# `launchctl asuser UID sudo -u USER`. Without -H, sudo keeps root's
+# HOME (/var/root): git-maintain-repos and service-event then write
+# under /var/root, are refused, and the switch fails
+# (switch-20261117T180205.log). Guard configuration.nix's two
+# user-runner definitions; the positive control fails loudly if they
+# are renamed and this guard would otherwise match nothing.
+config_nix=${SYSTEM_ACTIVATION_CONFIG:-$script_dir/configuration.nix}
+as_user_line=$(grep -E '^[[:space:]]*as_user="/bin/launchctl asuser' "$config_nix" || true)
+event_sudo_line=$(sed -n "/serviceEventAsPrimaryUser = pkgs.writeShellScript/,/^  '';/p" "$config_nix" | grep '/usr/bin/sudo' || true)
+check "guard premise: as_user definition found" test -n "$as_user_line"
+check "guard premise: serviceEventAsPrimaryUser sudo found" test -n "$event_sudo_line"
+check "as_user sets the user's HOME (sudo -H)" grep -q -- 'sudo -H -u' <<<"$as_user_line"
+check "serviceEventAsPrimaryUser sets the user's HOME (sudo -H)" grep -q -- 'sudo -H -u' <<<"$event_sudo_line"
+
 if [ "$failures" -ne 0 ]; then
   echo "$failures system activation helper test(s) failed" >&2
   exit 1

@@ -67,16 +67,21 @@ REAL_GIT="$(command -v git)"
 # the nix build sandbox (#1404), so the stub failed with "bad interpreter"
 # and every git call -- including the reflog-expire parse probe -- took the
 # stub down with it.
+# The driver runs \`git -C <repo> maintenance start\`, so the stub looks
+# past one leading -C pair and logs the directory it was given.
 cat > "$STUB_DIR/git" <<EOF
 #!$(command -v bash)
+stub_dir=""
+if [ "\${1:-}" = "-C" ]; then stub_dir="\${2:-}"; set -- "\${@:3}"; fi
 if [ "\${1:-}" = "maintenance" ] && [ "\${2:-}" = "start" ]; then
-  [ -n "\${GIT_STUB_MAINT_START_LOG:-}" ] && echo "maintenance start" >> "\$GIT_STUB_MAINT_START_LOG"
+  [ -n "\${GIT_STUB_MAINT_START_LOG:-}" ] && echo "maintenance start \$stub_dir" >> "\$GIT_STUB_MAINT_START_LOG"
   if [ "\${GIT_STUB_MAINT_START_RC:-0}" != "0" ]; then
     echo "stub git: maintenance start failed" >&2
     exit "\$GIT_STUB_MAINT_START_RC"
   fi
   exit 0
 fi
+if [ -n "\$stub_dir" ]; then exec "$REAL_GIT" -C "\$stub_dir" "\$@"; fi
 exec "$REAL_GIT" "\$@"
 EOF
 chmod +x "$STUB_DIR/git"
@@ -245,7 +250,11 @@ case "$OUT" in
 esac
 
 # --- plain --system still installs (#1718) ---
-run --system
+# From inside a fixture repository: the install step needs one (it runs
+# where it is, or from a registered repository), and the suite's own cwd
+# is not a repository in the nix build sandbox.
+(cd "$VALID/repo1" && bash "$SCRIPT" --system >"$TMP_ROOT/out" 2>"$TMP_ROOT/err"); STATUS=$?
+OUT="$(cat "$TMP_ROOT/out")"; ERR="$(cat "$TMP_ROOT/err")"
 [ "$STATUS" -eq 0 ] || fail "plain --system exited $STATUS (want 0)"
 if [ -s "$STUB_LOG" ]; then
   echo "ok: plain --system still installs the scheduler"
@@ -490,6 +499,40 @@ echo "ok: driver on healthy repo exits 0"
 # stub block): GIT_STUB_MAINT_START_RC controls the install step.
 export HOME="$TMP_ROOT/home-sched"
 mkdir -p "$HOME"
+# Activation runs the driver from /, outside any repository; run these
+# from a directory that is not one, and register the fixture repo so the
+# install step has a repository to run from.
+NONREPO="$TMP_ROOT/not-a-repo"
+mkdir -p "$NONREPO"
+SUITE_CWD=$(pwd)
+cd "$NONREPO"
+
+# No repository registered and none at the cwd: nothing to install timers
+# for, so the step is skipped (not failed) and maintenance start never runs.
+export GIT_STUB_MAINT_START_LOG="$TMP_ROOT/maint-start.log"
+rm -f "$GIT_STUB_MAINT_START_LOG"
+export GIT_STUB_MAINT_START_RC=0
+run --system
+[ "$STATUS" -eq 0 ] || fail "no-registered-repo --system run exited $STATUS (stderr: $ERR)"
+case "$OUT" in
+  *"no registered repository to install timers from"*) echo "ok: no registered repo outside a repo skips the scheduler install" ;;
+  *) fail "no-registered-repo run did not report the skipped install (got: $OUT)" ;;
+esac
+[ ! -s "$GIT_STUB_MAINT_START_LOG" ] || fail "maintenance start ran with nothing registered"
+
+"$REAL_GIT" config --global --add maintenance.repo "$REG/r1"
+
+# A registered repository, cwd outside any repository (as in activation):
+# maintenance start runs from the registered repository.
+rm -f "$GIT_STUB_MAINT_START_LOG"
+run --system
+[ "$STATUS" -eq 0 ] || fail "registered-repo --system run from a non-repo cwd exited $STATUS (stderr: $ERR)"
+if grep -qx "maintenance start $REG/r1" "$GIT_STUB_MAINT_START_LOG" 2>/dev/null; then
+  echo "ok: maintenance start runs from the registered repo when the cwd is not a repo"
+else
+  fail "maintenance start did not run from the registered repo (log: $(cat "$GIT_STUB_MAINT_START_LOG" 2>/dev/null))"
+fi
+unset GIT_STUB_MAINT_START_LOG
 
 # Failing stub, --system: git's own error is not discarded, the step is
 # named on stderr, and the run exits non-zero.
@@ -510,9 +553,11 @@ export GIT_STUB_MAINT_START_RC=0
 run --system
 [ "$STATUS" -eq 0 ] || fail "scheduler-success --system run exited $STATUS (stderr: $ERR)"
 case "$OUT" in
-  *"scheduler: 0 launchd agents, 0 repos registered"*) echo "ok: successful maintenance start keeps the unchanged scheduler line, exits 0" ;;
+  *"scheduler: 0 launchd agents, 1 repos registered"*) echo "ok: successful maintenance start keeps the unchanged scheduler line, exits 0" ;;
   *) fail "scheduler success run changed the scheduler line (got: $OUT)" ;;
 esac
+
+cd "$SUITE_CWD"
 
 # Full scope: a failing scheduler install drives a non-zero exit even
 # when registration and per-repo maintenance over the fixture succeed.

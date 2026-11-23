@@ -33,13 +33,40 @@
 #                        macOS clonefile copy the recipe has always
 #                        used; word-split on purpose)
 #
-# Run: ./opencode-db-backup.sh
+# Run: ./opencode-db-backup.sh (takes no arguments; --help prints usage)
 # It is run by the flake check `opencode-db-backup-tests`
 # (via opencode-db-backup.test.sh) and by the just recipe
 # `opencode-db-backup`.
 set -euo pipefail
 
 die() { echo "opencode-db-backup: $1" >&2; exit 1; }
+
+usage() { echo "usage: opencode-db-backup.sh"; }
+
+# Argument contract: this script takes no arguments (#2063). Any
+# argument — a typo, or --help with trailing words — is rejected by
+# name, with usage on stderr and exit 2, before any staging directory
+# or sqlite work. Bare -h/--help prints usage and exits 0 with no
+# side effects. `just opencode-db-backup` passes nothing, so strict
+# parsing changes no valid invocation.
+if [ $# -gt 0 ]; then
+  case "$1" in
+    -h | --help)
+      if [ $# -gt 1 ]; then
+        echo "opencode-db-backup: unexpected argument: $2" >&2
+        usage >&2
+        exit 2
+      fi
+      usage
+      exit 0
+      ;;
+    *)
+      echo "opencode-db-backup: unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+fi
 
 db="${OPENCODE_DB_PATH:-$HOME/.local/share/opencode/opencode.db}"
 sqlite3_bin="${OPENCODE_DB_SQLITE3:-/usr/bin/sqlite3}"

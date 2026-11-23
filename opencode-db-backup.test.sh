@@ -100,6 +100,35 @@ run_backup() {
 ts_dirs() { ls "$1" 2>/dev/null | grep -E '^[0-9]{8}T[0-9]{6}$' | wc -l | tr -d ' '; }
 partial_dirs() { ls -a "$1" 2>/dev/null | grep -c 'partial$' | tr -d ' '; }
 
+# --- argument contract (#2063) ----------------------------------------
+# The parser runs before any staging or sqlite work: a scratch DB path
+# is used so that falling through to backup logic would fail loudly
+# instead of passing silently.
+before=$failures
+D="$WORK/argv"
+out="$(OPENCODE_DB_PATH="$D/opencode.db" bash "$BACKUP" --help 2>&1)"
+rc=$?
+[ "$rc" -eq 0 ] || fail "--help exited $rc: $out"
+printf '%s' "$out" | grep -q "usage: opencode-db-backup.sh" || fail "--help printed no usage: $out"
+[ ! -e "$D" ] || fail "--help created state under the backup root"
+[ "$failures" -eq "$before" ] && ok "--help prints usage, exits 0, touches nothing"
+before=$failures
+out="$(OPENCODE_DB_PATH="$D/opencode.db" bash "$BACKUP" extra-arg 2>&1)"
+rc=$?
+[ "$rc" -eq 2 ] || fail "extra arg exited $rc, expected 2: $out"
+printf '%s' "$out" | grep -q "unknown argument: extra-arg" || fail "extra arg not named: $out"
+printf '%s' "$out" | grep -q "usage: opencode-db-backup.sh" || fail "extra arg printed no usage: $out"
+printf '%s' "$out" | grep -q "no database" && fail "extra arg fell through to backup logic: $out"
+[ ! -e "$D" ] || fail "extra arg created state under the backup root"
+[ "$failures" -eq "$before" ] && ok "extra argument is rejected by name, exits 2, touches nothing"
+before=$failures
+out="$(OPENCODE_DB_PATH="$D/opencode.db" bash "$BACKUP" --help extra 2>&1)"
+rc=$?
+[ "$rc" -eq 2 ] || fail "--help extra exited $rc, expected 2: $out"
+printf '%s' "$out" | grep -q "unexpected argument: extra" || fail "--help extra not named: $out"
+[ ! -e "$D" ] || fail "--help extra created state under the backup root"
+[ "$failures" -eq "$before" ] && ok "--help with a trailing argument is rejected by name, exits 2"
+
 # --- happy path ------------------------------------------------------
 before=$failures
 D="$WORK/happy"

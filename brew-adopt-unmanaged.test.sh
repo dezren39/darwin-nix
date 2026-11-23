@@ -301,6 +301,7 @@ check "fresh machine: onedrive fresh-install note" out_has "brew bundle will ins
 reset_state
 run_args drewry.pope extra-arg
 check "extra arg: exit 2" test $rc -eq 2
+check "extra arg: names the offending argument" out_has "unexpected argument: extra-arg"
 check "extra arg: usage printed" out_has "usage: brew-adopt-unmanaged.sh PRIMARY_USER"
 check "extra arg: no stub calls" test ! -s "$tmp/state/calls"
 
@@ -322,6 +323,12 @@ run_args -h
 check "-h: exit 0" test $rc -eq 0
 check "-h: usage printed" out_has "usage: brew-adopt-unmanaged.sh PRIMARY_USER"
 check "-h: no stub calls" test ! -s "$tmp/state/calls"
+reset_state
+run_args --help extra
+check "--help+extra: exit 2" test $rc -eq 2
+check "--help+extra: names the offending argument" out_has "unexpected argument: extra"
+check "--help+extra: usage printed" out_has "usage: brew-adopt-unmanaged.sh PRIMARY_USER"
+check "--help+extra: no stub calls" test ! -s "$tmp/state/calls"
 
 # 14. GNU stat first on PATH (as during darwin activation): the owner is
 # still read correctly, so a root-owned bundle is chowned and adopted.

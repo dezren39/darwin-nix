@@ -1040,8 +1040,14 @@ brew_cask_drift_check() {
   # entry would then delete a working app. visual-studio-code is exactly that
   # case today.
   _dead=""
+  # CLEAN_APPS_DIR is a test seam (same pattern as VSCODE_INSIDERS_APP_DIR in
+  # patch-vscode-insiders.sh): production always uses the /Applications
+  # default. The extraction must span spaces -- the old [^ ]* class could not
+  # match a multi-word bundle name (Visual Studio Code.app), so those casks
+  # extracted empty and were silently skipped by the MISSING check (#1902).
+  _apps_dir="${CLEAN_APPS_DIR:-/Applications}"
   for _c in $_cask_list; do
-    _app=$(as_user "$_b" info --cask "$_c" 2>/dev/null | grep -oE '/Applications/[^ ]*\.app' | head -1 || true)
+    _app=$(as_user "$_b" info --cask "$_c" 2>/dev/null | grep -oE "$_apps_dir/.*\.app" | head -1 || true)
     [ -n "$_app" ] && [ ! -d "$_app" ] && _dead="$_dead $_c"
   done
   [ -n "$_dead" ] && { warn "casks installed but the app is MISSING from disk:"; printf '     %s\n' $_dead; }

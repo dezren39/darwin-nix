@@ -158,7 +158,7 @@ rec {
       # mcpx-src) carry every fix this flake used to pin forward
       # (opencode #1547 route overrides, the #1791 node_modules hash,
       # code #11443/#11453/#11476 for mcpx on aarch64-darwin), as of
-      # openchamber 877cf35 / opencode 0a8dbad / code d3a0db8 (2026-11-18).
+      # openchamber 598b455 / opencode ce61597 / code 6f4696b (2026-11-23).
       # If the chain regresses, pin here again with
       # inputs.opencode.url / inputs.opencode.inputs.mcpx-src.url.
     };

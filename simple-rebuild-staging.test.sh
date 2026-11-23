@@ -72,8 +72,8 @@ make_fixture() { # $1 = fixture dir
   grep -q "\"$fx/bin/nix\" --extra-experimental-features" "$fx/simple-rebuild.sh"
   check "fixture: nix build invocation redirected to the stub" $?
 
-  cat > "$fx/bin/nix" <<'EOF'
-#!/usr/bin/env bash
+  printf '#!%s\n' "$(command -v bash)" > "$fx/bin/nix"
+  cat >> "$fx/bin/nix" <<'EOF'
 # Stub for `nix build`: prove with the real nix that the flake can
 # see and read BOTH new inputs at build time (an unregistered file
 # makes the eval fail), then fake the build result.
@@ -87,9 +87,6 @@ chmod +x "$SR_TEST_FAKE_SYSTEM/sw/bin/darwin-rebuild"
 ln -sfn "$SR_TEST_FAKE_SYSTEM" ./result
 printf 'built\n' >> "$SR_TEST_MARKER"
 EOF
-  # The build sandbox has no /usr/bin/env: point the stub's shebang
-  # at the same bash that is running this suite.
-  sed -i "1s|^#!/usr/bin/env bash\$|#!$(command -v bash)|" "$fx/bin/nix"
   chmod +x "$fx/bin/nix"
 
   # gh stub: refresh_nix_access_token's `gh auth token` must take its

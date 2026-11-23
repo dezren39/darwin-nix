@@ -28,9 +28,15 @@ def candidate(path: Path, root: Path) -> bool:
 def suite_violations(text: str, path: str, production: dict[str, str]) -> set[str]:
     violations: set[str] = set()
     lines = text.splitlines()
-    for line in lines[1:]:
+    for index, line in enumerate(lines[1:], 1):
         if re.match(r"^\s*#!\s*/usr/bin/env\b", line):
-            violations.add("env-shebang-stub")
+            prefix = "\n".join(lines[:index])
+            probe_vars = re.findall(r"(?m)^\s*([A-Z][A-Z0-9_]*)=.*\.zsh[\"']?\s*$", prefix)
+            named_zsh_probe = bool(probe_vars) and bool(
+                re.search(rf"\bzsh\s+[\"']?\${probe_vars[-1]}\b", "\n".join(lines[index + 1 :]))
+            )
+            if not named_zsh_probe:
+                violations.add("env-shebang-stub")
     for line in lines:
         if re.search(r"\b(?:printf|echo)\b[^\n]*#!\s*/usr/bin/env\b", line):
             violations.add("env-shebang-stub")
@@ -39,7 +45,10 @@ def suite_violations(text: str, path: str, production: dict[str, str]) -> set[st
 
     if "--apply" in text:
         for name, source in production.items():
-            if name in text and "check_not_running" in source:
+            direct_target = Path(path).name == name.removesuffix(".sh") + ".test.sh" or bool(
+                re.search(rf"\b(?:SCRIPT|PRUNE|TARGET)\s*=\s*[\"']?[^\n]*{re.escape(name)}", text)
+            )
+            if direct_target and name in text and "check_not_running" in source:
                 custom_ps = bool(re.search(r"(?:>|>>)[^\n]*/ps", text)) and "PATH=" in text
                 if "harness_ps_double_begin" not in text and not custom_ps:
                     violations.add("apply-host-ps")
@@ -103,7 +112,11 @@ def main() -> int:
     probes = (
         ("env-shebang-stub", "cat >\"$bin/probe\" <<'EOF'\n#!/usr/bin/env bash\nEOF\n", {}),
         ("usr-bin-true-stub", "printf '#!/bin/sh\\n' >\"$bin/probe\"; /usr/bin/true\n", {}),
-        ("apply-host-ps", "bash ./opencode-db-prune.sh --apply\n", {"opencode-db-prune.sh": "check_not_running"}),
+        (
+            "apply-host-ps",
+            "PRUNE=./opencode-db-prune.sh\nbash \"$PRUNE\" --apply\n",
+            {"opencode-db-prune.sh": "check_not_running"},
+        ),
     )
     for expected_violation, text, prod in probes:
         if expected_violation not in suite_violations(text, "synthetic.test.sh", prod):

@@ -1147,13 +1147,33 @@ rec {
               cp $src/clean.sh $src/clean.test.sh $src/git-discover-repos $src/var-folders-clean.sh ./
               mkdir -p lib
               cp $src/lib/common.sh lib/
+              cp $src/lib/test-harness.sh lib/
               cp $src/lib/arg-probe.sh lib/
               cp $src/lib/outcome-probe.sh lib/
               chmod u+w ./clean.sh ./clean.test.sh ./git-discover-repos ./var-folders-clean.sh
               patchShebangs ./git-discover-repos
               export HOME="$TMPDIR/home"
               mkdir -p "$HOME"
+              export HARNESS_CHECK=1
               bash ./clean.test.sh
+              touch $out
+            '';
+        # #1475 phase 2: keep the suite inventory complete, check source
+        # spellings that can make stubs fail in a Nix sandbox, and exercise
+        # the shared stat double's BSD forms and GNU -c rejection.
+        test-harness-conformance =
+          pkgs.runCommandLocal "test-harness-conformance"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.coreutils
+                pkgs.python3
+              ];
+              src = inputs.self;
+            }
+            ''
+              export HARNESS_CHECK=1
+              ${pkgs.python3}/bin/python3 $src/scripts/test-harness-conformance.py $src
               touch $out
             '';
         # #1077: pkgs/adopt/adopt.test.sh was run by nothing — no flake

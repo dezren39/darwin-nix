@@ -21,6 +21,9 @@ set -uo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="$SELF_DIR/clean.sh"
+# Shared environment and platform-double harness (design #1473 phase 2).
+# shellcheck source=lib/test-harness.sh
+. "$SELF_DIR/lib/test-harness.sh"
 # Shared conformance probe matrix helpers (#1146, design #1145 phase 1).
 # shellcheck source=lib/arg-probe.sh
 . "$SELF_DIR/lib/arg-probe.sh"
@@ -29,10 +32,8 @@ SCRIPT="$SELF_DIR/clean.sh"
 . "$SELF_DIR/lib/outcome-probe.sh"
 
 
-TMP_ROOT="$(mktemp -d)"
-trap 'rm -rf "$TMP_ROOT"' EXIT
-export HOME="$TMP_ROOT/home"
-mkdir -p "$HOME"
+harness_init
+TMP_ROOT="$HARNESS_ROOT"
 # The control sweeps $HOME/.local/share/opencode/tmp; keep it absent so
 # the sweep is a no-op regardless of the caller's real home.
 unset DOCKER_AGE_DAYS DEPTH_LIMIT
@@ -227,52 +228,14 @@ esac
 # clean.sh is a macOS tool, but three sites used GNU-only `stat -c`;
 # BSD stat rejects -c, 2>/dev/null swallowed it, and the values came
 # back empty: the pytest newest-run guard never fired and the
-# unknown-scratch report always printed "unknown" dates. The shim
-# below rejects -c exactly as macOS stat does and implements the BSD
-# -f forms clean.sh's portable helpers use, translating them to the
-# real (GNU) stat captured before the shim enters PATH. (The shim is
-# test-only: using GNU date/stat internally to model BSD output is
-# the point -- production clean.sh never sees it.)
-REAL_STAT="$(command -v stat)"
-SHIM_DIR="$TMP_ROOT/bsd-shim"
-mkdir -p "$SHIM_DIR"
+# unknown-scratch report always printed "unknown" dates. The shared
+# harness double rejects -c exactly as macOS stat does and implements
+# the BSD -f forms clean.sh's portable helpers use.
+harness_stat_double_begin || { fail "could not start shared stat double"; exit 1; }
 LSOF_STUB_DIR="$TMP_ROOT/lsof-stub"
 mkdir -p "$LSOF_STUB_DIR"
 printf '#!/bin/sh\nexit 1\n' > "$LSOF_STUB_DIR/lsof"
 chmod +x "$LSOF_STUB_DIR/lsof"
-# Executed by name via PATH, so the shebang must name a real interpreter: /usr/bin/env does not exist in the nix build sandbox (#1099). Resolved bash works in both sandbox and direct runs.
-echo "#!$(command -v bash)" > "$SHIM_DIR/stat"
-cat >> "$SHIM_DIR/stat" <<'SHIM_EOF'
-[ -n "${REAL_STAT:-}" ] || exit 1
-for _a in "$@"; do
-  if [ "$_a" = "-c" ]; then echo "stat: illegal option -- c" >&2; exit 1; fi
-done
-_fmt=""; _tfmt=""; _file=""
-while [ $# -gt 0 ]; do
-  case "$1" in
-    -f) _fmt="$2"; shift 2 ;;
-    -t) _tfmt="$2"; shift 2 ;;
-    *) _file="$1"; shift ;;
-  esac
-done
-[ -n "$_fmt" ] && [ -n "$_file" ] || exit 1
-case "$_fmt" in
-  '%m') "$REAL_STAT" -c '%Y' "$_file" ;;
-  '%u') "$REAL_STAT" -c '%u' "$_file" ;;
-  '%SB'|'%Sm')
-    if [ "$_fmt" = '%SB' ]; then
-      _epoch="$("$REAL_STAT" -c '%W' "$_file" 2>/dev/null)"
-      # Filesystems without btime report %W as 0; a BSD file always
-      # has a birth time, so model it with the mtime there.
-      case "$_epoch" in ''|*[!0-9]*|0) _epoch="$("$REAL_STAT" -c '%Y' "$_file")" ;; esac
-    else
-      _epoch="$("$REAL_STAT" -c '%Y' "$_file")"
-    fi
-    date -d "@$_epoch" +"${_tfmt:-%Y-%m-%d %H:%M:%S}" ;;
-  *) echo "stat shim: unsupported -f format: $_fmt" >&2; exit 1 ;;
-esac
-SHIM_EOF
-chmod +x "$SHIM_DIR/stat"
 
 SCRATCH_BASE="$HOME/.local/share/opencode/tmp"
 mkdir -p "$SCRATCH_BASE"
@@ -286,8 +249,9 @@ dd if=/dev/zero of="$UENTRY/blob" bs=1024 count=1536 2>/dev/null
 touch -d '2020-01-02 03:04:05' "$UENTRY"
 for mode in bsd gnu; do
   if [ "$mode" = "bsd" ]; then
-    OUT="$(REAL_STAT="$REAL_STAT" PATH="$LSOF_STUB_DIR:$SHIM_DIR:$PATH" UNKNOWN_SCRATCH_MIN_MB=1 UNKNOWN_SCRATCH_STALE_DAYS=1 bash "$SCRIPT" --only-unknown-scratch 2>"$TMP_ROOT/err")"; STATUS=$?
+    OUT="$(PATH="$LSOF_STUB_DIR:$PATH" UNKNOWN_SCRATCH_MIN_MB=1 UNKNOWN_SCRATCH_STALE_DAYS=1 bash "$SCRIPT" --only-unknown-scratch 2>"$TMP_ROOT/err")"; STATUS=$?
   else
+    harness_stat_double_end
     OUT="$(PATH="$LSOF_STUB_DIR:$PATH" UNKNOWN_SCRATCH_MIN_MB=1 UNKNOWN_SCRATCH_STALE_DAYS=1 bash "$SCRIPT" --only-unknown-scratch 2>"$TMP_ROOT/err")"; STATUS=$?
   fi
   ERR="$(cat "$TMP_ROOT/err")"
@@ -303,6 +267,7 @@ for mode in bsd gnu; do
     *) echo "ok: unknown-scratch ($mode stat) report shows a created date" ;;
   esac
 done
+harness_stat_double_end
 
 # ─── Unknown-scratch sweep honors VAR_FOLDERS_ROOT (#1865) ───────
 # Both unknown-scratch scans (the --only-unknown-scratch early exit
@@ -351,8 +316,10 @@ touch -d '6 hours ago' "$PTDIR/pytest-2"
 ln -s pytest-2 "$PTDIR/pytest-current"
 for mode in bsd gnu; do
   if [ "$mode" = "bsd" ]; then
-    OUT="$(REAL_STAT="$REAL_STAT" PATH="$SHIM_DIR:$PATH" PYTEST_KEEP_HOURS=4 TMPDIR="$SCRATCH_BASE" bash "$SCRIPT" --system --dry-run 2>"$TMP_ROOT/err")"; STATUS=$?
+    harness_stat_double_begin || fail "could not restart shared stat double"
+    OUT="$(PATH="$PATH" PYTEST_KEEP_HOURS=4 TMPDIR="$SCRATCH_BASE" bash "$SCRIPT" --system --dry-run 2>"$TMP_ROOT/err")"; STATUS=$?
   else
+    harness_stat_double_end
     OUT="$(PYTEST_KEEP_HOURS=4 TMPDIR="$SCRATCH_BASE" bash "$SCRIPT" --system --dry-run 2>"$TMP_ROOT/err")"; STATUS=$?
   fi
   ERR="$(cat "$TMP_ROOT/err")"
@@ -378,6 +345,7 @@ for mode in bsd gnu; do
   fi
   [ -e "$PTDIR/pytest-current" ] || fail "pytest guard ($mode stat): pytest-current dangling after the run"
 done
+harness_stat_double_end
 
 # ─── --tmpdir sweep failure surfaces in clean.sh's result (#1270) ──
 # var-folders-clean.sh exits 1 naming failed deletions (#1262), but

@@ -18,3 +18,12 @@ README itself: a 10-line stub naming none of the daily commands or the
 maintained orientation docs (ARCHITECTURE.md, ROADMAP.md, planning/).
 **Action:** On future Palette runs here, check front-door/docs surfaces
 first; re-survey scripts only for ones added since the inventory.
+
+## 2026-11-23 - The skip contract must cover the read step, not just validation
+**Learning:** laptop-agent's restore path had the fleet's established skip
+contract (one stderr line naming the spool and reason) in the validation
+layer but not the read layer: unreadable/invalid-JSON meta.json hit
+`except (OSError, ValueError): continue` with no log line (#2084), so a job
+vanished with zero operator-visible feedback while siblings restored.
+**Action:** When a loader has a skip-with-reason contract, audit the
+read/parse step too -- a silent `continue` there defeats the contract.

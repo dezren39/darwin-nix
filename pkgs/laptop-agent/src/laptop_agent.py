@@ -522,7 +522,15 @@ def load_persisted_jobs():
             continue
         try:
             meta = json.loads((d / "meta.json").read_text())
-        except (OSError, ValueError):
+        except ValueError as e:
+            print(f"laptop-agent: skipping persisted job {d}: "
+                  f"invalid JSON in meta.json ({e})",
+                  file=sys.stderr, flush=True)
+            continue
+        except OSError as e:
+            print(f"laptop-agent: skipping persisted job {d}: "
+                  f"cannot read meta.json ({e})",
+                  file=sys.stderr, flush=True)
             continue
         job, persist, reason = _restore_persisted_job(meta, d.name)
         if job is None:

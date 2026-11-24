@@ -1170,6 +1170,7 @@ rec {
               mkdir -p lib
               cp $src/lib/common.sh lib/
               cp $src/lib/arg-probe.sh lib/
+              cp $src/lib/git-trusted-roots.sh lib/
               chmod u+w ./git-discover-repos ./git-discover-repos.test.sh
               patchShebangs ./git-discover-repos
               export HOME="$TMPDIR/home"
@@ -1197,6 +1198,7 @@ rec {
               cp $src/clean.sh $src/clean.test.sh $src/git-discover-repos $src/var-folders-clean.sh ./
               mkdir -p lib
               cp $src/lib/common.sh lib/
+              cp $src/lib/git-trusted-roots.sh lib/
               cp $src/lib/test-harness.sh lib/
               cp $src/lib/arg-probe.sh lib/
               cp $src/lib/outcome-probe.sh lib/
@@ -1206,6 +1208,33 @@ rec {
               mkdir -p "$HOME"
               export HARNESS_CHECK=1
               bash ./clean.test.sh
+              touch $out
+            '';
+        # #2012: git-safe-directory.test.sh pins the scoped safe.directory
+        # trust roots — no star wildcard in gitSettings.nix, the runtime
+        # twin, or either script override; the nix list and the fragment
+        # agree; discovery really passes the scoped flags to git; docs no
+        # longer describe a wildcard.
+        git-safe-directory-tests =
+          pkgs.runCommandLocal "git-safe-directory-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.git
+              ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/git-discover-repos $src/clean.sh $src/gitSettings.nix $src/ARCHITECTURE.md $src/git-safe-directory.test.sh ./
+              mkdir -p lib
+              cp $src/lib/common.sh lib/
+              cp $src/lib/arg-probe.sh lib/
+              cp $src/lib/git-trusted-roots.sh lib/
+              chmod u+w ./git-discover-repos ./clean.sh ./git-safe-directory.test.sh
+              patchShebangs ./git-discover-repos
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./git-safe-directory.test.sh
               touch $out
             '';
         # #1475 phase 2: keep the suite inventory complete, check source
@@ -1275,6 +1304,7 @@ rec {
               mkdir -p lib
               cp $src/lib/common.sh lib/
               cp $src/lib/arg-probe.sh lib/
+              cp $src/lib/git-trusted-roots.sh lib/
               chmod u+w ./git-maintain-repos ./git-maintain-repos.test.sh ./git-discover-repos
               patchShebangs ./git-discover-repos ./git-maintain-repos
               export HOME="$TMPDIR/home"
@@ -1314,6 +1344,7 @@ rec {
               mkdir -p lib
               cp $src/lib/common.sh lib/
               cp $src/lib/arg-probe.sh lib/
+              cp $src/lib/git-trusted-roots.sh lib/
               chmod u+w ./spotlight-exclude-artifacts ./spotlight-exclude-artifacts.test.sh ./git-discover-repos
               patchShebangs ./git-discover-repos
               export HOME="$TMPDIR/home"
@@ -1417,6 +1448,7 @@ rec {
               cp $src/clean.sh $src/opencode-db-backup-prune.sh $src/git-discover-repos $src/git-maintain-repos $src/var-folders-clean.sh $src/casks.nix $src/masApps.nix ./
               mkdir -p lib
               cp $src/lib/common.sh lib/
+              cp $src/lib/git-trusted-roots.sh lib/
               chmod u+w ./opencode-prune-report.test.sh
               export HOME="$TMPDIR/home"
               mkdir -p "$HOME"

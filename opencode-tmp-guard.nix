@@ -33,6 +33,12 @@
 # abandoned test repos still age out; ordinary temp files are left to the
 # sweep.
 #
+# A discovery scan or metadata refresh that fails is never silent (#2042):
+# the scan's exit status is checked and a failure logs a WARN naming the
+# scan root (the repo list may be partial), and a repo counts as refreshed
+# only when its refresh pass succeeds -- a failed one logs a WARN naming
+# the repo and the run ends by reporting that protection is incomplete.
+#
 # clean.sh is unaffected: touch -a changes access time (and ctime) only, and
 # every age test in clean.sh reads modification time (-mtime, -mmin, date -r,
 # stat %y/%Y); git-maintain-repos and git-discover-repos use no timestamps.
@@ -80,17 +86,22 @@ let
     # never refreshed, which is exactly the metadata the sweep takes first.
     # Cost stays bounded by pruning: .git itself is never descended into,
     # and node_modules trees are skipped whole.
-    repos=$(/usr/bin/find "$T" -name node_modules -prune -o -name .git -prune -print 2>/dev/null)
+    repos=$(/usr/bin/find "$T" -name node_modules -prune -o -name .git -prune -print 2>/dev/null) || log "WARN repository discovery under $T failed (find exited $?); the repo list may be partial, so some repos may be unprotected"
 
     # .git metadata, every repo, every run, regardless of age. It is tiny, and
     # it is what the sweep took first (HEAD, config, loose refs, info/exclude,
     # a worktree's .git pointer file); without it git no longer recognises the
     # repo at all. -h so a symlink's own atime is refreshed, not its target's.
     meta=0
+    meta_failed=0
     while IFS= read -r g; do
       [ -n "$g" ] || continue
-      /usr/bin/find "$g" -exec /usr/bin/touch -a -h {} + 2>/dev/null
-      meta=$((meta + 1))
+      if /usr/bin/find "$g" -exec /usr/bin/touch -a -h {} + 2>/dev/null; then
+        meta=$((meta + 1))
+      else
+        meta_failed=$((meta_failed + 1))
+        log "WARN .git metadata refresh failed for $g; that repo may be unprotected"
+      fi
     done <<EOF
     $repos
     EOF
@@ -110,6 +121,7 @@ let
     $repos
     EOF
     [ "$meta" -eq 0 ] || log "refreshed .git metadata in $meta repo(s), working files in $refreshed (changed <14d), under $T"
+    [ "$meta_failed" -eq 0 ] || log "WARN .git metadata refresh failed for $meta_failed repo(s) under $T; protection is incomplete"
   '';
 in
 {

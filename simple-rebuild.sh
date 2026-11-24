@@ -372,6 +372,13 @@ phase_build() {
   # script on a nonzero one before the stale-./result message below can
   # tell it apart from this case), then require the same executable
   # phase_activate checks for, before anything is read from ./result.
+  # Clear any ./result from an earlier build first. A zero-exit build that
+  # leaves an old out-link in place (nothing rebuilt, or the link not written)
+  # would otherwise pass the shape check below as a fresh build of that prior
+  # system, and phase_activate could then activate it (#2030). With the link
+  # removed, whatever ./result exists after a zero-exit build was created by
+  # this invocation.
+  rm -f ./result
   local build_status=0
   nix --extra-experimental-features 'nix-command flakes' \
     build ".#darwinConfigurations.$(hostname -s).system" --keep-going --out-link ./result \

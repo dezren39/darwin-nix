@@ -31,7 +31,7 @@ name: agents
   workflow_dispatch:
     inputs:
       task:
-        description: "Task to dispatch"
+        description: "Task to dispatch (all = bolt + palette + suggestions)"
         required: false
         default: all
         type: choice
@@ -216,6 +216,9 @@ jobs:
         env:
           RESOLVED_REPO: ${{ steps.resolve.outputs.repo }}
           RESOLVED_TASKS: ${{ steps.resolve.outputs.tasks }}
+          RESOLVED_HAS_BOLT: ${{ steps.resolve.outputs.has_bolt }}
+          RESOLVED_HAS_PALETTE: ${{ steps.resolve.outputs.has_palette }}
+          RESOLVED_HAS_SUGGESTIONS: ${{ steps.resolve.outputs.has_suggestions }}
           BOLT_TASK_ID: ${{ steps.bolt.outputs.task_id }}
           BOLT_SESSION_ID: ${{ steps.bolt.outputs.session_id }}
           BOLT_ISSUE_NUMBER: ${{ steps.bolt.outputs.issue_number }}
@@ -230,17 +233,40 @@ jobs:
           SUGGESTIONS_ISSUE_URL: ${{ steps.suggestions.outputs.issue_url }}
         run: |
           set -euo pipefail
-          # A skipped task step leaves all of its outputs blank;
-          # they are reported blank here, exactly as passed in.
+          # One row per task with an explicit Status. The three cases
+          # used to look identical in this table (all-blank cells):
+          # not part of this run, dispatched, and dispatched but
+          # returned nothing (worth a second look). The status is
+          # derived from the resolve step's per-task booleans plus
+          # whether a task_id came back; the ids themselves are still
+          # reported verbatim, and the issue renders as a Markdown
+          # link when its URL is known instead of a bare URL.
+          row() {
+            local name="$1" selected="$2" task_id="$3" session_id="$4" issue_number="$5" issue_url="$6"
+            local status issue
+            if [ "$selected" != "true" ]; then
+              status="skipped - not in this run"
+            elif [ -n "$task_id" ]; then
+              status="dispatched"
+            else
+              status="WARNING: ran but returned no task_id"
+            fi
+            if [ -n "$issue_url" ]; then
+              issue="[#${issue_number}](${issue_url})"
+            else
+              issue="-"
+            fi
+            echo "| ${name} | ${status} | ${task_id:--} | ${session_id:--} | ${issue} |"
+          }
           {
             echo "## agents — ${RESOLVED_REPO}"
             echo ""
             echo "Resolved tasks: ${RESOLVED_TASKS}"
             echo ""
-            echo "| Task | task_id | session_id | issue_number | issue_url |"
+            echo "| Task | Status | task_id | session_id | issue |"
             echo "| --- | --- | --- | --- | --- |"
-            echo "| bolt | ${BOLT_TASK_ID} | ${BOLT_SESSION_ID} | ${BOLT_ISSUE_NUMBER} | ${BOLT_ISSUE_URL} |"
-            echo "| palette | ${PALETTE_TASK_ID} | ${PALETTE_SESSION_ID} | ${PALETTE_ISSUE_NUMBER} | ${PALETTE_ISSUE_URL} |"
-            echo "| suggestions | ${SUGGESTIONS_TASK_ID} | ${SUGGESTIONS_SESSION_ID} | ${SUGGESTIONS_ISSUE_NUMBER} | ${SUGGESTIONS_ISSUE_URL} |"
+            row bolt "$RESOLVED_HAS_BOLT" "$BOLT_TASK_ID" "$BOLT_SESSION_ID" "$BOLT_ISSUE_NUMBER" "$BOLT_ISSUE_URL"
+            row palette "$RESOLVED_HAS_PALETTE" "$PALETTE_TASK_ID" "$PALETTE_SESSION_ID" "$PALETTE_ISSUE_NUMBER" "$PALETTE_ISSUE_URL"
+            row suggestions "$RESOLVED_HAS_SUGGESTIONS" "$SUGGESTIONS_TASK_ID" "$SUGGESTIONS_SESSION_ID" "$SUGGESTIONS_ISSUE_NUMBER" "$SUGGESTIONS_ISSUE_URL"
           } >> "$GITHUB_STEP_SUMMARY"
           echo "agents summary written for repo=${RESOLVED_REPO} tasks=${RESOLVED_TASKS}"

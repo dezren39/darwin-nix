@@ -169,9 +169,11 @@ if [ "$(search_calls)" = "0" ]; then
 else
   fail "no brew search calls (working) -- got $(search_calls)"
 fi
-printf 'Checking %s...\nbar\nChecking ~/Applications...\nFound 1 app(s) not installed via Homebrew.\n' "$APPS" > "$TMP_ROOT/expected"
+printf 'Checking %s...\nbar\nChecking ~/Applications...\nFound 1 app(s) not installed via Homebrew.\nTo bring one under management, add its cask to casks.nix (see the adoption notes there).\n' "$APPS" > "$TMP_ROOT/expected"
 check "working brew report includes summary after #1617 cleanup" \
   cmp -s "$TMP_ROOT/expected" "$TMP_ROOT/out"
+check "working brew report points at casks.nix for the next step" \
+  grep -q "casks.nix" "$TMP_ROOT/out"
 # --- #1897: the same app in both scan legs is listed and counted once ------
 # (The working fixture puts Bar.app in both $APPS and ~/Applications; the
 # pinned report above already shows bar once with a count of 1.)

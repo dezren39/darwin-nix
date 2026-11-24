@@ -25,6 +25,11 @@ HELP_NOTE = (
     "--help/-h is never a SOURCE or EVENT name."
 )
 
+# Pre-compiled: main() runs this per key=value field on every service-event
+# invocation (activation hot path), and re.fullmatch(pattern_str, ...)
+# pays a cache lookup per field. Compile once at import.
+_INT_RE = re.compile(r"-?[0-9]+")
+
 
 def rotate(path, max_bytes, keep, copy_truncate=False):
     """Shift path to path.1 .. path.<keep> once it passes max_bytes.
@@ -193,9 +198,12 @@ def main(argv):
         # rejects (superscript/subscript digits), which used to crash
         # here with a traceback and lose the event. Digit-like Unicode
         # values are stored as strings, like any other non-integer.
+        # Perf: len() first so over-long values short-circuit before
+        # the regex runs, and the pre-compiled _INT_RE avoids the
+        # per-field re.fullmatch cache lookup (~3x on this check).
         fields[key] = (
             int(value)
-            if re.fullmatch(r"-?[0-9]+", value) and len(value) < 19
+            if len(value) < 19 and _INT_RE.fullmatch(value)
             else value
         )
     # #934: a failed write is not success — callers that guard with

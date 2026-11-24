@@ -166,8 +166,15 @@ def main():
                     handled[pid] = time.time()
                     if grant(c) is None:
                         handled.pop(pid, None)
-                live_now = clients()
+                live_now = cl
                 if live_now is not None:
+                    # Prune from this tick's own snapshot instead of a
+                    # second clients() query: the extra fetch cost a full
+                    # hyprctl spawn + JSON parse per 1.2s tick (~19ms
+                    # measured on the laptop) for state one tick fresher.
+                    # A pid that vanishes mid-tick drops one tick later;
+                    # the 300s cooldown above suppresses re-grants meanwhile,
+                    # and grants only ever act on this same fresh snapshot.
                     live = {c.get("pid") for c in live_now}
                     handled = {p: t for p, t in handled.items() if p in live}
         except Exception as e:

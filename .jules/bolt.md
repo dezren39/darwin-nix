@@ -54,6 +54,10 @@
 
 **Action:** Ensure all pure URL and reference canonicalization helper functions used by graph and grouping keys are decorated with `@functools.lru_cache`.
 
+## 2026-11-24 - Reuse the tick snapshot for pruning in watcher loops
+**Learning:** `rd-picker-autogrant.py` main() called `clients()` (hyprctl spawn + JSON parse, ~19ms measured on the laptop) twice per 1.2s tick: once to find pickers, once more to prune the handled-pid set. Pruning from the tick's own pre-grant snapshot drops a vanished pid one tick later at most, and the 300s re-grant cooldown covers that window — the second fetch was pure overhead (~1.5% of a core for the whole session). A counting test pins it: 3 driven ticks cost 6 queries before, 3 after.
+**Action:** In fetch-act-prune watcher loops, prune from the fetch that drove the tick instead of re-fetching afterwards; only re-fetch when the act phase can invalidate the prune decision beyond what the cooldown already covers.
+
 ## 2026-11-04 - Hint Pre-filter and C Split for Per-Tick Process Classification
 
 **Learning:** `service-events`' monitor samples `ps -axo` every INTERVAL (5s) for the life of the launchd agent, and `classify()` ran four regex searches plus a regex line match on every process line, almost all unrelated. A single compiled hint alternation (every matchable pattern contains one of its substrings) rejects unrelated lines in one scan, and `str.split(None, 2)` parses the pid/ppid/command fields in C with identical results (verified on 38k fuzz cases and real `ps` output) — classification throughput rose ~6x (0.53M -> 3.15M lines/s, laptop bench).

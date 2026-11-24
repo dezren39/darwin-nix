@@ -104,6 +104,67 @@ harness_ps_double_end() {
   unset HARNESS_SAVED_PATH
 }
 
+# harness_stat_double_begin / harness_stat_double_end
+#   Scope a BSD-compatible `stat` double for tests running on GNU systems.
+#   Supported forms are the formats clean.sh uses: -f %m, -f %u,
+#   -f '%SB' -t FORMAT, and -f '%Sm' -t FORMAT. GNU-only -c is rejected.
+#   The real stat path is captured before PATH changes and exported for the
+#   stub. The shebang names the resolved bash path, so it works in a Nix
+#   sandbox with no /usr/bin/env.
+harness_stat_double_begin() {
+  [ -n "${HARNESS_SAVED_STAT_PATH:-}" ] && return 0
+  local dir bash_path
+  _harness_ensure_bin_dir || return 1
+  dir="$HARNESS_STUB_BIN"
+  HARNESS_REAL_STAT="$(command -v stat)" || { echo "harness: stat not found" >&2; return 1; }
+  bash_path="$(command -v bash)" || { echo "harness: bash not found" >&2; return 1; }
+  case "$HARNESS_REAL_STAT$bash_path" in *$'\n'*) echo "harness: refusing a tool path with a newline" >&2; return 1 ;; esac
+  export HARNESS_REAL_STAT
+  {
+    printf '#!%s\n' "$bash_path"
+    cat <<'STAT_STUB'
+[ -n "${HARNESS_REAL_STAT:-}" ] || exit 1
+for _a in "$@"; do
+  if [ "$_a" = "-c" ]; then echo "stat: illegal option -- c" >&2; exit 1; fi
+done
+_fmt=""; _tfmt=""; _file=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -f) _fmt="$2"; shift 2 ;;
+    -t) _tfmt="$2"; shift 2 ;;
+    *) _file="$1"; shift ;;
+  esac
+done
+[ -n "$_fmt" ] && [ -n "$_file" ] || exit 1
+case "$_fmt" in
+  '%m') "$HARNESS_REAL_STAT" -c '%Y' "$_file" ;;
+  '%u') "$HARNESS_REAL_STAT" -c '%u' "$_file" ;;
+  '%SB'|'%Sm')
+    if [ "$_fmt" = '%SB' ]; then
+      _epoch="$("$HARNESS_REAL_STAT" -c '%W' "$_file" 2>/dev/null)"
+      # GNU filesystems may not record birth time; BSD stat always does.
+      case "$_epoch" in ''|*[!0-9]*|0) _epoch="$("$HARNESS_REAL_STAT" -c '%Y' "$_file")" ;; esac
+    else
+      _epoch="$("$HARNESS_REAL_STAT" -c '%Y' "$_file")"
+    fi
+    date -d "@$_epoch" +"${_tfmt:-%Y-%m-%d %H:%M:%S}" ;;
+  *) echo "stat shim: unsupported -f format: $_fmt" >&2; exit 1 ;;
+esac
+STAT_STUB
+  } >"$dir/stat"
+  chmod +x "$dir/stat" || return 1
+  HARNESS_SAVED_STAT_PATH="$PATH"
+  PATH="$dir:$PATH"
+  export PATH
+}
+
+harness_stat_double_end() {
+  [ -n "${HARNESS_SAVED_STAT_PATH:-}" ] || return 0
+  PATH="$HARNESS_SAVED_STAT_PATH"
+  export PATH
+  unset HARNESS_SAVED_STAT_PATH
+}
+
 # harness_skip REASON — record a skip. In check mode every skip is a
 # failure, reported at summary time. The counter default must be inline
 # (`${HARNESS_SKIPS:-0}`): the real suites run `set -u`, and a bare

@@ -41,14 +41,14 @@ trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/tools" "$work/home"
 
 # Stubs stand in for the two real pruners; each records its argv.
-cat > "$work/tools/clean.sh" <<'STUB'
-#!/usr/bin/env bash
+printf '#!%s\n' "$(command -v bash)" > "$work/tools/clean.sh"
+cat >> "$work/tools/clean.sh" <<'STUB'
 echo "clean.sh $*" >> "$ARGS_LOG"
 exit "${STUB_CLEAN_RC:-0}"
 STUB
 
-cat > "$work/tools/opencode-db-backup-prune.sh" <<'STUB'
-#!/usr/bin/env bash
+printf '#!%s\n' "$(command -v bash)" > "$work/tools/opencode-db-backup-prune.sh"
+cat >> "$work/tools/opencode-db-backup-prune.sh" <<'STUB'
 echo "opencode-db-backup-prune.sh $*" >> "$ARGS_LOG"
 exit "${STUB_PRUNE_RC:-0}"
 STUB

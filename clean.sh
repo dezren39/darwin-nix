@@ -1301,7 +1301,7 @@ echo "🧻 logs"
 # is additionally always kept, so `pytest-current` never dangles.
 PYTEST_KEEP_HOURS="${PYTEST_KEEP_HOURS:-4}"
 _pt_removed=0
-for _ptbase in "$CALLER_USER_HOME/.local/share/opencode/tmp" "${TMPDIR:-/tmp}" /tmp /private/var/folders/*/*/T; do
+for _ptbase in "$CALLER_USER_HOME/.local/share/opencode/tmp" "${TMPDIR:-/tmp}" /tmp "$VAR_FOLDERS_ROOT"/*/*/T; do
   [ -d "$_ptbase" ] || continue
   for _ptdir in "$_ptbase"/pytest-of-*; do
     [ -d "$_ptdir" ] || continue
@@ -1391,9 +1391,13 @@ SHORT_SCRATCH_STALE_HOURS="${SHORT_SCRATCH_STALE_HOURS:-8}"
 # adding/removing/renaming entries inside it) is sufficient evidence here.
 # The postgres-cluster sweep below needs the stronger contents-aware check
 # instead, because postgres rewrites existing files without renaming them.
+#
+# Staleness only nominates an entry: before any del, the #1803 open-handle
+# guard must clear it -- a held entry, or one whose handles cannot be
+# verified, is kept (#2035), exactly as in the sibling sweeps.
 _ss_total_removed=0
 sweep_short_lived_scratch() {
-  local base="$1" removed=0
+  local base="$1" removed=0 handles_rc
   [ -d "$base" ] || return 0
   local -A fresh=()
   local f entry name g match fresh_list
@@ -1421,19 +1425,27 @@ sweep_short_lived_scratch() {
       [[ "$name" == $g ]] && { match=1; break; }
     done
     [ "$match" = 1 ] || continue
+    dir_has_open_handles "$entry"; handles_rc=$?
+    [ "$handles_rc" -eq 0 ] && continue  # something has it open
+    if [ "$handles_rc" -eq 2 ]; then echo "  keeping (cannot verify open handles; lsof unavailable): ${entry/#$CALLER_USER_HOME/\~}"; continue; fi
     del "$entry"; removed=$((removed + 1))
   done
   # Stale uv cache locks: a crashed `uv` leaves one of these behind, which is
   # exactly what makes the `uv cache prune` tier above wait out its own
-  # UV_LOCK_TIMEOUT instead of running.
+  # UV_LOCK_TIMEOUT instead of running. Same open-handle guard as the entries
+  # above (#2035): a lock whose handles are held or cannot be verified is
+  # kept -- deleting a live lock file would let a second uv run concurrently.
   while IFS= read -r lock; do
+    dir_has_open_handles "$lock"; handles_rc=$?
+    [ "$handles_rc" -eq 0 ] && continue  # something has it open
+    if [ "$handles_rc" -eq 2 ]; then echo "  keeping (cannot verify open handles; lsof unavailable): ${lock/#$CALLER_USER_HOME/\~}"; continue; fi
     del "$lock"; removed=$((removed + 1))
   done < <(find "$base" -maxdepth 1 -name 'uv-*.lock' -mmin "+$((SHORT_SCRATCH_STALE_HOURS * 60))" 2>/dev/null)
   _ss_total_removed=$((_ss_total_removed + removed))
   [ "$removed" -gt 0 ] && info "short-lived scratch (${base/#$CALLER_USER_HOME/\~}): removed $removed entries older than ${SHORT_SCRATCH_STALE_HOURS}h"
 }
 sweep_short_lived_scratch "$CALLER_USER_HOME/.local/share/opencode/tmp"
-for _vf_t in /private/var/folders/*/*/T; do
+for _vf_t in "$VAR_FOLDERS_ROOT"/*/*/T; do
   [ -d "$_vf_t" ] || continue
   sweep_short_lived_scratch "$_vf_t"
 done
@@ -1482,7 +1494,7 @@ sweep_ad_hoc_postgres_dirs() {
   done < <(find "$base" -maxdepth 2 -name PG_VERSION -type f 2>/dev/null)
 }
 sweep_ad_hoc_postgres_dirs "$CALLER_USER_HOME/.local/share/opencode/tmp"
-for _vf_t in /private/var/folders/*/*/T; do
+for _vf_t in "$VAR_FOLDERS_ROOT"/*/*/T; do
   [ -d "$_vf_t" ] || continue
   sweep_ad_hoc_postgres_dirs "$_vf_t"
 done

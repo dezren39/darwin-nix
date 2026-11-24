@@ -206,6 +206,42 @@ else
   esac
 fi
 
+# --- brew_upgrade skip branch survives a missing Brewfile (#2031) ----
+# grep finds no Brewfile path in ./result/activate, so the pipeline exits 1;
+# under pipefail + errexit that aborted ./s before the documented skip
+# branch ran, leaving a completed switch unrecorded. The real function is
+# extracted and run under the script's own shell options.
+BREW_FN="$TMP_ROOT/brew-upgrade.sh"
+awk '/^brew_upgrade\(\) \{$/ { capture=1 } capture { print } capture && /^}$/ { exit }' "$SCRIPT" >"$BREW_FN"
+if [ ! -s "$BREW_FN" ]; then
+  fail "could not extract brew_upgrade from simple-rebuild.sh"
+else
+  BREW_RUN="$TMP_ROOT/brew-upgrade-run"
+  mkdir -p "$BREW_RUN/result"
+  printf '#!/bin/sh\necho activation-with-no-brewfile\n' >"$BREW_RUN/result/activate"
+  cat >"$BREW_RUN/driver.sh" <<EOF
+set -exuo pipefail
+cd "$BREW_RUN"
+source "$BREW_FN"
+brew_upgrade
+echo "after-brew-upgrade"
+EOF
+  BREW_OUT="$(bash "$BREW_RUN/driver.sh" 2>"$TMP_ROOT/brew.err")"; BREW_STATUS=$?
+  if [ "$BREW_STATUS" -ne 0 ]; then
+    fail "brew_upgrade with no Brewfile path exited $BREW_STATUS (want 0)"
+  else
+    ok "brew_upgrade with no Brewfile path exits 0"
+  fi
+  case "$(cat "$TMP_ROOT/brew.err")" in
+    *"skipping brew upgrade: no Brewfile"*) ok "brew_upgrade prints the skip message" ;;
+    *) fail "brew_upgrade did not print the skip message" ;;
+  esac
+  case "$BREW_OUT" in
+    *after-brew-upgrade*) ok "script continues after brew_upgrade (record_activation still reached)" ;;
+    *) fail "script aborted inside brew_upgrade before the skip branch returned" ;;
+  esac
+fi
+
 if [ "$failures" -gt 0 ]; then
   echo "$failures simple-rebuild parser check(s) failed" >&2
   exit 1

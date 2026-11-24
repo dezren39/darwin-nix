@@ -305,6 +305,56 @@ ERR="$(cat "$TMP_ROOT/err")"
 [ -d "$VF_OTHER_ENTRY" ] || fail "vf-root prune (#1865): entry under an UNCONFIGURED root was deleted"
 echo "ok: vf-root prune (#1865): unconfigured root untouched"
 
+# ─── Short-lived / ad-hoc-postgres / pytest sweeps honor VAR_FOLDERS_ROOT (#1977) ───
+# Three more var/folders legs still iterated the literal
+# /private/var/folders/*/*/T after #1865: the pytest tidy base list,
+# the short-lived-scratch loop, and the ad-hoc-postgres loop -- so
+# fixtures could not exercise them through the seam, and a real run
+# could touch host entries outside the caller's intended root.
+# Fixture (mirrors the #1865 twin-root shape): eligible entries under
+# a configured root's */*/T, twins under an unconfigured root. Driven
+# with --system --dry-run like the pytest-guard block below, so del()
+# reports instead of removing: the configured root's entries must be
+# scheduled, the unconfigured root's must not even be named.
+VF1977_ROOT="$TMP_ROOT/vf-root-1977"
+VF1977_T="$VF1977_ROOT/ab/cd/T"
+mkdir -p "$VF1977_T/mcpx-fake-1977" "$VF1977_T/zzpg1977" "$VF1977_T/pytest-of-1977/pytest-1" "$VF1977_T/pytest-of-1977/pytest-2"
+touch "$VF1977_T/zzpg1977/PG_VERSION"
+ln -s pytest-2 "$VF1977_T/pytest-of-1977/pytest-current"
+touch -d '10 hours ago' "$VF1977_T/mcpx-fake-1977" "$VF1977_T/zzpg1977/PG_VERSION" "$VF1977_T/zzpg1977" "$VF1977_T/pytest-of-1977/pytest-1"
+touch -d '6 hours ago' "$VF1977_T/pytest-of-1977/pytest-2"
+VF1977_OTHER_T="$TMP_ROOT/vf-other-1977/ef/gh/T"
+mkdir -p "$VF1977_OTHER_T/mcpx-fake-1977other" "$VF1977_OTHER_T/zzpg1977other" "$VF1977_OTHER_T/pytest-of-1977other/pytest-1" "$VF1977_OTHER_T/pytest-of-1977other/pytest-2"
+touch "$VF1977_OTHER_T/zzpg1977other/PG_VERSION"
+ln -s pytest-2 "$VF1977_OTHER_T/pytest-of-1977other/pytest-current"
+touch -d '10 hours ago' "$VF1977_OTHER_T/mcpx-fake-1977other" "$VF1977_OTHER_T/zzpg1977other/PG_VERSION" "$VF1977_OTHER_T/zzpg1977other" "$VF1977_OTHER_T/pytest-of-1977other/pytest-1"
+touch -d '6 hours ago' "$VF1977_OTHER_T/pytest-of-1977other/pytest-2"
+OUT="$(PATH="$LSOF_STUB_DIR:$PATH" VAR_FOLDERS_ROOT="$VF1977_ROOT" PYTEST_KEEP_HOURS=4 bash "$SCRIPT" --system --dry-run 2>"$TMP_ROOT/err")"; STATUS=$?
+ERR="$(cat "$TMP_ROOT/err")"
+[ "$STATUS" -eq 0 ] || fail "vf-root (#1977): --system --dry-run exited $STATUS (stderr: $ERR)"
+if grep -q 'would delete: .*vf-root-1977/ab/cd/T/mcpx-fake-1977$' <<<"$OUT"; then
+  echo "ok: vf-root (#1977): short-lived sweep scans the configured root"
+else
+  fail "vf-root (#1977): short-lived sweep did not schedule the configured root's entry"
+fi
+if grep -q 'would remove (postgres data dir, idle >8h): .*vf-root-1977/ab/cd/T/zzpg1977$' <<<"$OUT"; then
+  echo "ok: vf-root (#1977): ad-hoc-postgres sweep scans the configured root"
+else
+  fail "vf-root (#1977): ad-hoc-postgres sweep did not schedule the configured root's cluster"
+fi
+if grep -q 'would delete: .*vf-root-1977/ab/cd/T/pytest-of-1977/pytest-1$' <<<"$OUT"; then
+  echo "ok: vf-root (#1977): pytest tidy scans the configured root"
+else
+  fail "vf-root (#1977): pytest tidy did not schedule the configured root's older run"
+fi
+if grep -q 'vf-other-1977' <<<"$OUT"; then
+  fail "vf-root (#1977): unconfigured root was scanned"
+else
+  echo "ok: vf-root (#1977): unconfigured root not scanned"
+fi
+[ -d "$VF1977_OTHER_T/mcpx-fake-1977other" ] && [ -d "$VF1977_OTHER_T/zzpg1977other" ] && [ -d "$VF1977_OTHER_T/pytest-of-1977other/pytest-1" ] || fail "vf-root (#1977): unconfigured root entries were touched"
+echo "ok: vf-root (#1977): unconfigured root untouched"
+
 # Pytest newest-run guard fires under BSD and GNU stat alike. Both
 # runs are older than PYTEST_KEEP_HOURS, so only the guard keeps the
 # newest (pytest-2). --dry-run makes del() report instead of remove:
@@ -881,16 +931,23 @@ echo "ok: mark_dir skips both symlinked markers and marks the clean sibling"
 # Drive the real sweep with a failing find stub. Neither fresh nor stale
 # matching entries may be offered to del when the scan is incomplete.
 SS_DIR="$TMP_ROOT/short-scratch"
-mkdir -p "$SS_DIR/base" "$SS_DIR/bin"
+mkdir -p "$SS_DIR/base" "$SS_DIR/bin" "$SS_DIR/bin-idle"
 touch "$SS_DIR/base/openchamber-fresh-fixture"
 touch -t 200001010000 "$SS_DIR/base/openchamber-stale-fixture"
-sed -n '/^sweep_short_lived_scratch() {/,/^}/p' "$SCRIPT" > "$SS_DIR/sweep.sh"
+{ sed -n '/^dir_has_open_handles() {/,/^}/p' "$SCRIPT"
+  sed -n '/^sweep_short_lived_scratch() {/,/^}/p' "$SCRIPT"; } > "$SS_DIR/sweep.sh"
 [ -s "$SS_DIR/sweep.sh" ] || fail "could not extract sweep_short_lived_scratch"
+grep -q 'dir_has_open_handles' "$SS_DIR/sweep.sh" \
+  || fail "could not extract dir_has_open_handles from clean.sh (#1803)"
 cat > "$SS_DIR/bin/find" <<'STUB'
 #!/bin/sh
 exit 1
 STUB
-chmod +x "$SS_DIR/bin/find"
+cat > "$SS_DIR/bin-idle/lsof" <<'STUB'
+#!/bin/sh
+exit 1
+STUB
+chmod +x "$SS_DIR/bin/find" "$SS_DIR/bin-idle/lsof"
 SHORT_SCRATCH_GLOBS=('openchamber-*')
 SHORT_SCRATCH_STALE_HOURS=8
 CALLER_USER_HOME="$SS_DIR"
@@ -917,8 +974,20 @@ grep -q 'freshness scan failed; skipping this base' "$SS_DIR/failure.err" \
   || fail "failed freshness scan did not warn and skip the base"
 
 # Successful scan still deletes stale matching entries but keeps fresh ones.
+# The #2035 open-handle guard runs before del, so drive it with a working
+# lsof that reports no holder (bin-idle), under the same set +e capture as
+# the failed-scan call above: the guard's nonzero return is data, not an
+# error, and this section runs under set -e.
 rm -f "$SS_DIR/deleted"
+PATH="$SS_DIR/bin-idle:$SS_OLD_PATH"
+export PATH
+set +e
 sweep_short_lived_scratch "$SS_DIR/base"
+SS_RC=$?
+set -e
+PATH="$SS_OLD_PATH"
+export PATH
+[ "$SS_RC" -eq 0 ] || fail "successful freshness scan returned $SS_RC"
 grep -Fxq "$SS_DIR/base/openchamber-stale-fixture" "$SS_DIR/deleted" \
   || fail "successful freshness scan did not offer stale entry to del"
 if grep -Fxq "$SS_DIR/base/openchamber-fresh-fixture" "$SS_DIR/deleted"; then
@@ -1292,6 +1361,98 @@ grep -q "^$PG_DIR/base/pgdata$" "$PG_DIR/deleted" \
 echo "ok: working lsof with no holder still removes the idle postgres data dir"
 rm -rf "$PG_DIR"
 
+# ─── #2035: short-lived scratch sweep fails closed when lsof cannot run ──
+# sweep_short_lived_scratch deleted stale known-tool scratch (and stale
+# uv locks) with no open-handle check at all, unlike its sibling sweeps
+# (#1803): a tool holding an old-mtime directory open lost it anyway, and
+# an lsof that never ran could not keep anything. Extract the real sweep
+# + its dir_has_open_handles helper and drive four PATH-stub scenarios
+# against a stale glob-matched fixture dir and a stale uv lock. Oracle:
+# the del recorder + the "cannot verify" note -- missing/erroring lsof
+# keeps, a holder keeps, a working lsof with no holder still removes.
+# Mutation check: reverting the sweep to the unguarded del makes the
+# missing/erroring cases record a deletion.
+SG_DIR="$TMP_ROOT/short-scratch-fail-closed"
+mkdir -p "$SG_DIR/base/opencode-stale-fixture" "$SG_DIR/bin-missing" \
+  "$SG_DIR/bin-error" "$SG_DIR/bin-held" "$SG_DIR/bin-idle"
+touch -t 200001010000 "$SG_DIR/base/opencode-stale-fixture"
+touch "$SG_DIR/base/uv-fixture.lock"
+touch -t 200001010000 "$SG_DIR/base/uv-fixture.lock"
+{ sed -n '/^dir_has_open_handles() {/,/^}/p' "$SCRIPT"
+  sed -n '/^sweep_short_lived_scratch() {/,/^}/p' "$SCRIPT"; } > "$SG_DIR/fn.sh"
+grep -q 'sweep_short_lived_scratch' "$SG_DIR/fn.sh" \
+  || fail "could not extract sweep_short_lived_scratch from clean.sh (#2035)"
+grep -q 'dir_has_open_handles' "$SG_DIR/fn.sh" \
+  || fail "extracted sweep has no dir_has_open_handles helper to test (#2035)"
+# bin-missing gets the real find/mktemp/rm and NO lsof at all.
+ln -s "$(command -v find)" "$SG_DIR/bin-missing/find"
+ln -s "$(command -v mktemp)" "$SG_DIR/bin-missing/mktemp"
+ln -s "$(command -v rm)" "$SG_DIR/bin-missing/rm"
+cat > "$SG_DIR/bin-error/lsof" <<'STUB'
+#!/bin/sh
+exit 2
+STUB
+cat > "$SG_DIR/bin-held/lsof" <<'STUB'
+#!/bin/sh
+echo "opencode 4242 user 9r DIR 1,5 0 0 /fixture"
+exit 0
+STUB
+cat > "$SG_DIR/bin-idle/lsof" <<'STUB'
+#!/bin/sh
+exit 1
+STUB
+chmod +x "$SG_DIR/bin-error/lsof" "$SG_DIR/bin-held/lsof" "$SG_DIR/bin-idle/lsof"
+
+sg_run() { # sg_run <PATH> -- runs the extracted sweep in a subshell
+  (
+    # shellcheck disable=SC2034 # consumed by the sourced sweep
+    SHORT_SCRATCH_STALE_HOURS=8; CALLER_USER_HOME="$HOME"
+    # shellcheck disable=SC2034 # consumed by the sourced sweep
+    SHORT_SCRATCH_GLOBS=('opencode-*'); _ss_total_removed=0
+    TMPDIR="$SG_DIR"
+    PATH="$1"
+    del() { printf '%s\n' "$1" >> "$SG_DIR/deleted"; }
+    warn() { printf '%s\n' "$*" >&2; }
+    info() { :; }
+    short_scratch_is_kept() { return 1; }
+    . "$SG_DIR/fn.sh"
+    sweep_short_lived_scratch "$SG_DIR/base"
+  )
+}
+
+: > "$SG_DIR/deleted"
+OUT="$(sg_run "$SG_DIR/bin-missing" 2>&1 || true)"
+[ ! -s "$SG_DIR/deleted" ] \
+  || fail "lsof missing: short-lived scratch sweep deleted an entry it could not verify (#2035)"
+case "$OUT" in
+  *"keeping (cannot verify open handles; lsof unavailable)"*) echo "ok: lsof missing keeps the short-lived scratch entry with a cannot-verify note" ;;
+  *) fail "lsof missing: no cannot-verify note (got: $OUT)" ;;
+esac
+
+: > "$SG_DIR/deleted"
+OUT="$(sg_run "$SG_DIR/bin-error:$PATH" 2>&1 || true)"
+[ ! -s "$SG_DIR/deleted" ] \
+  || fail "lsof erroring: short-lived scratch sweep deleted an entry it could not verify (#2035)"
+case "$OUT" in
+  *"keeping (cannot verify open handles; lsof unavailable)"*) echo "ok: lsof erroring keeps the short-lived scratch entry with a cannot-verify note" ;;
+  *) fail "lsof erroring: no cannot-verify note (got: $OUT)" ;;
+esac
+
+: > "$SG_DIR/deleted"
+OUT="$(sg_run "$SG_DIR/bin-held:$PATH" 2>&1 || true)"
+[ ! -s "$SG_DIR/deleted" ] \
+  || fail "lsof reporting a holder: short-lived scratch sweep deleted a held entry (#2035)"
+echo "ok: lsof reporting a holder keeps the short-lived scratch entry"
+
+: > "$SG_DIR/deleted"
+OUT="$(sg_run "$SG_DIR/bin-idle:$PATH" 2>&1 || true)"
+grep -q "^$SG_DIR/base/opencode-stale-fixture$" "$SG_DIR/deleted" \
+  || fail "working lsof with no holder: short-lived scratch sweep no longer removes a stale entry (deleted: $(cat "$SG_DIR/deleted"); out: $OUT)"
+grep -q "^$SG_DIR/base/uv-fixture.lock$" "$SG_DIR/deleted" \
+  || fail "working lsof with no holder: short-lived scratch sweep no longer removes a stale uv lock (deleted: $(cat "$SG_DIR/deleted"); out: $OUT)"
+echo "ok: working lsof with no holder still removes the stale short-lived scratch entry and uv lock"
+rm -rf "$SG_DIR"
+
 # ─── #1904: del() must not skip dangling symlinks ─────────────────────
 # del() gated every deletion on [ -e "$p" ], which is false for a
 # dangling symlink, so stale dangling links in caches/logs/Trash were
@@ -1389,7 +1550,9 @@ chmod +x "$SW_DIR/no-holder-bin/lsof"
   warn() { printf '%s\n' "$*" >&2; }
   info() { printf '%s\n' "$*"; }
   short_scratch_is_kept() { return 1; }
+  PATH="$SW_DIR/no-holder-bin:$PATH"
   . "$SW_DIR/del.sh"
+  . "$SW_DIR/dir_has_open_handles.sh"
   . "$SW_DIR/sweep_short_lived_scratch.sh"
   mkdir -p "$SW_DIR/short"
   ln -s "$SW_DIR/no-such-target" "$SW_DIR/short/opencode-stale123"

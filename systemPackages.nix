@@ -460,10 +460,24 @@ in
         runtimeInputs = [
           pkgs.curl
           pkgs.bash
+          pkgs.coreutils
         ];
+        # The installer digest is pinned: install.sh sha256
+        # 899009f864c535370f13576cd73a3d15d9ca822526e5045c6a016453e1c2672c
+        # (173980 bytes, fetched 2026-11-24). To bump: fetch the script,
+        # review the diff against the previous version, then update the
+        # digest and this comment together.
         text = ''
-          echo "plannotator-setup: installing/updating Plannotator via https://plannotator.ai/install.sh ..." >&2
-          curl -fsSL https://plannotator.ai/install.sh | bash
+          installer="$(mktemp)"
+          trap 'rm -f "$installer"' EXIT
+          echo "plannotator-setup: fetching https://plannotator.ai/install.sh ..." >&2
+          curl -fsSL -o "$installer" https://plannotator.ai/install.sh
+          if ! echo "899009f864c535370f13576cd73a3d15d9ca822526e5045c6a016453e1c2672c  $installer" | sha256sum -c --status -; then
+            echo "plannotator-setup: installer digest mismatch; aborting without running it" >&2
+            exit 1
+          fi
+          echo "plannotator-setup: digest verified; running the pinned installer as $(id -un)" >&2
+          bash "$installer"
           echo "plannotator-setup: installer finished" >&2
         '';
       })

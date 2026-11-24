@@ -28,6 +28,12 @@
 #                  refreshed, node_modules entries NOT refreshed; a repo
 #                  whose only recent files are inside node_modules is not
 #                  counted as changed by the freshness probe
+#   discovery err: the repo-discovery find fails (#2042)    -> WARN naming
+#                  the scan root, and no clean refresh is reported
+#   touch error:   a repo's .git metadata refresh fails
+#                  (#2042)                                  -> WARN naming
+#                  the repo, the repo is not counted as refreshed, and
+#                  the run reports protection is incomplete
 #
 # Run: bash opencode-tmp-guard.test.sh (exit 0 = all passed)
 set -u
@@ -220,6 +226,70 @@ refreshed5 "$T5/nmrepo/node_modules/pkg/index.js"; [ $? -ne 0 ]
 check "1843 node_modules-only repo: dependency file NOT refreshed" $?
 grep -q "working files in 1 (changed <14d)" "$work/out5"
 check "1843 run reports exactly 1 repo with recent working files" $?
+
+# --- Scenario 6: discovery failure is visible (#2042) ---------------
+# The discovery find's exit status was never checked and its stderr was
+# discarded, so a traversal error produced a partial or empty repo list
+# that the run then reported as a clean no-op.
+T6="$work/T6"
+HOME6="$work/home6"
+mkdir -p "$T6" "$HOME6" "$work/bin6"
+cat > "$work/bin6/find" <<'EOF'
+#!/bin/sh
+# Fail only the repository-discovery scan (the find over the temp root
+# that prints .git paths); delegate everything else to the real find.
+if [ "$1" = "$GUARD_TEST_T" ]; then
+  case " $* " in
+    *" -name .git -prune -print"*) exit 1 ;;
+  esac
+fi
+exec "$REAL_FIND" "$@"
+EOF
+chmod +x "$work/bin6/find"
+
+rc=$(REAL_FIND=$(command -v find) GUARD_TEST_T="$T6" HOME="$HOME6" PATH="$work/bin6:$work/bin:$PATH" bash "$work/guard.sh" > "$work/out6" 2>&1; echo $?)
+[ "$rc" -eq 0 ]; check "2042 discovery-failure run still completes (exit 0)" $?
+grep -q "WARN" "$work/out6"; check "2042 discovery failure: WARN logged" $?
+grep -q "discovery under $T6 failed" "$work/out6"
+check "2042 discovery failure: WARN names the scan root" $?
+grep -q "refreshed .git metadata in" "$work/out6"; [ $? -ne 0 ]
+check "2042 discovery failure: run does not report a clean refresh" $?
+
+# --- Scenario 7: metadata-touch failure is visible (#2042) ----------
+# The per-repo refresh counted every repo as refreshed whether or not
+# its find/touch pass succeeded, and discarded the error.
+T7="$work/T7"
+HOME7="$work/home7"
+mkdir -p "$T7" "$HOME7" "$work/bin7"
+seed_gitdir "$T7/repo/.git"
+# Age the repo in mtime as well as atime: the working-file pass walks
+# the whole repo tree (.git included), so a recently-modified repo
+# would have its metadata refreshed by that pass and mask the failure
+# this scenario injects into the metadata pass.
+touch -a -m -t $OLD_T "$T7/repo/.git/HEAD" "$T7/repo/.git" "$T7/repo"
+cat > "$work/bin7/find" <<'EOF'
+#!/bin/sh
+# Fail only the .git metadata refresh pass (find rooted at a .git
+# path); delegate discovery and the working-file passes.
+case "$1" in
+  */.git) exit 1 ;;
+esac
+exec "$REAL_FIND" "$@"
+EOF
+chmod +x "$work/bin7/find"
+touch "$work/ref7"
+
+rc=$(REAL_FIND=$(command -v find) GUARD_TEST_T="$T7" HOME="$HOME7" PATH="$work/bin7:$work/bin:$PATH" bash "$work/guard.sh" > "$work/out7" 2>&1; echo $?)
+[ "$rc" -eq 0 ]; check "2042 touch-failure run still completes (exit 0)" $?
+grep -q "WARN" "$work/out7"; check "2042 touch failure: WARN logged" $?
+grep -q "metadata refresh failed for $T7/repo/.git" "$work/out7"
+check "2042 touch failure: WARN names the repo" $?
+grep -q "refreshed .git metadata in 1 repo(s)" "$work/out7"; [ $? -ne 0 ]
+check "2042 touch failure: failed repo not counted as refreshed" $?
+grep -q "protection is incomplete" "$work/out7"
+check "2042 touch failure: run reports protection incomplete" $?
+[ -n "$(find "$T7/repo/.git/HEAD" -anewer "$work/ref7" 2>/dev/null)" ]; [ $? -ne 0 ]
+check "2042 touch failure: .git metadata indeed not refreshed" $?
 
 if [ "$failures" -gt 0 ]; then
   echo "FAILURES: $failures"

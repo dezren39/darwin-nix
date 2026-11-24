@@ -11,7 +11,10 @@
 #   opencode-db-backup-prune.sh sees nothing to keep or delete;
 # - a clone cp that silently drops the WAL copy: the content check
 #   (live counts recorded under the write lock vs the staged copy)
-#   fails the run and nothing is published.
+#   fails the run and nothing is published;
+# - same-second/overlapping runs (#2065): a run whose start second's
+#   backup name is already taken retries under a free timestamp, and
+#   two concurrent runs stage privately and both publish.
 #
 # Run: ./opencode-db-backup.test.sh
 # It is run by the flake check `opencode-db-backup-tests`.
@@ -173,6 +176,47 @@ printf '%s' "$out" | grep -q '^backup:' && fail "WAL-dropping cp still printed t
 [ "$(ts_dirs "$D/backup")" -eq 0 ] || fail "WAL-dropping cp left a timestamp dir behind"
 [ "$(partial_dirs "$D/backup")" -eq 0 ] || fail "WAL-dropping cp left a staging dir behind"
 [ "$failures" -eq "$before" ] && ok "a copy missing its WAL is caught by the content check and not published"
+
+# --- same-second destination already taken (#2065) ---------------------
+# Pre-claim the current second's backup name, then run a backup: it
+# must not die with "already exists" \u2014 it retries under a free
+# timestamp and publishes exactly one more verified backup.
+before=$failures
+D="$WORK/samesec"
+make_db "$D"
+mkdir -p "$D/backup/$(date +%Y%m%dT%H%M%S)"
+out="$(run_backup "$D" "$WORK/cp-ok")"
+rc=$?
+[ "$rc" -eq 0 ] || fail "same-second run exited $rc: $out"
+printf '%s' "$out" | grep -q "^backup: $D/backup/" || fail "same-second run printed no success line: $out"
+[ "$(ts_dirs "$D/backup")" -eq 2 ] || fail "same-second run left $(ts_dirs "$D/backup") timestamp dirs, expected 2 (pre-claimed + published)"
+[ "$(partial_dirs "$D/backup")" -eq 0 ] || fail "same-second run left a staging dir behind"
+pub="$(printf '%s' "$out" | sed -n 's/^backup: //p' | head -1)"
+counts="$("$SQLITE3" "file:$pub/opencode.db?mode=ro" "select 'sessions', count(*) from session;" "select 'migrations', count(*), max(id) from migration;")"
+[ "$counts" = "sessions|3
+migrations|2|m2" ] || fail "same-second published backup content wrong: $counts"
+[ "$failures" -eq "$before" ] && ok "a run whose second is already taken retries and publishes under a free timestamp"
+
+# --- concurrent runs (#2065) --------------------------------------------
+# Two backups launched together share a start second: each must stage
+# privately, publish its own timestamp dir, and exit 0 \u2014 neither
+# run's EXIT trap may delete the other's staging.
+before=$failures
+D="$WORK/concurrent"
+make_db "$D"
+run_backup "$D" "$WORK/cp-ok" >"$WORK/conc-a.out" 2>&1 &
+pid_a=$!
+run_backup "$D" "$WORK/cp-ok" >"$WORK/conc-b.out" 2>&1 &
+pid_b=$!
+rc_a=0; wait "$pid_a" || rc_a=$?
+rc_b=0; wait "$pid_b" || rc_b=$?
+[ "$rc_a" -eq 0 ] || fail "concurrent run A exited $rc_a: $(cat "$WORK/conc-a.out")"
+[ "$rc_b" -eq 0 ] || fail "concurrent run B exited $rc_b: $(cat "$WORK/conc-b.out")"
+grep -q '^backup: ' "$WORK/conc-a.out" || fail "concurrent run A printed no success line: $(cat "$WORK/conc-a.out")"
+grep -q '^backup: ' "$WORK/conc-b.out" || fail "concurrent run B printed no success line: $(cat "$WORK/conc-b.out")"
+[ "$(ts_dirs "$D/backup")" -eq 2 ] || fail "concurrent runs published $(ts_dirs "$D/backup") timestamp dirs, expected 2"
+[ "$(partial_dirs "$D/backup")" -eq 0 ] || fail "concurrent runs left a staging dir behind"
+[ "$failures" -eq "$before" ] && ok "two concurrent backups stage privately and both publish"
 
 if [ "$failures" -ne 0 ]; then
   echo "$failures failure(s)" >&2

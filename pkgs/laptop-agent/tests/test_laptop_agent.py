@@ -2242,6 +2242,72 @@ class PersistedJobExitCwdCmdTest(unittest.TestCase):
             self.assertEqual(publics[0]["exit"], 0)
 
 
+class PersistedJobOversizedMetaTest(unittest.TestCase):
+    """Issue #2094: load_persisted_jobs read each spool meta.json
+    with an uncapped read_text() before parsing, so one oversized
+    meta.json spiked daemon memory at startup.
+
+    Oracle: a meta.json larger than MAX_META is rejected with one
+    logged line naming its dir and the cap, without being restored;
+    a normal meta.json in a sibling spool still restores (control).
+    """
+
+    def _import_agent(self):
+        with tempfile.NamedTemporaryFile("w", suffix="-token",
+                                         delete=False) as f:
+            f.write("persisted-oversized-meta-test-token\n")
+            token_path = f.name
+        os.environ.setdefault("LAPTOP_AGENT_TOKEN_FILE", token_path)
+        sys.path.insert(0, str(AGENT.parent))
+        import laptop_agent as la
+        return la
+
+    def _base_meta(self, job_id):
+        return {"id": job_id, "cwd": "/", "cmd": "test",
+                "started_at": 100.0, "ended_at": 150.0, "exit": 0,
+                "state": "done", "interrupted": False}
+
+    def _write_spool(self, state_dir, job_id, raw):
+        spool = Path(state_dir) / "jobs" / job_id
+        spool.mkdir(parents=True)
+        (spool / "meta.json").write_bytes(raw)
+        (spool / "stdout").write_bytes(b"")
+        (spool / "stderr").write_bytes(b"")
+        return spool
+
+    def _load(self, la, state_dir):
+        la.JOBS.clear()
+        err = io.StringIO()
+        with patch.object(la, "STATE_DIR", Path(state_dir)):
+            with contextlib.redirect_stderr(err):
+                la.load_persisted_jobs()
+        return err.getvalue()
+
+    def tearDown(self):
+        la_mod = sys.modules.get("laptop_agent")
+        if la_mod is not None:
+            la_mod.JOBS.clear()
+
+    def test_oversized_meta_skipped_normal_meta_restores(self):
+        la = self._import_agent()
+        with tempfile.TemporaryDirectory() as state_dir:
+            big = dict(self._base_meta("big-job"))
+            big["cmd"] = "x" * (la.MAX_META + 1)
+            big_spool = self._write_spool(
+                state_dir, "big-job", json.dumps(big).encode())
+            self.assertGreater(
+                (big_spool / "meta.json").stat().st_size, la.MAX_META)
+            self._write_spool(state_dir, "healthy",
+                              json.dumps(self._base_meta("healthy")).encode())
+            stderr = self._load(la, state_dir)
+            self.assertNotIn("big-job", la.JOBS)
+            self.assertIn("healthy", la.JOBS)
+            lines = [ln for ln in stderr.splitlines() if ln.strip()]
+            self.assertEqual(len(lines), 1, stderr)
+            self.assertIn(str(big_spool), lines[0])
+            self.assertIn("meta.json exceeds", lines[0])
+
+
 class ReaperStartupTest(unittest.TestCase):
     """#1504: past-TTL finished jobs are reaped at startup, with no
     new POST /jobs — the daemon is only ever health-polled here.

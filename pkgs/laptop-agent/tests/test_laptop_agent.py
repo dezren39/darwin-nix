@@ -390,6 +390,77 @@ class AuthedUnreadBodyConnectionTest(unittest.TestCase):
         self.assertEqual(status, 200, parsed)
         self.assertTrue(parsed.get("ok"), parsed)
 
+    def _raw_response(self, request):
+        with socket.create_connection(("127.0.0.1", self.port), timeout=2) as sock:
+            sock.settimeout(2)
+            sock.sendall(request)
+            response = bytearray()
+            while True:
+                try:
+                    chunk = sock.recv(4096)
+                except socket.timeout:
+                    self.fail("server left an ambiguous request connection open")
+                if not chunk:
+                    break
+                response.extend(chunk)
+        head, _, body = response.partition(b"\r\n\r\n")
+        return head, body
+
+    def _framing_request(self, method, path, headers, body=b""):
+        wire = (f"{method} {path} HTTP/1.1\r\nHost: localhost\r\n"
+                f"X-Agent-Token: {self.token}\r\n").encode()
+        wire += b"".join(f"{name}: {value}\r\n".encode()
+                         for name, value in headers)
+        return wire + b"\r\n" + body
+
+    def test_chunked_exec_is_rejected_and_connection_closed(self):
+        chunk = b'{"cmds":[]}'
+        head, body = self._raw_response(self._framing_request(
+            "POST", "/exec", [("Transfer-Encoding", "chunked")],
+            (f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n0\r\n\r\n")))
+        self.assertIn(b" 400 ", head)
+        self.assertIn(b"Connection: close", head)
+        self.assertIn(b"unsupported Transfer-Encoding", body)
+
+    def test_chunked_jobs_is_rejected_and_connection_closed(self):
+        chunk = b'{"argv":["/bin/true"]}'
+        head, body = self._raw_response(self._framing_request(
+            "POST", "/jobs", [("Transfer-Encoding", "chunked")],
+            (f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n0\r\n\r\n")))
+        self.assertIn(b" 400 ", head)
+        self.assertIn(b"Connection: close", head)
+        self.assertIn(b"unsupported Transfer-Encoding", body)
+
+    def test_duplicate_transfer_encoding_fields_are_rejected(self):
+        head, body = self._raw_response(self._framing_request(
+            "POST", "/exec", [("Transfer-Encoding", "identity"),
+                               ("Transfer-Encoding", "chunked")]))
+        self.assertIn(b" 400 ", head)
+        self.assertIn(b"Connection: close", head)
+        self.assertIn(b"unsupported Transfer-Encoding", body)
+
+    def test_content_length_and_transfer_encoding_are_rejected(self):
+        smuggled = b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        head, body = self._raw_response(self._framing_request(
+            "POST", "/exec", [("Content-Length", "2"),
+                               ("Transfer-Encoding", "chunked")],
+            b"{}" + smuggled))
+        self.assertIn(b" 400 ", head)
+        self.assertIn(b"Connection: close", head)
+        self.assertIn(b"Content-Length and Transfer-Encoding", body)
+        self.assertEqual(body.count(b"ok"), 0)
+
+    def test_chunked_unread_post_paths_are_rejected(self):
+        chunk = b"junk"
+        framed = f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n0\r\n\r\n"
+        for path in ("/jobs/deadbeef/kill", "/no-such-route"):
+            with self.subTest(path=path):
+                head, body = self._raw_response(self._framing_request(
+                    "POST", path, [("Transfer-Encoding", "chunked")], framed))
+                self.assertIn(b" 400 ", head)
+                self.assertIn(b"Connection: close", head)
+                self.assertIn(b"unsupported Transfer-Encoding", body)
+
     def test_kill_unknown_job_with_body_then_health_same_connection(self):
         conn = self._conn()
         status, connection, parsed = self._call(

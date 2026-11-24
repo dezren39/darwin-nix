@@ -715,6 +715,31 @@ class FramingError(ValueError):
     so the connection must be closed after the 400 response."""
 
 
+def _check_body_framing(headers):
+    """Reject request framing this daemon cannot parse (#1986).
+
+    A chunked body reads as empty from a Content-Length-only read, and a
+    request carrying both Content-Length and Transfer-Encoding makes the
+    declared length the body while the trailing bytes are parsed as a
+    second request (request smuggling). RFC 9112 section 6.3 requires a
+    server that sees both to reject the message and close the
+    connection. `headers` is the message object http.server parsed the
+    request headers into.
+    """
+    transfer_encodings = headers.get_all("Transfer-Encoding", [])
+    content_lengths = headers.get_all("Content-Length", [])
+    if transfer_encodings and content_lengths:
+        raise FramingError(
+            "Content-Length and Transfer-Encoding are mutually exclusive")
+    if transfer_encodings:
+        codings = [c.strip().lower()
+                   for value in transfer_encodings
+                   for c in value.split(",") if c.strip()]
+        if codings != ["identity"]:
+            values = ", ".join(transfer_encodings)
+            raise FramingError(f"unsupported Transfer-Encoding: {values}")
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -779,6 +804,7 @@ class Handler(BaseHTTPRequestHandler):
         return any(hmac.compare_digest(c, expected) for c in candidates)
 
     def _body(self):
+        _check_body_framing(self.headers)
         try:
             n = int(self.headers.get("Content-Length") or 0)
         except (TypeError, ValueError):
@@ -803,6 +829,7 @@ class Handler(BaseHTTPRequestHandler):
         be established from the headers or the wire; the caller's
         error path then answers with Connection: close, the same
         contract as an unreadable body in _body()."""
+        _check_body_framing(self.headers)
         try:
             n = int(self.headers.get("Content-Length") or 0)
         except (TypeError, ValueError):

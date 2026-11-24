@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Probe rows for the shared stat double and resolved-interpreter stub rule.
+# Probe rows for the shared stat double, the resolved-interpreter stub
+# rule, and the literal stub-body rule (#2078).
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,6 +21,32 @@ actual_shebang="$(head -n 1 "$HARNESS_STUB_BIN/named-probe")"
 [ "$actual_shebang" = "#!$expected_bash" ] || fail "stub shebang is not the resolved bash path"
 PATH="$HARNESS_STUB_BIN" "$HARNESS_STUB_BIN/named-probe" || fail "resolved-interpreter stub did not execute by name"
 ok "stub uses the resolved interpreter"
+
+# #2078: with no ARGS the body is literal text, never a printf format —
+# a date(1) format and a literal percent round-trip byte-identical into
+# the stub file, and the stub still runs what it says.
+harness_stub date-probe 'date +%Y-%m-%d' || fail "date-format stub was refused"
+[ "$(cat "$HARNESS_STUB_BIN/date-probe")" = "$(printf '#!%s\n%s' "$expected_bash" 'date +%Y-%m-%d')" ] || fail "date-format body did not round-trip byte-identical"
+"$HARNESS_STUB_BIN/date-probe" | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' || fail "date stub did not run its body"
+ok "stub body may carry a date(1) format"
+literal_body='echo "100% sure: %s %d %% back\slash"'
+harness_stub literal-probe "$literal_body" || fail "literal stub was refused"
+[ "$(cat "$HARNESS_STUB_BIN/literal-probe")" = "$(printf '#!%s\n%s' "$expected_bash" "$literal_body")" ] || fail "literal body did not round-trip byte-identical"
+[ "$("$HARNESS_STUB_BIN/literal-probe")" = '100% sure: %s %d %% back\slash' ] || fail "literal stub did not execute its body verbatim"
+ok "stub body with %s, %d, %% and a backslash is literal with no ARGS"
+
+# With ARGS the body is a printf format, as documented.
+harness_stub format-probe 'echo "hello %s, %d%% done"' world 42 || fail "format stub was refused"
+[ "$("$HARNESS_STUB_BIN/format-probe")" = 'hello world, 42% done' ] || fail "format expansion with ARGS changed"
+ok "stub body expands as a printf format when ARGS are supplied"
+
+# A body whose expansion errors fails the stub and writes nothing,
+# instead of writing the mangled text with rc=0 (#2078).
+if harness_stub broken-probe 'date +%Y-%m-%d' unused 2>"$HARNESS_ROOT/broken-err"; then
+  fail "a body with an invalid format directive was accepted"
+fi
+[ ! -e "$HARNESS_STUB_BIN/broken-probe" ] || fail "a failed expansion still wrote a stub"
+ok "a failing printf expansion fails the stub and writes nothing"
 
 fixture="$HARNESS_ROOT/file with spaces"
 printf 'fixture\n' >"$fixture"

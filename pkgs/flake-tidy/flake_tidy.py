@@ -2917,13 +2917,22 @@ def run_nix_flake_lock(
     if override_inputs:
         for path, url in override_inputs.items():
             cmd.extend(["--override-input", path, url])
-    r = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        cwd=flake_dir,
-        timeout=120,
-    )
+    try:
+        r = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            cwd=flake_dir,
+            timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        # A hung lock (cold cache, network fetch) is a normal failure,
+        # not a crash: report it in the usual (False, message) shape so
+        # callers run their failure handling — apply_merge's backout
+        # in particular (#2069).
+        msg = "nix flake lock timed out after 120 seconds"
+        print(f"  error: {msg}", file=sys.stderr)
+        return False, msg
     if r.returncode != 0:
         print(f"  error: nix flake lock failed:\n{r.stderr}", file=sys.stderr)
         return False, r.stderr

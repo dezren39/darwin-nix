@@ -5,10 +5,12 @@ name: flake checks build
 #
 # #1134: flake-packages-build.yml covers .#packages and mcpx-nixbuild.yml
 # covers only .#packages.x86_64-linux.mcpx — no workflow ever built the
-# flake's `checks` output, so the 23 *-tests derivations (plus formatting,
-# tidy, and mcpx-darwin-skip) failed on clean main silently and were found
+# flake's `checks` output, so the 23 *-tests derivations (plus formatting
+# and tidy) failed on clean main silently and were found
 # by hand, one at a time (#1094, #1099, #1047, #978). This workflow covers
-# every check the flake exposes, partitioned by system (#1832): the
+# every check the flake exposes (mcpx-darwin-skip is no longer an
+# in-repo check — removed in the #1384 mcpx consolidation, fbfe162),
+# partitioned by system (#1832): the
 # x86_64-linux checks build on ubuntu-latest and the aarch64-darwin
 # checks on macos-14, each list enumerated from the flake for its own
 # system. x86_64-darwin gets no checks from the flake itself

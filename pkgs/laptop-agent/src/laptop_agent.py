@@ -547,7 +547,10 @@ def load_persisted_jobs():
     try:
         base = _jobs_root()
         entries = list(base.iterdir())
-    except (OSError, RuntimeError, ValueError):
+    except (OSError, RuntimeError, ValueError) as e:
+        print(f"laptop-agent: skipping persisted jobs in {STATE_DIR / 'jobs'}: "
+              f"cannot scan spool root ({e})",
+              file=sys.stderr, flush=True)
         return
     for d in entries:
         if d.is_symlink():

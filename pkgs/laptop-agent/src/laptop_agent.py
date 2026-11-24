@@ -99,6 +99,24 @@ SEMA = threading.Semaphore(_parse_startup_int(
     "LAPTOP_AGENT_SLOTS", os.environ.get("LAPTOP_AGENT_SLOTS", "32"),
     "must be an integer >= 1", 1))
 STARTED = time.time()
+# Header-read deadline (#2067): ThreadingHTTPServer hands each
+# accepted connection to a handler thread, and BaseHTTPRequestHandler
+# reads the request line and headers before any Handler route code
+# runs -- with a blocking socket, a client that sends a partial
+# request line or header and then goes silent pins that thread
+# forever, before auth, the slot semaphore, or the MAX_BODY cap can
+# apply. The socket therefore carries this read deadline from the
+# start of each request until its headers are parsed (armed in
+# Handler.handle_one_request, cleared in Handler.parse_request); on
+# expiry the read raises, the connection closes, and the thread is
+# released. Body reads after the headers keep the previous blocking
+# behaviour -- their size is already capped (#1521). 30s is generous
+# for the real clients, which send headers immediately, and short
+# enough that stalled connections cannot accumulate threads.
+HEADER_TIMEOUT_S = _parse_startup_int(
+    "LAPTOP_AGENT_HEADER_TIMEOUT_S",
+    os.environ.get("LAPTOP_AGENT_HEADER_TIMEOUT_S", "30"),
+    "must be an integer >= 1", 1)
 
 JOBS = {}                    # job_id -> dict
 JOBS_LOCK = threading.Lock()
@@ -688,6 +706,32 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):  # quiet; journal gets tracebacks only
         pass
+
+    def handle_one_request(self):
+        # Arm the header-read deadline for every request (#2067): on a
+        # keep-alive connection a handler serves many requests, so each
+        # one re-arms before its request line is read. parse_request()
+        # clears the deadline once the headers are in.
+        self.connection.settimeout(HEADER_TIMEOUT_S)
+        super().handle_one_request()
+
+    def parse_request(self):
+        ok = super().parse_request()
+        # The request line and headers have been read: the stall window
+        # is closed. Restore the blocking socket so body reads and
+        # long-running /exec responses are not cut by the deadline.
+        self.connection.settimeout(None)
+        return ok
+
+    def handle(self):
+        try:
+            super().handle()
+        except TimeoutError:
+            # Header-read deadline expired (#2067): the client stalled
+            # mid-request. Drop the connection quietly -- one journal
+            # traceback per stalled client would bury real errors; the
+            # server machinery closes the socket either way.
+            self.close_connection = True
 
     def _send(self, code, obj, close=False):
         body = json.dumps(obj).encode()

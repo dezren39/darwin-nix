@@ -109,6 +109,17 @@ class StartupEnvValidationTest(unittest.TestCase):
                 self.assertIn(repr(value), p.stderr)
                 self.assertNotIn("Traceback", p.stderr)
 
+    def test_invalid_header_timeout_refuses_to_start(self):
+        for value in ("abc", "0", "-1"):
+            with self.subTest(LAPTOP_AGENT_HEADER_TIMEOUT_S=value):
+                p = self._run_with_env(
+                    {"LAPTOP_AGENT_HEADER_TIMEOUT_S": value})
+                self.assertEqual(p.returncode, 3, p.stderr)
+                self.assertIn(
+                    "invalid LAPTOP_AGENT_HEADER_TIMEOUT_S=", p.stderr)
+                self.assertIn(repr(value), p.stderr)
+                self.assertNotIn("Traceback", p.stderr)
+
 
 class AuthHeaderTest(unittest.TestCase):
     """A request without the header must be rejected, not treated as ""."""
@@ -1074,6 +1085,95 @@ class MalformedRequestTest(unittest.TestCase):
             "GET", f"/jobs/{job_id}?out_off=abc")
         self._assert_400_then_health(
             "GET", f"/jobs/{job_id}?err_off=-1")
+
+
+class StalledHeaderTest(unittest.TestCase):
+    """Issue #2067: a client that sends a partial request line or
+    partial headers and then goes silent must not pin a handler thread.
+
+    Oracle: with LAPTOP_AGENT_HEADER_TIMEOUT_S=1, a raw socket that
+    sends an incomplete request line (and one that sends a complete
+    request line but unterminated headers) is closed by the server
+    well within the client-side 10s wait; afterwards an authenticated
+    GET /health on a fresh connection still returns 200 -- the stall
+    released its thread and the daemon itself is unaffected.
+    """
+
+    def setUp(self):
+        self.token = "<MASKED_SECRET_003>"
+        with tempfile.NamedTemporaryFile("w", delete=False) as f:
+            f.write(self.token + "\n")
+            self.token_path = f.name
+        self.port = free_port()
+        env = dict(os.environ,
+                   LAPTOP_AGENT_TOKEN_FILE=self.token_path,
+                   LAPTOP_AGENT_HOST="127.0.0.1",
+                   LAPTOP_AGENT_PORT=str(self.port),
+                   LAPTOP_AGENT_STATE=tempfile.mkdtemp(),
+                   LAPTOP_AGENT_HEADER_TIMEOUT_S="1")
+        self.proc = subprocess.Popen([sys.executable, str(AGENT)], env=env,
+                                     stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE)
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            try:
+                status, body = self._call("GET", "/health")
+                if status == 200 and body.get("ok"):
+                    return
+            except Exception:
+                time.sleep(0.1)
+        self.tearDown()
+        self.fail("agent did not start")
+
+    def tearDown(self):
+        self.proc.terminate()
+        self.proc.wait(timeout=10)
+        os.unlink(self.token_path)
+
+    def _call(self, method, path):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        conn.request(method, path,
+                     headers={"X-Agent-Token": self.token})
+        r = conn.getresponse()
+        payload = r.read()
+        conn.close()
+        try:
+            parsed = json.loads(payload) if payload else {}
+        except ValueError:
+            parsed = {}
+        return r.status, parsed
+
+    def _assert_stalled_client_closed(self, payload):
+        with socket.create_connection(("127.0.0.1", self.port),
+                                      timeout=10) as s:
+            s.sendall(payload)
+            s.settimeout(10)
+            started = time.monotonic()
+            try:
+                data = s.recv(4096)
+            except (ConnectionResetError, BrokenPipeError):
+                data = b""
+            elapsed = time.monotonic() - started
+        # Closed by the server with no response; had the server kept
+        # the connection open, recv would have raised socket.timeout
+        # at the 10s client deadline instead of returning.
+        self.assertEqual(data, b"")
+        self.assertLess(elapsed, 10)
+
+    def test_partial_request_line_is_closed(self):
+        self._assert_stalled_client_closed(b"GET /hea")
+
+    def test_partial_headers_are_closed(self):
+        self._assert_stalled_client_closed(
+            b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Agent-Token:")
+
+    def test_health_still_works_after_stalled_clients(self):
+        self._assert_stalled_client_closed(b"GET /hea")
+        self._assert_stalled_client_closed(
+            b"GET /health HTTP/1.1\r\nHost:")
+        status, body = self._call("GET", "/health")
+        self.assertEqual(status, 200)
+        self.assertTrue(body["ok"])
 
 
 class PersistedJobTimestampTest(unittest.TestCase):

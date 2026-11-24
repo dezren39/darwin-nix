@@ -56,11 +56,12 @@ def run(cmd, timeout=10):
                           timeout=timeout, env=e)
 
 def clients():
+    """Client list, or None when the query fails (unknown, not empty)."""
     try:
         out = run(["hyprctl", "clients", "-j"]).stdout
         return json.loads(out)
     except Exception:
-        return []
+        return None
 
 def active_ws():
     try:
@@ -113,7 +114,11 @@ def rustdesk_connected():
         return False
 
 def picker_gone(pid):
-    return all(c.get("pid") != pid for c in clients()
+    """True/False, or None when the client query failed (unknown)."""
+    cl = clients()
+    if cl is None:
+        return None
+    return all(c.get("pid") != pid for c in cl
                if c.get("class") == "hyprland-share-picker")
 
 def grant(picker):
@@ -126,19 +131,24 @@ def grant(picker):
     cur = active_ws()
     if ws and cur and ws != cur:
         goto_ws(ws)
+    gone = None
     # candidate (row_rel_y, share_rel_x_from_right) pairs; first that closes wins
     for row_rel, share_off in ((150, 48), (130, 107), (170, 48)):
         click(x + w // 2, y + row_rel, scale)
         click(x + w - share_off, y + h - 30, scale)
         time.sleep(1.6)
-        if picker_gone(pid):
+        gone = picker_gone(pid)
+        if gone:
             log(f"grant OK (row_rel={row_rel} share_off={share_off})")
             break
     else:
-        log("grant FAILED - picker still open after all attempts")
+        if gone is None:
+            log("grant UNKNOWN - hyprctl clients query failed; will retry")
+        else:
+            log("grant FAILED - picker still open after all attempts")
     if ws and cur and ws != cur:
         goto_ws(cur)
-    return picker_gone(pid)
+    return gone
 
 def main():
     log("rd-picker-autogrant started")
@@ -146,17 +156,20 @@ def main():
     while True:
         try:
             if not os.path.exists(DISABLE) and rustdesk_connected():
-                for c in clients():
+                cl = clients()
+                for c in cl or []:
                     if c.get("class") != "hyprland-share-picker":
                         continue
                     pid = c.get("pid")
                     if pid in handled and time.time() - handled[pid] < 300:
                         continue
                     handled[pid] = time.time()
-                    grant(c)
-                # forget dead pids
-                live = {c.get("pid") for c in clients()}
-                handled = {p: t for p, t in handled.items() if p in live}
+                    if grant(c) is None:
+                        handled.pop(pid, None)
+                live_now = clients()
+                if live_now is not None:
+                    live = {c.get("pid") for c in live_now}
+                    handled = {p: t for p, t in handled.items() if p in live}
         except Exception as e:
             log("loop error:", repr(e))
         time.sleep(1.2)

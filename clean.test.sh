@@ -924,6 +924,8 @@ grep -q 'freshness scan failed; skipping this base' "$SS_DIR/failure.err" \
   || fail "failed freshness scan did not warn and skip the base"
 
 # Successful scan still deletes stale matching entries but keeps fresh ones.
+# The real sweep now uses indexed arrays and string comparisons, the Bash 3.2
+# semantics this fixture pins: one fresh name must not mask the stale name.
 # The #2035 open-handle guard runs before del, so drive it with a working
 # lsof that reports no holder (bin-idle), under the same set +e capture as
 # the failed-scan call above: the guard's nonzero return is data, not an
@@ -1012,8 +1014,8 @@ rm -rf "$GC_DIR"
 # and the path-keyed cache decisions still happen in a real dry-run walk
 # (idle git repo judged by its repo path; non-repo artifact judged by
 # its parent path — the cache's two key sites).
-if grep -nE 'declare -A|mapfile|readarray' "$SCRIPT" > /dev/null; then
-  fail "clean.sh uses a Bash-4-only construct: $(grep -nE 'declare -A|mapfile|readarray' "$SCRIPT" | head -1)"
+if grep -nE '(local|declare)[[:space:]]+-[^[:space:]]*A|mapfile|readarray' "$SCRIPT" > /dev/null; then
+  fail "clean.sh uses a Bash-4-only construct: $(grep -nE '(local|declare)[[:space:]]+-[^[:space:]]*A|mapfile|readarray' "$SCRIPT" | head -1)"
 else
   echo "ok: clean.sh has no Bash-4-only constructs (#1829)"
 fi

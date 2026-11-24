@@ -1208,6 +1208,9 @@ rec {
         # copies of itself via xargs, and its consumers execute the sibling
         # git-discover-repos directly. The nix build sandbox has no
         # /usr/bin/env, so an unpatched `#!/usr/bin/env bash` copy cannot run.
+        # #1999: the suite runs a second time with an external read-only
+        # XDG_CONFIG_HOME, pinning the harness's XDG isolation of the
+        # scheduler fixture's global-config registration.
         git-maintain-repos-tests =
           pkgs.runCommandLocal "git-maintain-repos-tests"
             {
@@ -1227,6 +1230,18 @@ rec {
               export HOME="$TMPDIR/home"
               mkdir -p "$HOME"
               bash ./git-maintain-repos.test.sh
+              # #1999: a second run starts with an external, read-only
+              # XDG_CONFIG_HOME -- the shape that broke the scheduler
+              # fixture's `git config --global` registration. The
+              # harness isolates the fixture into its own per-run XDG
+              # dirs, so the suite passes and the external config is
+              # left byte-identical.
+              mkdir -p ./external-xdg/git
+              printf '[fixture-sentinel]\n\tkey = untouched\n' > ./external-xdg/git/config
+              cp ./external-xdg/git/config ./external-xdg/git/config.expected
+              chmod -R a-w ./external-xdg
+              XDG_CONFIG_HOME=$PWD/external-xdg bash ./git-maintain-repos.test.sh
+              diff ./external-xdg/git/config.expected ./external-xdg/git/config
               touch $out
             '';
         # #951: spotlight-exclude-artifacts.test.sh drives the real

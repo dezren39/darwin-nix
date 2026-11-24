@@ -579,6 +579,25 @@ run --path "$REG" --quick
 echo "ok: full-scope control run exits 0"
 unset GIT_STUB_MAINT_START_RC
 
+# ─── Scheduler registration lands in the fixture config (#1999) ────
+# git resolves --global through XDG_CONFIG_HOME before HOME. The
+# harness pointed XDG_CONFIG_HOME at a per-run temp dir at startup, so
+# a caller-inherited XDG_CONFIG_HOME (read-only in some CI sandboxes)
+# can neither break the registration above nor receive its writes: the
+# registration must have landed in the fixture config even though HOME
+# changed twice since the exports. The flake check's second run starts
+# the whole suite with an external read-only XDG_CONFIG_HOME and
+# asserts that config is left untouched.
+case "$XDG_CONFIG_HOME" in
+  "$TMP_ROOT"/*) echo "ok: harness XDG_CONFIG_HOME is a per-run temp dir (#1999)" ;;
+  *) fail "harness XDG_CONFIG_HOME is not under the temp root (got: $XDG_CONFIG_HOME)" ;;
+esac
+REG_ORIGINS="$("$REAL_GIT" config --global --show-origin --get-all maintenance.repo 2>/dev/null)"
+case "$REG_ORIGINS" in
+  *"file:$XDG_CONFIG_HOME/git/config"*) echo "ok: scheduler registration resolved into the fixture config (#1999)" ;;
+  *) fail "scheduler registration did not resolve into the fixture config (origins: $REG_ORIGINS)" ;;
+esac
+
 # ─── Bash 3.2 compatibility: no Bash 4-only constructs (#1834) ────
 # git-maintain-repos is invoked directly by the just git-maintain /
 # git-maintain-quick recipes via `#!/usr/bin/env bash`, which on macOS

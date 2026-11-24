@@ -560,6 +560,29 @@ rec {
               bash ./simple-rebuild.test.sh
               touch $out
             '';
+        # #2030: simple-rebuild-phase-build.test.sh pins phase_build's
+        # staleness guard -- a zero-exit build that leaves an old ./result
+        # is rejected, and only a link this build wrote is recorded. It
+        # extracts the real phase_build and stubs nix, so it needs no build.
+        simple-rebuild-phase-build-tests =
+          pkgs.runCommandLocal "simple-rebuild-phase-build-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.coreutils
+                pkgs.gnugrep
+                pkgs.gawk
+              ];
+            }
+            ''
+              cp ${./simple-rebuild.sh} simple-rebuild.sh
+              cp ${./simple-rebuild-phase-build.test.sh} simple-rebuild-phase-build.test.sh
+              chmod u+w simple-rebuild.sh simple-rebuild-phase-build.test.sh
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./simple-rebuild-phase-build.test.sh
+              touch $out
+            '';
         # #1864: simple-rebuild-staging.test.sh pins simple-rebuild.sh's
         # scoped staging -- a valid run registers only the new flake
         # inputs a tracked file references (intent-to-add, removed

@@ -583,6 +583,33 @@ rec {
               bash ./simple-rebuild-phase-build.test.sh
               touch $out
             '';
+        # #2052: simple-rebuild-token-race.test.sh pins
+        # refresh_nix_access_token()'s per-invocation temp file -- overlapping
+        # refreshes each exit 0 with an atomic single-line result and no temp
+        # debris, where the old shared temp path aborted colliding rebuilds
+        # under set -e. The suite extracts the real function from the script
+        # and runs it under zsh (the script's interpreter), so it needs zsh
+        # but no build/activation.
+        simple-rebuild-token-race-tests =
+          pkgs.runCommandLocal "simple-rebuild-token-race-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.zsh
+                pkgs.coreutils
+                pkgs.gnugrep
+                pkgs.gawk
+              ];
+            }
+            ''
+              cp ${./simple-rebuild.sh} simple-rebuild.sh
+              cp ${./simple-rebuild-token-race.test.sh} simple-rebuild-token-race.test.sh
+              chmod u+w simple-rebuild.sh simple-rebuild-token-race.test.sh
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./simple-rebuild-token-race.test.sh
+              touch $out
+            '';
         # #1864: simple-rebuild-staging.test.sh pins simple-rebuild.sh's
         # scoped staging -- a valid run registers only the new flake
         # inputs a tracked file references (intent-to-add, removed

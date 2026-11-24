@@ -308,16 +308,24 @@ fi
 # worse than the anonymous 60/hour it replaces). If gh is missing or logged
 # out, the old file is left alone.
 refresh_nix_access_token() {
-  local dir="$HOME/.local/share/nix" tok
+  local dir="$HOME/.local/share/nix" tok tmp
   tok=$(command -v gh >/dev/null && gh auth token 2>/dev/null) || tok=""
   if [[ -z "$tok" ]]; then
     echo "gh token unavailable; leaving Nix access token as is" >&2
     return 0
   fi
   mkdir -p "$dir" && chmod 700 "$dir"
-  ( umask 077
-    print -r -- "access-tokens = github.com=$tok" >"$dir/access-tokens.conf.tmp" &&
-      mv "$dir/access-tokens.conf.tmp" "$dir/access-tokens.conf" )
+  # Per-invocation temp name (#2052): concurrent refreshes must never
+  # share one temp path -- a peer's rename made our mv fail and, under
+  # set -e, aborted the rebuild before building. mktemp owns mode 600,
+  # so the umask 077 effect below is unchanged.
+  tmp="$(mktemp "$dir/.access-tokens.conf.XXXXXX")" || return 1
+  if ! ( umask 077
+    print -r -- "access-tokens = github.com=$tok" >"$tmp" ); then
+    rm -f "$tmp"
+    return 1
+  fi
+  mv "$tmp" "$dir/access-tokens.conf" || { rm -f "$tmp"; return 1; }
   echo "refreshed Nix GitHub access token"
 }
 # Not traced: the token must not reach the `set -x` log.

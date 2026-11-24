@@ -45,7 +45,7 @@ Per-workflow application in this repo:
   (#1832): each system's check list is derived from the flake for
   that system (`nix eval --json .#checks.x86_64-linux` /
   `.#checks.aarch64-darwin`), never hardcoded, and Darwin checks
-  build on a native macOS runner (macos-14), Linux checks on
+  build on a native macOS runner (macos-15), Linux checks on
   ubuntu-latest. The flake generates no `x86_64-darwin` checks, so
   that system has no partition.
   No path filters: check sources include root-level scripts and

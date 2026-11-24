@@ -258,7 +258,71 @@ check(
 monitor.run = lambda argv: None
 check("1659 failed lsof sampler still returns None", monitor.sockets({123}) is None)
 
+
+def _pid_reuse_probes():
+    # #1985: a pid reused by a different watched role between ticks must
+    # emit process.exit for the old (role, program) and process.start for
+    # the new one, and the old role's connection state must be dropped
+    # with the exit -- not carried into the new role, where its closing
+    # would be logged as a conn.close under a role that never held it,
+    # with the old connection's lived_s.
+    import time as _time
+
+    conn = "127.0.0.1:3000->127.0.0.1:51324"
+    proc_samples = iter([
+        {4242: ("opencode", 1, "opencode")},
+        {4242: ("openchamber-server", 1, "openchamber")},
+    ])
+    sock_samples = iter([
+        {4242: ({"3000"}, {conn})},
+        {4242: ({"4000"}, set())},
+    ])
+    saved = (monitor.launchd_jobs, monitor.processes, monitor.sockets)
+    monitor.launchd_jobs = lambda: {}
+    monitor.processes = lambda: next(proc_samples)
+    monitor.sockets = lambda pids: next(sock_samples)
+    try:
+        m = monitor.Monitor()
+        events = []
+        m.emit = lambda event, **fields: events.append((event, fields))
+        m.last_rotate = _time.time()
+        m.tick()
+        for c in list(m.conns.get(4242, {})):
+            m.conns[4242][c] = _time.time() - 100
+        before = len(events)
+        m.tick()
+    finally:
+        monitor.launchd_jobs, monitor.processes, monitor.sockets = saved
+    tick2 = events[before:]
+    check(
+        "1985 pid reuse emits exit for old role",
+        any(e == "process.exit" and f.get("role") == "opencode" and f.get("pid") == 4242 for e, f in tick2),
+        repr(tick2),
+    )
+    check(
+        "1985 pid reuse emits start for new role",
+        any(e == "process.start" and f.get("role") == "openchamber-server" and f.get("pid") == 4242 for e, f in tick2),
+        repr(tick2),
+    )
+    check(
+        "1985 pid reuse drops old conns with old role",
+        any(e == "conn.drop" and f.get("role") == "opencode" for e, f in tick2),
+        repr(tick2),
+    )
+    check(
+        "1985 no conn.close mis-attributed to new role",
+        not any(e == "conn.close" for e, f in tick2),
+        repr(tick2),
+    )
+    check(
+        "1985 old conn state not carried into new role",
+        conn not in m.conns.get(4242, {}),
+        repr(m.conns),
+    )
+
+
 _rotate_probes()
+_pid_reuse_probes()
 
 print(f"\n{'ALL PASS' if not FAILURES else 'FAILURES: ' + ', '.join(FAILURES)}")
 sys.exit(1 if FAILURES else 0)

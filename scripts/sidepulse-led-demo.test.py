@@ -18,6 +18,7 @@ import sys
 import tempfile
 import types
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(os.path.dirname(os.path.abspath(__file__)))
 
@@ -150,11 +151,42 @@ def test_main_does_not_start_demo_when_stop_fails():
         check("main stop failure: failure surfaced", "exit 5" in err.getvalue(), err.getvalue())
 
 
+def test_double_restore_runs_one_bootstrap():
+    """Ctrl-C invokes restore() twice (handler + finally); the second is a no-op (#2141)."""
+    fake = FakeRun(0)
+    handlers = {}
+    argv, sys.argv = sys.argv, ["sidepulse-led-demo.py", "--device", "/unused", "--palette"]
+    out, err = io.StringIO(), io.StringIO()
+    try:
+        with mocked_run(fake), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+             mock.patch.object(demo, "device_path", return_value=Path("/unused")), \
+             mock.patch.object(demo, "write_program"), \
+             mock.patch.object(demo, "run_palette", side_effect=KeyboardInterrupt), \
+             mock.patch.object(demo.signal, "signal", side_effect=lambda sig, h: handlers.__setitem__("sigint", h)):
+            try:
+                demo.main()
+            except KeyboardInterrupt:
+                pass
+            try:
+                handlers["sigint"](None, None)
+                exited = None
+            except SystemExit as exc:
+                exited = exc
+    finally:
+        sys.argv = argv
+    bootstraps = [c for c in fake.commands if "bootstrap" in c]
+    check("double restore: SIGINT handler exits 130", exited is not None and exited.code == 130,
+          str(getattr(exited, "code", None)))
+    check("double restore: exactly one bootstrap", len(bootstraps) == 1, str(fake.commands))
+    check("double restore: no false restart failure", "restart FAILED" not in err.getvalue(), err.getvalue())
+
+
 test_stop_failure_is_surfaced()
 test_successful_stop_and_start()
 test_restart_failure_is_reported_accurately()
 test_restart_success()
 test_main_does_not_start_demo_when_stop_fails()
+test_double_restore_runs_one_bootstrap()
 
 if FAILURES:
     print(f"\n{len(FAILURES)} check(s) failed")

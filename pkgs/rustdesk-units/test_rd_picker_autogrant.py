@@ -54,5 +54,46 @@ class ClosedPicker(unittest.TestCase):
             self.assertTrue(any("grant OK" in c.args[0] for c in log.call_args_list))
 
 
+class StopLoop(Exception):
+    pass
+
+
+class MainLoopFetches(unittest.TestCase):
+    """#2117 Bolt: one tick must cost exactly one clients() query.
+
+    main() used to call clients() twice per tick (once to find pickers,
+    once more to prune `handled`), i.e. two hyprctl spawns + JSON parses
+    per 1.2s tick (~19ms each, measured on the laptop) for state one
+    tick fresher. Pruning from the tick's own snapshot is equivalent
+    (a pid that vanishes mid-tick drops one tick later; the 300s
+    cooldown suppresses re-grants meanwhile), so the second fetch is
+    pure overhead. This test drives three ticks and counts queries.
+    """
+
+    def test_one_clients_query_per_tick(self):
+        calls = []
+
+        def fake_clients():
+            calls.append(1)
+            return []
+
+        sleeps = []
+
+        def fake_sleep(_s):
+            sleeps.append(1)
+            if len(sleeps) >= 3:
+                raise StopLoop
+
+        with mock.patch.object(rpa, "rustdesk_connected", return_value=True), \
+             mock.patch.object(rpa, "clients", side_effect=fake_clients), \
+             mock.patch.object(rpa.time, "sleep", side_effect=fake_sleep), \
+             mock.patch.object(rpa.os.path, "exists", return_value=False), \
+             mock.patch.object(rpa, "log"):
+            with self.assertRaises(StopLoop):
+                rpa.main()
+        self.assertEqual(len(sleeps), 3)
+        self.assertEqual(len(calls), 3)
+
+
 if __name__ == "__main__":
     unittest.main()

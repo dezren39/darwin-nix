@@ -305,6 +305,56 @@ ERR="$(cat "$TMP_ROOT/err")"
 [ -d "$VF_OTHER_ENTRY" ] || fail "vf-root prune (#1865): entry under an UNCONFIGURED root was deleted"
 echo "ok: vf-root prune (#1865): unconfigured root untouched"
 
+# ─── Short-lived / ad-hoc-postgres / pytest sweeps honor VAR_FOLDERS_ROOT (#1977) ───
+# Three more var/folders legs still iterated the literal
+# /private/var/folders/*/*/T after #1865: the pytest tidy base list,
+# the short-lived-scratch loop, and the ad-hoc-postgres loop -- so
+# fixtures could not exercise them through the seam, and a real run
+# could touch host entries outside the caller's intended root.
+# Fixture (mirrors the #1865 twin-root shape): eligible entries under
+# a configured root's */*/T, twins under an unconfigured root. Driven
+# with --system --dry-run like the pytest-guard block below, so del()
+# reports instead of removing: the configured root's entries must be
+# scheduled, the unconfigured root's must not even be named.
+VF1977_ROOT="$TMP_ROOT/vf-root-1977"
+VF1977_T="$VF1977_ROOT/ab/cd/T"
+mkdir -p "$VF1977_T/mcpx-fake-1977" "$VF1977_T/zzpg1977" "$VF1977_T/pytest-of-1977/pytest-1" "$VF1977_T/pytest-of-1977/pytest-2"
+touch "$VF1977_T/zzpg1977/PG_VERSION"
+ln -s pytest-2 "$VF1977_T/pytest-of-1977/pytest-current"
+touch -d '10 hours ago' "$VF1977_T/mcpx-fake-1977" "$VF1977_T/zzpg1977/PG_VERSION" "$VF1977_T/zzpg1977" "$VF1977_T/pytest-of-1977/pytest-1"
+touch -d '6 hours ago' "$VF1977_T/pytest-of-1977/pytest-2"
+VF1977_OTHER_T="$TMP_ROOT/vf-other-1977/ef/gh/T"
+mkdir -p "$VF1977_OTHER_T/mcpx-fake-1977other" "$VF1977_OTHER_T/zzpg1977other" "$VF1977_OTHER_T/pytest-of-1977other/pytest-1" "$VF1977_OTHER_T/pytest-of-1977other/pytest-2"
+touch "$VF1977_OTHER_T/zzpg1977other/PG_VERSION"
+ln -s pytest-2 "$VF1977_OTHER_T/pytest-of-1977other/pytest-current"
+touch -d '10 hours ago' "$VF1977_OTHER_T/mcpx-fake-1977other" "$VF1977_OTHER_T/zzpg1977other/PG_VERSION" "$VF1977_OTHER_T/zzpg1977other" "$VF1977_OTHER_T/pytest-of-1977other/pytest-1"
+touch -d '6 hours ago' "$VF1977_OTHER_T/pytest-of-1977other/pytest-2"
+OUT="$(PATH="$LSOF_STUB_DIR:$PATH" VAR_FOLDERS_ROOT="$VF1977_ROOT" PYTEST_KEEP_HOURS=4 bash "$SCRIPT" --system --dry-run 2>"$TMP_ROOT/err")"; STATUS=$?
+ERR="$(cat "$TMP_ROOT/err")"
+[ "$STATUS" -eq 0 ] || fail "vf-root (#1977): --system --dry-run exited $STATUS (stderr: $ERR)"
+if grep -q 'would delete: .*vf-root-1977/ab/cd/T/mcpx-fake-1977$' <<<"$OUT"; then
+  echo "ok: vf-root (#1977): short-lived sweep scans the configured root"
+else
+  fail "vf-root (#1977): short-lived sweep did not schedule the configured root's entry"
+fi
+if grep -q 'would remove (postgres data dir, idle >8h): .*vf-root-1977/ab/cd/T/zzpg1977$' <<<"$OUT"; then
+  echo "ok: vf-root (#1977): ad-hoc-postgres sweep scans the configured root"
+else
+  fail "vf-root (#1977): ad-hoc-postgres sweep did not schedule the configured root's cluster"
+fi
+if grep -q 'would delete: .*vf-root-1977/ab/cd/T/pytest-of-1977/pytest-1$' <<<"$OUT"; then
+  echo "ok: vf-root (#1977): pytest tidy scans the configured root"
+else
+  fail "vf-root (#1977): pytest tidy did not schedule the configured root's older run"
+fi
+if grep -q 'vf-other-1977' <<<"$OUT"; then
+  fail "vf-root (#1977): unconfigured root was scanned"
+else
+  echo "ok: vf-root (#1977): unconfigured root not scanned"
+fi
+[ -d "$VF1977_OTHER_T/mcpx-fake-1977other" ] && [ -d "$VF1977_OTHER_T/zzpg1977other" ] && [ -d "$VF1977_OTHER_T/pytest-of-1977other/pytest-1" ] || fail "vf-root (#1977): unconfigured root entries were touched"
+echo "ok: vf-root (#1977): unconfigured root untouched"
+
 # Pytest newest-run guard fires under BSD and GNU stat alike. Both
 # runs are older than PYTEST_KEEP_HOURS, so only the guard keeps the
 # newest (pytest-2). --dry-run makes del() report instead of remove:

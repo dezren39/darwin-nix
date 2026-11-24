@@ -1301,7 +1301,7 @@ echo "🧻 logs"
 # is additionally always kept, so `pytest-current` never dangles.
 PYTEST_KEEP_HOURS="${PYTEST_KEEP_HOURS:-4}"
 _pt_removed=0
-for _ptbase in "$CALLER_USER_HOME/.local/share/opencode/tmp" "${TMPDIR:-/tmp}" /tmp /private/var/folders/*/*/T; do
+for _ptbase in "$CALLER_USER_HOME/.local/share/opencode/tmp" "${TMPDIR:-/tmp}" /tmp "$VAR_FOLDERS_ROOT"/*/*/T; do
   [ -d "$_ptbase" ] || continue
   for _ptdir in "$_ptbase"/pytest-of-*; do
     [ -d "$_ptdir" ] || continue
@@ -1445,7 +1445,7 @@ sweep_short_lived_scratch() {
   [ "$removed" -gt 0 ] && info "short-lived scratch (${base/#$CALLER_USER_HOME/\~}): removed $removed entries older than ${SHORT_SCRATCH_STALE_HOURS}h"
 }
 sweep_short_lived_scratch "$CALLER_USER_HOME/.local/share/opencode/tmp"
-for _vf_t in /private/var/folders/*/*/T; do
+for _vf_t in "$VAR_FOLDERS_ROOT"/*/*/T; do
   [ -d "$_vf_t" ] || continue
   sweep_short_lived_scratch "$_vf_t"
 done
@@ -1494,7 +1494,7 @@ sweep_ad_hoc_postgres_dirs() {
   done < <(find "$base" -maxdepth 2 -name PG_VERSION -type f 2>/dev/null)
 }
 sweep_ad_hoc_postgres_dirs "$CALLER_USER_HOME/.local/share/opencode/tmp"
-for _vf_t in /private/var/folders/*/*/T; do
+for _vf_t in "$VAR_FOLDERS_ROOT"/*/*/T; do
   [ -d "$_vf_t" ] || continue
   sweep_ad_hoc_postgres_dirs "$_vf_t"
 done

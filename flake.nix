@@ -158,7 +158,9 @@ rec {
       # mcpx-src) carry every fix this flake used to pin forward
       # (opencode #1547 route overrides, the #1791 node_modules hash,
       # code #11443/#11453/#11476 for mcpx on aarch64-darwin), as of
-      # openchamber 88ca37a / opencode dfa989e / code 2dc8cb8 (2026-11-23).
+      # openchamber 1f22216 / opencode cd2ce27 / code 2dc8cb8 (2026-11-24).
+      # The opencode bump moves past the #2712 restamp: dfa989e was the
+      # stale pre-restamp pin behind the #1991 flake-build failures.
       # If the chain regresses, pin here again with
       # inputs.opencode.url / inputs.opencode.inputs.mcpx-src.url.
     };

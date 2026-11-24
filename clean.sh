@@ -1391,9 +1391,13 @@ SHORT_SCRATCH_STALE_HOURS="${SHORT_SCRATCH_STALE_HOURS:-8}"
 # adding/removing/renaming entries inside it) is sufficient evidence here.
 # The postgres-cluster sweep below needs the stronger contents-aware check
 # instead, because postgres rewrites existing files without renaming them.
+#
+# Staleness only nominates an entry: before any del, the #1803 open-handle
+# guard must clear it -- a held entry, or one whose handles cannot be
+# verified, is kept (#2035), exactly as in the sibling sweeps.
 _ss_total_removed=0
 sweep_short_lived_scratch() {
-  local base="$1" removed=0
+  local base="$1" removed=0 handles_rc
   [ -d "$base" ] || return 0
   local -A fresh=()
   local f entry name g match fresh_list
@@ -1421,12 +1425,20 @@ sweep_short_lived_scratch() {
       [[ "$name" == $g ]] && { match=1; break; }
     done
     [ "$match" = 1 ] || continue
+    dir_has_open_handles "$entry"; handles_rc=$?
+    [ "$handles_rc" -eq 0 ] && continue  # something has it open
+    if [ "$handles_rc" -eq 2 ]; then echo "  keeping (cannot verify open handles; lsof unavailable): ${entry/#$CALLER_USER_HOME/\~}"; continue; fi
     del "$entry"; removed=$((removed + 1))
   done
   # Stale uv cache locks: a crashed `uv` leaves one of these behind, which is
   # exactly what makes the `uv cache prune` tier above wait out its own
-  # UV_LOCK_TIMEOUT instead of running.
+  # UV_LOCK_TIMEOUT instead of running. Same open-handle guard as the entries
+  # above (#2035): a lock whose handles are held or cannot be verified is
+  # kept -- deleting a live lock file would let a second uv run concurrently.
   while IFS= read -r lock; do
+    dir_has_open_handles "$lock"; handles_rc=$?
+    [ "$handles_rc" -eq 0 ] && continue  # something has it open
+    if [ "$handles_rc" -eq 2 ]; then echo "  keeping (cannot verify open handles; lsof unavailable): ${lock/#$CALLER_USER_HOME/\~}"; continue; fi
     del "$lock"; removed=$((removed + 1))
   done < <(find "$base" -maxdepth 1 -name 'uv-*.lock' -mmin "+$((SHORT_SCRATCH_STALE_HOURS * 60))" 2>/dev/null)
   _ss_total_removed=$((_ss_total_removed + removed))

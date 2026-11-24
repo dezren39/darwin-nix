@@ -33,7 +33,19 @@ export default {
   async setup(ctx: any) {
     try {
       mkdirSync(DURABLE_TMP, { recursive: true })
-    } catch {}
+    } catch (err) {
+      // Fail closed (#2033): a swallowed mkdir error used to leave the
+      // hook registered anyway, exporting a temp path that was never
+      // created — every shell temp file then errored against a
+      // nonexistent directory, with the inherited temp path discarded
+      // and no warning. Warn and skip the hook instead (#1660 pattern),
+      // so the inherited temp directory stays usable and the failure
+      // is visible.
+      console.warn(
+        `durable-tmpdir: cannot create ${DURABLE_TMP}, leaving inherited temp directory in place: ${err instanceof Error ? err.message : String(err)}`,
+      )
+      return
+    }
 
     await ctx.shell.hook("create.before", (input: any) => {
       input.env.TMPDIR = DURABLE_TMP

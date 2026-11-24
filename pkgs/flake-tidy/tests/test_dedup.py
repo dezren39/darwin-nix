@@ -10,6 +10,21 @@ import flake_tidy
 
 
 class TestAnalyzeDedup:
+    def test_group_by_source_excludes_root_and_nodes_without_original(self):
+        """The grouping phase considers only source-bearing lock nodes."""
+        lock = {
+            "nodes": {
+                "root": {"inputs": {"a": "a"}, "original": {"type": "github"}},
+                "a": {"original": {"type": "github", "owner": "x", "repo": "a"}},
+                "b": {"original": {"type": "github", "owner": "x", "repo": "a"}},
+                "missing-original": {"locked": {"type": "github"}},
+            }
+        }
+
+        groups = flake_tidy._group_by_source(lock)
+
+        assert groups == {flake_tidy.source_key(lock["nodes"]["a"]): ["a", "b"]}
+
     @pytest.mark.parametrize(
         ("candidate", "current", "expected"),
         [("git", "indirect", True), ("hg", "indirect", True), ("indirect", "git", False)],

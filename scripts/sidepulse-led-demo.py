@@ -193,7 +193,6 @@ def restart_status_bar(target: Path) -> bool:
     return False
 
 
-
 def speed_up_purple(program: str, period_seconds: float) -> str:
     """The heartbeat's two-minute silence, shortened for the demo."""
 

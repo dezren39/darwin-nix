@@ -388,7 +388,17 @@ rec {
         # OpenChamber's server, running the wrapped opencode above:
         # the override swaps in the wrapper so the database and
         # scratch pins hold for the OpenCode it starts too.
-        openchamber = inputs.openchamber.packages.${system}.openchamber.override { inherit opencode; };
+        # OpenChamber's bundled aarch64-darwin node_modules hash is stale
+        # under this locked Fleet Bun: flake-packages-build run 45431339199
+        # reported xYgTN... as specified and 6ch57... as the actual FOD.
+        # Keep the platform-specific correction scoped to this pin.
+        openchamber =
+          let
+            platformHashOverride = pkgs.lib.optionalAttrs (system == "aarch64-darwin") {
+              nodeModulesHash = "sha256-6ch57alCpe+WVcekFAgWPjSbD+nzLWp/Su0jKRqVVcU=";
+            };
+          in
+          inputs.openchamber.packages.${system}.openchamber.override ({ inherit opencode; } // platformHashOverride);
 
         brew-repair = import ./pkgs/brew-repair {
           inherit pkgs;

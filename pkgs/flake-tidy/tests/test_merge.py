@@ -625,3 +625,70 @@ class TestMergeEndToEnd:
             mock_lock.assert_not_called()
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+# -- Tests for the #2069 apply_merge timeout backout --
+
+import subprocess
+import time
+
+
+class TestApplyMergeLockTimeout:
+    """#2069: when the post-merge lock times out, apply_merge must
+    take its backout path — flake.nix and flake.lock restored exactly
+    — instead of dying on an uncaught TimeoutExpired."""
+
+    @patch("flake_tidy.run_nixfmt")
+    def test_backs_out_on_lock_timeout(
+        self,
+        mock_fmt,
+        monkeypatch,
+        deep_follows_lock,
+        deep_follows_flake_nix,
+        default_config,
+    ):
+        tmpdir = tempfile.mkdtemp(prefix="flake-tidy-merge-timeout-")
+        try:
+            with open(os.path.join(tmpdir, "flake.nix"), "w") as f:
+                f.write(deep_follows_flake_nix)
+            lock_text = json.dumps(deep_follows_lock)
+            with open(os.path.join(tmpdir, "flake.lock"), "w") as f:
+                f.write(lock_text)
+
+            # A `nix` stub that sleeps 30s, with the subprocess
+            # timeout forced to 1s: the real lock call times out.
+            bin_dir = os.path.join(tmpdir, "bin")
+            os.makedirs(bin_dir)
+            stub = os.path.join(bin_dir, "nix")
+            with open(stub, "w") as f:
+                f.write("#!/bin/sh\nsleep 30\n")
+            os.chmod(stub, 0o755)
+            monkeypatch.setenv(
+                "PATH", bin_dir + os.pathsep + os.environ["PATH"]
+            )
+            real_run = subprocess.run
+
+            def run_with_short_timeout(*args, **kwargs):
+                kwargs["timeout"] = 1
+                return real_run(*args, **kwargs)
+
+            monkeypatch.setattr(subprocess, "run", run_with_short_timeout)
+
+            proposals = flake_tidy.analyze_merge(
+                deep_follows_lock, deep_follows_flake_nix, default_config
+            )
+            assert len(proposals) == 1
+
+            start = time.monotonic()
+            applied, failed = flake_tidy.apply_merge(tmpdir, proposals)
+            elapsed = time.monotonic() - start
+
+            assert applied == 0
+            assert failed == proposals
+            assert elapsed < 20
+            # Backout restored both files byte-for-byte.
+            assert flake_tidy.read_flake_nix(tmpdir) == deep_follows_flake_nix
+            with open(os.path.join(tmpdir, "flake.lock")) as f:
+                assert f.read() == lock_text
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)

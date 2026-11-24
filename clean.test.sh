@@ -1720,6 +1720,13 @@ grep -q 'CLEAN_APPS_DIR:-/Applications' "$SCRIPT" || fail "dead-cask extraction 
 # under set -e would abort the whole suite with no diagnostic. Capture
 # without letting that status kill the run; the case checks below still
 # report a real failure (mirrors the CACHE_OUT capture above).
+# Section-local TMPDIR (the #1918 precedent above): the #1853 section
+# exports a TMPDIR it later removes, and the dead-cask block's mktemp
+# (#2066) would fail against the removed dir -- point TMPDIR at a live
+# dir for the capture, then restore it.
+DC_TMPDIR_SAVE="${TMPDIR:-}"
+TMPDIR="$DC_DIR"
+export TMPDIR
 DC_OUT="$(
   as_user() { "$@"; }
   warn() { printf 'WARN: %s\n' "$*"; }
@@ -1729,6 +1736,8 @@ DC_OUT="$(
   . "$DC_DIR/block.sh"
   exit 0
 )"
+if [ -n "$DC_TMPDIR_SAVE" ]; then TMPDIR="$DC_TMPDIR_SAVE"; else unset TMPDIR; fi
+export TMPDIR
 case "$DC_OUT" in
   *"MISSING from disk"*) echo "ok: dead-cask block warns on missing apps" ;;
   *) fail "dead-cask block produced no MISSING warning (got: $DC_OUT)" ;;
@@ -1744,6 +1753,91 @@ esac
 case "$DC_OUT" in
   *single-word*) echo "ok: single-word dead cask still flagged (control)" ;;
   *) fail "single-word dead cask was not flagged (got: $DC_OUT)" ;;
+esac
+
+# ─── #2066: dead-cask per-cask `brew info --cask` failure fails closed ──
+# The dead-cask half enumerated each cask's app path with `brew info
+# --cask` inside a 2>/dev/null pipeline whose status is head's, not
+# brew's, so a failed per-cask query produced an empty app path, the
+# [ -n "$_app" ] guard skipped the cask, and the run claimed "no dead
+# casks" at exit 0. Pin the fail-closed contract with a stub brew,
+# extracting the real brew_cask_drift_check from clean.sh at test time
+# (the #1918 extraction pattern above -- sourced and driven in this
+# shell, not a subshell: the failure counter is a shell variable, and
+# this suite's EXIT trap fires in subshells): a failing per-cask query
+# warns naming the cask and the step, surfaces brew's stderr, and
+# records BREW_DRIFT_FAILURES; a successful query naming a missing app
+# still flags that dead cask, and a successful query naming a present
+# app still does not flag.
+DI_DIR="$TMP_ROOT/dead-info"
+mkdir -p "$DI_DIR/apps/Present App.app"
+cat > "$DI_DIR/casks.nix" <<'NIX'
+_: {
+  homebrew.casks = [
+    "dead-cask"
+    "present-cask"
+    "failing-cask"
+  ];
+}
+NIX
+cat > "$DI_DIR/brew" <<'EOF'
+#!/bin/sh
+if [ "$1 $2" = "list --cask" ]; then printf '%s\n' dead-cask present-cask failing-cask; exit 0; fi
+if [ "$1" = info ]; then
+  case "$3" in
+    dead-cask)    printf '%s (App)\n' "$CLEAN_APPS_DIR/Dead App.app" ;;
+    present-cask) printf '%s (App)\n' "$CLEAN_APPS_DIR/Present App.app" ;;
+    failing-cask) echo "Error: nonexistent cask failing-cask" >&2; exit 1 ;;
+  esac
+  exit 0
+fi
+exit 0
+EOF
+chmod +x "$DI_DIR/brew"
+sed -n '/^brew_cask_drift_check() {/,/^}/p' "$SCRIPT" > "$DI_DIR/drift.sh"
+[ -s "$DI_DIR/drift.sh" ] || fail "could not extract brew_cask_drift_check from clean.sh (#2066)"
+grep -q 'BREW_DRIFT_FAILURES' "$DI_DIR/drift.sh" || fail "extracted drift check lacks the failure counter (#2066)"
+DI_SELF_DIR_SAVE="$SELF_DIR"
+SELF_DIR="$DI_DIR"
+real_brew() { printf '%s' "$DI_DIR/brew"; }
+BREW_DRIFT_FAILURES=0
+DI_TMPDIR_SAVE="${TMPDIR:-}"
+TMPDIR="$DI_DIR"
+export TMPDIR
+export CLEAN_APPS_DIR="$DI_DIR/apps"
+brew_cask_drift_check >"$DI_DIR/out" 2>"$DI_DIR/err"
+DI_FAILURES=$BREW_DRIFT_FAILURES
+DI_OUT="$(cat "$DI_DIR/out")"
+DI_ERR="$(cat "$DI_DIR/err")"
+SELF_DIR="$DI_SELF_DIR_SAVE"
+if [ -n "$DI_TMPDIR_SAVE" ]; then TMPDIR="$DI_TMPDIR_SAVE"; else unset TMPDIR; fi
+export TMPDIR
+unset CLEAN_APPS_DIR
+[ "$DI_FAILURES" -eq 1 ] \
+  || fail "failing brew info --cask recorded $DI_FAILURES drift failure(s) (want 1) (#2066)"
+case "$DI_ERR" in
+  *"brew info --cask failing-cask failed"*) echo "ok: dead-cask check names the cask and the failed step (#2066)" ;;
+  *) fail "dead-cask check did not name the cask and step (got: $DI_ERR) (#2066)" ;;
+esac
+case "$DI_ERR" in
+  *"nonexistent cask failing-cask"*) echo "ok: dead-cask check surfaces brew's own stderr (#2066)" ;;
+  *) fail "dead-cask check swallowed brew's stderr (got: $DI_ERR) (#2066)" ;;
+esac
+case "$DI_ERR" in
+  *"MISSING from disk"*) echo "ok: dead-cask check still warns on missing apps (#2066)" ;;
+  *) fail "dead-cask check produced no MISSING warning (got: $DI_OUT / $DI_ERR) (#2066)" ;;
+esac
+case "$DI_OUT" in
+  *dead-cask*) echo "ok: successful query naming a missing app still flags that dead cask (#2066)" ;;
+  *) fail "successful query naming a missing app did not flag it (got: $DI_OUT) (#2066)" ;;
+esac
+case "$DI_OUT" in
+  *present-cask*) fail "successful query naming a present app was flagged (got: $DI_OUT) (#2066)" ;;
+  *) echo "ok: successful query naming a present app still does not flag (#2066)" ;;
+esac
+case "$DI_OUT" in
+  *failing-cask*) fail "failed query was reported as a dead cask instead of an enumeration failure (got: $DI_OUT) (#2066)" ;;
+  *) echo "ok: failed query is never reported as a dead cask (#2066)" ;;
 esac
 
 

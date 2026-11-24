@@ -17,10 +17,7 @@ alt-tab-macos.overrideAttrs (old: {
     in
     assert lib.assertMsg (occurrences == 1)
       "alt-tab-debug: upstream buildPhase must contain '${needle}' exactly once, found ${toString occurrences}";
-    builtins.replaceStrings
-      [ needle ]
-      [ "-D DEBUG ${needle}" ]
-      old.buildPhase;
+    builtins.replaceStrings [ needle ] [ "-D DEBUG ${needle}" ] old.buildPhase;
 
   postPatch = (old.postPatch or "") + ''
     # Keep DEBUG's diagnostics available without opening QA at launch, and use

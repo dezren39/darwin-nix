@@ -22,4 +22,28 @@ with patch.object(sys, "argv", ["demo", "--device", "/unused"]), \
     assert demo.main() == 1
 assert not write.called
 assert "demo not started: service not found" in error.getvalue()
+
+handlers = {}
+ok = types.SimpleNamespace(returncode=0, stderr=b"")
+out = io.StringIO()
+err = io.StringIO()
+with patch.object(sys, "argv", ["demo", "--device", "/unused", "--palette"]), \
+     patch.object(demo, "device_path", return_value=Path("/unused")), \
+     patch.object(demo.subprocess, "run", return_value=ok) as run, \
+     patch.object(demo, "write_program"), \
+     patch.object(demo, "run_palette", side_effect=KeyboardInterrupt), \
+     patch.object(demo.signal, "signal", side_effect=lambda sig, h: handlers.__setitem__("sigint", h)), \
+     redirect_stderr(err):
+    try:
+        demo.main()
+    except KeyboardInterrupt:
+        pass
+    try:
+        handlers["sigint"](None, None)
+    except SystemExit as exit_:
+        assert exit_.code == 130
+bootstraps = [c for c in run.call_args_list if "bootstrap" in c.args[0]]
+assert len(bootstraps) == 1, bootstraps
+assert "was not handed back" not in err.getvalue() + out.getvalue()
 print("sidepulse-led-demo: stop failure prevents writes and explains why")
+print("sidepulse-led-demo: double restore runs one bootstrap with no false failure")

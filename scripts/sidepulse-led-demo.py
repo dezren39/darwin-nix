@@ -426,7 +426,13 @@ def main() -> int:
         )
         return 1
 
+    restored = False
+
     def restore(*_args):
+        nonlocal restored
+        if restored:
+            return
+        restored = True
         write_program(target, "off")
         try:
             launchctl("start")

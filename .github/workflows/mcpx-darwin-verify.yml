@@ -1,11 +1,12 @@
-name: mcpx-darwin-verify (one-off, issue 471)
-# One-off aarch64-darwin build verification for dezren39/nix#471.
-# Throwaway branch only: this workflow must not merge. Delete the branch
-# after the run (see the issue's agent note).
+name: mcpx-darwin-verify (manual Darwin smoke check)
+# Maintained manual aarch64-darwin mcpx build-and-run smoke check.
+# Dispatch with workflow_dispatch; there is no push trigger.
+# Ownership split: nightly Darwin package builds are owned by
+# flake-packages-build.yml; this workflow owns the aarch64-darwin
+# mcpx build-and-run smoke assertion (build
+# .#packages.aarch64-darwin.mcpx, then run the built binary).
 on:
   workflow_dispatch:
-  push:
-    branches: [queue/8082-471-darwin-mcpx-verify]
 permissions:
   contents: read
 jobs:

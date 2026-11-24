@@ -150,8 +150,39 @@ def test_main_does_not_start_demo_when_stop_fails():
         check("main stop failure: failure surfaced", "exit 5" in err.getvalue(), err.getvalue())
 
 
+def test_restore_runs_once_on_repeated_invocation():
+    from unittest.mock import patch
+
+    handlers = {}
+    fake = FakeRun(0)
+    argv = sys.argv
+    sys.argv = ["demo", "--device", "/unused", "--palette"]
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            with mocked_run(fake), \
+                 contextlib.redirect_stderr(io.StringIO()), \
+                 contextlib.redirect_stdout(io.StringIO()), \
+                 patch.object(demo, "device_path", return_value=target), \
+                 patch.object(demo, "run_palette", side_effect=KeyboardInterrupt), \
+                 patch.object(demo.signal, "signal", side_effect=lambda sig, h: handlers.__setitem__("sigint", h)):
+                try:
+                    demo.main()
+                except KeyboardInterrupt:
+                    pass
+                try:
+                    handlers["sigint"](None, None)
+                except SystemExit:
+                    pass
+    finally:
+        sys.argv = argv
+    bootstraps = [c for c in fake.commands if "bootstrap" in c]
+    check("restore once: one launchctl start/bootstrap", len(bootstraps) == 1, str(fake.commands))
+
+
 test_stop_failure_is_surfaced()
 test_successful_stop_and_start()
+test_restore_runs_once_on_repeated_invocation()
 test_restart_failure_is_reported_accurately()
 test_restart_success()
 test_main_does_not_start_demo_when_stop_fails()

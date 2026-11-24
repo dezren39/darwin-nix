@@ -442,7 +442,13 @@ def main() -> int:
             "(nothing written to the device)."
         )
 
+    restored = False
+
     def restore(*_args):
+        nonlocal restored
+        if restored:
+            return
+        restored = True
         restart_status_bar(target)
 
     signal.signal(signal.SIGINT, lambda *_: (restore(), sys.exit(130)))

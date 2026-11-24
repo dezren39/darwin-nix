@@ -73,6 +73,8 @@ STATE_DIR = Path(os.environ.get(
     "LAPTOP_AGENT_STATE", Path.home() / ".local/state/laptop-agent"))
 MAX_OUT = 1 << 20            # per-stream capture cap for /exec (tail kept)
 MAX_BODY = 1 << 20           # request body cap for /exec and /jobs
+_META_WRITE_ATTEMPTS = 3     # bounded retries for a meta.json write (#2037)
+_META_WRITE_RETRY_DELAY_S = 0.1  # pause between meta.json write attempts
 EXEC_TIMEOUT_DEFAULT = 120
 EXEC_TIMEOUT_MAX = 600
 # Batch bounds (#1842): MAX_EXEC_COMMANDS caps how many commands one
@@ -314,13 +316,30 @@ def _write_meta(job):
         print(f"laptop-agent: cannot write meta for job "
               f"{job['id']}: {e}", file=sys.stderr, flush=True)
         return
-    try:
-        d.mkdir(parents=True, exist_ok=True)
-        tmp = d / "meta.json.tmp"
-        tmp.write_text(json.dumps(meta))
-        os.replace(tmp, d / "meta.json")
-    except OSError:
-        pass
+    # Issue #2037: the meta.json write used to swallow every OSError
+    # silently, so a failed final (done) write left the last
+    # successful state -- "running" -- on disk, and the job restored
+    # after restart as interrupted with exit null. Retry a bounded
+    # number of times (a transient ENOSPC/permission blip must not
+    # lose the final state), then report the failure with one stderr
+    # line naming the job, exactly like the job_dir branch above.
+    # The restore contract (#1578) is unchanged: a persisted
+    # "running" entry still restores as interrupted, so the retry is
+    # what keeps a finished job from being presented that way.
+    last_error = None
+    for _attempt in range(_META_WRITE_ATTEMPTS):
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            tmp = d / "meta.json.tmp"
+            tmp.write_text(json.dumps(meta))
+            os.replace(tmp, d / "meta.json")
+            return
+        except OSError as e:
+            last_error = e
+            if _attempt + 1 < _META_WRITE_ATTEMPTS:
+                time.sleep(_META_WRITE_RETRY_DELAY_S)
+    print(f"laptop-agent: cannot write meta for job "
+          f"{job['id']}: {last_error}", file=sys.stderr, flush=True)
 
 
 # Restore contract (design #1578, phase 1 -- issue #1579): the

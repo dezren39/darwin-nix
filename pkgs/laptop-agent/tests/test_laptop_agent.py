@@ -5,6 +5,7 @@ Run with: python3 -m unittest discover -s pkgs/laptop-agent/tests
 Wired as the flake check `laptop-agent-tests` (Linux).
 """
 import contextlib
+import errno
 import http.client
 import io
 import json
@@ -2384,3 +2385,140 @@ class ExecBatchBoundsTest(unittest.TestCase):
         self.assertTrue(second.get("timeout"), second)
         self.assertFalse(os.path.exists(marker))
 
+
+class WriteMetaFailureTest(unittest.TestCase):
+    """Issue #2037: _write_meta swallowed every OSError from the
+    meta.json write, so a failed final (done) write left the last
+    successful state -- "running" -- on disk, and the job restored
+    after restart as interrupted with exit null, with no stderr line.
+
+    Oracle: a transiently failing final write is retried and lands,
+    so the restored job keeps its real exit instead of a fabricated
+    interrupted/exit-null; a persistently failing write reports
+    exactly one stderr line naming the job id (matching the job_dir
+    branch) and leaves the on-disk meta untouched. The restore
+    contract (#1578) is unchanged: an entry that is still "running"
+    on disk restores as interrupted, which is now a visible failure
+    rather than a silent one.
+    """
+
+    def _import_agent(self):
+        with tempfile.NamedTemporaryFile("w", suffix="-token",
+                                         delete=False) as f:
+            f.write("write-meta-test-token\n")
+            token_path = f.name
+        os.environ.setdefault("LAPTOP_AGENT_TOKEN_FILE", token_path)
+        sys.path.insert(0, str(AGENT.parent))
+        import laptop_agent as la
+        return la
+
+    def _write_job(self, state_dir, job_id, **meta):
+        spool = Path(state_dir) / "jobs" / job_id
+        spool.mkdir(parents=True)
+        meta.setdefault("id", job_id)
+        meta.setdefault("cwd", "/")
+        meta.setdefault("cmd", "test")
+        meta.setdefault("exit", 0)
+        meta.setdefault("state", "done")
+        (spool / "meta.json").write_text(json.dumps(meta))
+        (spool / "stdout").write_bytes(b"")
+        (spool / "stderr").write_bytes(b"")
+        return spool
+
+    def _done_job(self, job_id, now):
+        return {"id": job_id, "proc": None, "cwd": "/", "cmd_repr": "test",
+                "started_at": now - 10.0, "ended_at": now, "exit": 0,
+                "state": "done", "interrupted": False, "_files": ()}
+
+    def tearDown(self):
+        la_mod = sys.modules.get("laptop_agent")
+        if la_mod is not None:
+            la_mod.JOBS.clear()
+
+    def test_transient_write_failure_retried_real_exit_restored(self):
+        la = self._import_agent()
+        with tempfile.TemporaryDirectory() as state_dir:
+            job_id = "write-retry-job"
+            now = time.time()
+            # The last successful write left the job "running" on disk.
+            self._write_job(state_dir, job_id, state="running",
+                            exit=None, started_at=now - 10.0,
+                            ended_at=None)
+            orig_write_text = Path.write_text
+            calls = {"n": 0}
+
+            def flaky_write_text(self, data, *args, **kwargs):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise OSError(errno.ENOSPC,
+                                  "No space left on device")
+                return orig_write_text(self, data, *args, **kwargs)
+
+            err = io.StringIO()
+            with patch.object(la, "STATE_DIR", Path(state_dir)):
+                with contextlib.redirect_stderr(err):
+                    with patch.object(Path, "write_text",
+                                      flaky_write_text):
+                        la._write_meta(self._done_job(job_id, now))
+            # The retry landed: no failure line, and the on-disk meta
+            # is the finished job, not the stale running one.
+            self.assertEqual(err.getvalue(), "")
+            self.assertEqual(calls["n"], 2)
+            on_disk = json.loads(
+                (Path(state_dir) / "jobs" / job_id
+                 / "meta.json").read_text())
+            self.assertEqual(on_disk["state"], "done")
+            self.assertEqual(on_disk["exit"], 0)
+            # After a restart the job restores with its real exit --
+            # not the fabricated interrupted/exit-null of #2037.
+            la.JOBS.clear()
+            err = io.StringIO()
+            with patch.object(la, "STATE_DIR", Path(state_dir)):
+                with contextlib.redirect_stderr(err):
+                    la.load_persisted_jobs()
+            self.assertEqual(err.getvalue(), "")
+            job = la.JOBS[job_id]
+            self.assertEqual(job["state"], "done")
+            self.assertEqual(job["exit"], 0)
+            self.assertFalse(job["interrupted"])
+            self.assertEqual(la.job_public(job)["exit"], 0)
+
+    def test_persistent_write_failure_logs_one_line_naming_job(self):
+        la = self._import_agent()
+        with tempfile.TemporaryDirectory() as state_dir:
+            job_id = "write-fail-job"
+            now = time.time()
+            spool = self._write_job(state_dir, job_id, state="running",
+                                    exit=None, started_at=now - 10.0,
+                                    ended_at=None)
+            before = (spool / "meta.json").read_text()
+
+            def failing_write_text(self, data, *args, **kwargs):
+                raise OSError(errno.ENOSPC, "No space left on device")
+
+            err = io.StringIO()
+            with patch.object(la, "STATE_DIR", Path(state_dir)):
+                with contextlib.redirect_stderr(err):
+                    with patch.object(Path, "write_text",
+                                      failing_write_text):
+                        la._write_meta(self._done_job(job_id, now))
+            lines = [ln for ln in err.getvalue().splitlines()
+                     if ln.strip()]
+            self.assertEqual(len(lines), 1, err.getvalue())
+            self.assertIn(job_id, lines[0])
+            self.assertIn("cannot write meta", lines[0])
+            # The failed write changed nothing on disk.
+            self.assertEqual((spool / "meta.json").read_text(), before)
+            # The #1578 restore contract is unchanged for an entry
+            # that is still "running" on disk: it restores as
+            # interrupted -- now with the failure visible on stderr
+            # instead of silent.
+            la.JOBS.clear()
+            err = io.StringIO()
+            with patch.object(la, "STATE_DIR", Path(state_dir)):
+                with contextlib.redirect_stderr(err):
+                    la.load_persisted_jobs()
+            self.assertEqual(err.getvalue(), "")
+            job = la.JOBS[job_id]
+            self.assertTrue(job["interrupted"])
+            self.assertIsNone(job["exit"])

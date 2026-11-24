@@ -375,7 +375,8 @@ class AuthedUnreadBodyConnectionTest(unittest.TestCase):
     def _call(self, conn, method, path, body=None):
         headers = {"X-Agent-Token": self.token,
                    "Content-Type": "application/json"}
-        data = json.dumps(body).encode() if body is not None else None
+        data = (body if isinstance(body, bytes) else json.dumps(body).encode()
+                if body is not None else None)
         conn.request(method, path, body=data, headers=headers)
         r = conn.getresponse()
         payload = r.read()
@@ -504,6 +505,57 @@ class AuthedUnreadBodyConnectionTest(unittest.TestCase):
         self.assertEqual(parsed, {"error": "no such job"})
         self._assert_health_ok(conn)
         conn.close()
+
+    def test_get_health_with_body_then_health_same_connection(self):
+        conn = self._conn()
+        status, connection, parsed = self._call(
+            conn, "GET", "/health", b"junk")
+        self.assertEqual(status, 200, parsed)
+        self.assertTrue(parsed["ok"])
+        self.assertNotEqual(connection, "close")
+        self._assert_health_ok(conn)
+        conn.close()
+
+    def test_get_unknown_route_with_body_then_health_same_connection(self):
+        conn = self._conn()
+        status, connection, parsed = self._call(
+            conn, "GET", "/no-such-route", b"junk")
+        self.assertEqual(status, 404, parsed)
+        self.assertEqual(parsed, {"error": "no such route"})
+        self.assertNotEqual(connection, "close")
+        self._assert_health_ok(conn)
+        conn.close()
+
+    def test_get_oversized_body_returns_closing_400(self):
+        conn = self._conn()
+        conn.putrequest("GET", "/health")
+        conn.putheader("X-Agent-Token", self.token)
+        conn.putheader("Content-Length", str((1 << 20) + 1))
+        conn.endheaders()
+        response = conn.getresponse()
+        self.assertEqual(response.status, 400)
+        self.assertEqual(response.getheader("Connection"), "close")
+        self.assertIn("too large", json.loads(response.read())["error"])
+        conn.close()
+
+    def test_get_truncated_body_returns_closing_400(self):
+        with socket.create_connection(("127.0.0.1", self.port), timeout=5) as sock:
+            sock.sendall(
+                b"GET /health HTTP/1.1\r\nHost: localhost\r\n"
+                + f"X-Agent-Token: {self.token}\r\n".encode()
+                + b"Content-Length: 4\r\n\r\n"
+            )
+            sock.shutdown(socket.SHUT_WR)
+            response = bytearray()
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                response.extend(chunk)
+        head, _, body = response.partition(b"\r\n\r\n")
+        self.assertIn(b" 400 ", head)
+        self.assertIn(b"Connection: close", head)
+        self.assertIn(b"truncated", body)
 
 class TailFileTest(unittest.TestCase):
     def test_job_public_samples_state_before_reading_spools(self):

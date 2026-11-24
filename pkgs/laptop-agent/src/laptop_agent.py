@@ -864,6 +864,7 @@ class Handler(BaseHTTPRequestHandler):
     def _do_GET(self):
         if not self._authed():
             return self._send(401, {"error": "bad token"}, close=True)
+        self._drain_body()
         path = urlparse(self.path)
         if path.path == "/health":
             with JOBS_LOCK:

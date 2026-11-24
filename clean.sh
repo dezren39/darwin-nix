@@ -453,6 +453,35 @@ del() {
     rm -rf "$p" 2>/dev/null || warn "could not fully remove $p"
   done
 }
+
+# git_checkout_keep_reason <dir> -- guard for deleting a git checkout
+# wholesale (#2040): prints WHY the checkout must be kept and returns 0
+# when it holds work that exists nowhere else (uncommitted changes, stash
+# entries, or commits no remote has); returns 1 silently when deletion is
+# safe (path absent, not a git work tree, or clean with every commit on
+# some remote). Like dir_has_open_handles (#1803) it fails CLOSED: when
+# git cannot answer, the reason is the failure itself, so an unverifiable
+# checkout is kept, never deleted on a guess.
+git_checkout_keep_reason() {
+  local dir="$1"
+  [ -d "$dir" ] || return 1
+  [ -e "$dir/.git" ] || return 1
+  if ! have git; then echo "git is unavailable, so its state cannot be verified"; return 0; fi
+  local porcelain
+  if ! porcelain="$(git -C "$dir" status --porcelain 2>/dev/null)"; then
+    echo "git status failed, so its state cannot be verified"; return 0
+  fi
+  if [ -n "$porcelain" ]; then echo "it has uncommitted changes"; return 0; fi
+  if [ -n "$(git -C "$dir" stash list 2>/dev/null)" ]; then echo "it has stash entries"; return 0; fi
+  if git -C "$dir" rev-parse --verify -q HEAD >/dev/null 2>&1; then
+    local unpushed
+    if ! unpushed="$(git -C "$dir" rev-list --branches HEAD --not --remotes 2>/dev/null)"; then
+      echo "its pushed state cannot be verified"; return 0
+    fi
+    if [ -n "$unpushed" ]; then echo "it has commits not pushed to any remote"; return 0; fi
+  fi
+  return 1
+}
 # have CMD -- true if runnable. Missing tools are informational, never fatal.
 have() { command -v "$1" >/dev/null 2>&1; }
 
@@ -998,7 +1027,7 @@ for _d in "${VSCODE_EXT_DIRS[@]}"; do prune_vscode_extensions "$_d"; done
 # out that was never uninstalled because homebrew.onActivation.cleanup="none".
 # Reported, never auto-removed: deleting an app is not a cache operation.
 brew_cask_drift_check() {
-  local _b _brew_err _cask_list _orphans _dead _c _app
+  local _b _brew_err _cask_list _orphans _dead _c _app _brew_info_err _brew_info_out
   _b="$(real_brew)"
   [ -n "$_b" ] || return 0
   [ -f "$SELF_DIR/casks.nix" ] || return 0
@@ -1040,8 +1069,29 @@ brew_cask_drift_check() {
   # entry would then delete a working app. visual-studio-code is exactly that
   # case today.
   _dead=""
+  # CLEAN_APPS_DIR is a test seam (same pattern as VSCODE_INSIDERS_APP_DIR in
+  # patch-vscode-insiders.sh): production always uses the /Applications
+  # default. The extraction must span spaces -- the old [^ ]* class could not
+  # match a multi-word bundle name (Visual Studio Code.app), so those casks
+  # extracted empty and were silently skipped by the MISSING check (#1902).
+  _apps_dir="${CLEAN_APPS_DIR:-/Applications}"
   for _c in $_cask_list; do
-    _app=$(as_user "$_b" info --cask "$_c" 2>/dev/null | grep -oE '/Applications/[^ ]*\.app' | head -1 || true)
+    # Per-cask enumeration fails closed (#2066): a failing `brew info
+    # --cask` used to produce an empty app path through a 2>/dev/null
+    # pipeline (whose status is head's, not brew's), so the [ -n "$_app" ]
+    # guard skipped the cask and the run claimed "no dead casks" at exit
+    # 0. Name the cask and the step, surface brew's stderr, and record
+    # the failure in BREW_DRIFT_FAILURES like the list-level check (#1918).
+    _brew_info_err=$(mktemp)
+    if ! _brew_info_out=$(as_user "$_b" info --cask "$_c" 2>"$_brew_info_err"); then
+      warn "brew info --cask $_c failed -- dead-cask check cannot verify $_c; a broken brew query is not 'no dead casks'"
+      [ -s "$_brew_info_err" ] && sed 's/^/     /' "$_brew_info_err" >&2
+      rm -f "$_brew_info_err"
+      BREW_DRIFT_FAILURES=$((BREW_DRIFT_FAILURES + 1))
+      continue
+    fi
+    rm -f "$_brew_info_err"
+    _app=$(printf '%s\n' "$_brew_info_out" | grep -oE "$_apps_dir/.*\.app" | head -1 || true)
     [ -n "$_app" ] && [ ! -d "$_app" ] && _dead="$_dead $_c"
   done
   [ -n "$_dead" ] && { warn "casks installed but the app is MISSING from disk:"; printf '     %s\n' $_dead; }
@@ -1279,7 +1329,15 @@ for _ptbase in "$CALLER_USER_HOME/.local/share/opencode/tmp" "${TMPDIR:-/tmp}" /
 done
 [ "$_pt_removed" -gt 0 ] && info "pytest: removed $_pt_removed run dirs older than ${PYTEST_KEEP_HOURS}h"
 
-del "$CALLER_USER_HOME/git/oseries"
+# The oseries checkout is a real working repo, not scratch: delete it
+# only when it holds no work that exists nowhere else (#2040).
+OSERIES_DIR="$CALLER_USER_HOME/git/oseries"
+if _oseries_reason="$(git_checkout_keep_reason "$OSERIES_DIR")"; then
+  warn "keeping ${OSERIES_DIR/#$HOME/\~}: $_oseries_reason"
+else
+  del "$OSERIES_DIR"
+fi
+unset _oseries_reason
 OPS_LOG_DIR="$CALLER_USER_HOME/.cache/operations-portal/logs"
 if [ -d "$OPS_LOG_DIR" ]; then
   # operations-portal rotates daily but never prunes: retention_days is defined
@@ -1333,9 +1391,13 @@ SHORT_SCRATCH_STALE_HOURS="${SHORT_SCRATCH_STALE_HOURS:-8}"
 # adding/removing/renaming entries inside it) is sufficient evidence here.
 # The postgres-cluster sweep below needs the stronger contents-aware check
 # instead, because postgres rewrites existing files without renaming them.
+#
+# Staleness only nominates an entry: before any del, the #1803 open-handle
+# guard must clear it -- a held entry, or one whose handles cannot be
+# verified, is kept (#2035), exactly as in the sibling sweeps.
 _ss_total_removed=0
 sweep_short_lived_scratch() {
-  local base="$1" removed=0
+  local base="$1" removed=0 handles_rc
   [ -d "$base" ] || return 0
   local -A fresh=()
   local f entry name g match fresh_list
@@ -1363,12 +1425,20 @@ sweep_short_lived_scratch() {
       [[ "$name" == $g ]] && { match=1; break; }
     done
     [ "$match" = 1 ] || continue
+    dir_has_open_handles "$entry"; handles_rc=$?
+    [ "$handles_rc" -eq 0 ] && continue  # something has it open
+    if [ "$handles_rc" -eq 2 ]; then echo "  keeping (cannot verify open handles; lsof unavailable): ${entry/#$CALLER_USER_HOME/\~}"; continue; fi
     del "$entry"; removed=$((removed + 1))
   done
   # Stale uv cache locks: a crashed `uv` leaves one of these behind, which is
   # exactly what makes the `uv cache prune` tier above wait out its own
-  # UV_LOCK_TIMEOUT instead of running.
+  # UV_LOCK_TIMEOUT instead of running. Same open-handle guard as the entries
+  # above (#2035): a lock whose handles are held or cannot be verified is
+  # kept -- deleting a live lock file would let a second uv run concurrently.
   while IFS= read -r lock; do
+    dir_has_open_handles "$lock"; handles_rc=$?
+    [ "$handles_rc" -eq 0 ] && continue  # something has it open
+    if [ "$handles_rc" -eq 2 ]; then echo "  keeping (cannot verify open handles; lsof unavailable): ${lock/#$CALLER_USER_HOME/\~}"; continue; fi
     del "$lock"; removed=$((removed + 1))
   done < <(find "$base" -maxdepth 1 -name 'uv-*.lock' -mmin "+$((SHORT_SCRATCH_STALE_HOURS * 60))" 2>/dev/null)
   _ss_total_removed=$((_ss_total_removed + removed))
@@ -1948,13 +2018,18 @@ OPENCODE_TIDY_PROTECT_DAYS="${OPENCODE_TIDY_PROTECT_DAYS:-1}"
 OPENCODE_TIDY_LARGE_MB="${OPENCODE_TIDY_LARGE_MB:-200}"
 
 tidy_dir_has_recent_file() {
+  local recent_file
   # .git internals are excluded: `git status` (run by opencode_entry_is_idle,
   # by clean.sh's own repo maintenance, by anything) touches .git/index's
   # mtime on every invocation, read-only or not. Counting that would make any
   # directory holding a repo look "recently modified" indefinitely, on a
   # timer reset by code that has nothing to do with this directory's own
   # content.
-  [ -n "$(find "$1" -mindepth 1 -name .git -prune -o -type f -mtime "-${OPENCODE_TIDY_PROTECT_DAYS}" -print -quit 2>/dev/null)" ]
+  if recent_file="$(find "$1" -mindepth 1 -name .git -prune -o -type f -mtime "-${OPENCODE_TIDY_PROTECT_DAYS}" -print -quit 2>/dev/null)"; then
+    [ -n "$recent_file" ]
+  else
+    return 2
+  fi
 }
 
 # initdb always writes PG_VERSION at a postgres data dir's root, regardless
@@ -2044,8 +2119,16 @@ tidy_dir_to_bucket() {
 }
 
 tidy_classify_and_place() {
-  local dir="$1" bucket_root="$2" g wt kept_worktree="" idle_worktrees=() inventory
-  tidy_dir_has_recent_file "$dir" && return 0   # rule 2, tidy's own protect window
+  local dir="$1" bucket_root="$2" g wt kept_worktree="" idle_worktrees=() inventory freshness_rc
+  if tidy_dir_has_recent_file "$dir"; then
+    return 0   # rule 2, tidy's own protect window
+  else
+    freshness_rc=$?
+  fi
+  if [ "$freshness_rc" -gt 1 ]; then
+    warn "tidy: freshness scan failed for $dir; skipping purge/archive for safety"
+    return 0
+  fi
 
   # The nested-worktree inventory decides whether anything below may be
   # purged or archived, so its failure must be observable (#1863): a find

@@ -109,13 +109,14 @@ def launchd_jobs():
     return jobs
 
 
-# Every pattern classify() can match contains at least one of these
-# substrings, so a command line containing none of them cannot match any
-# pattern. classify() runs on every line of `ps -axo` output on every tick
-# (every INTERVAL seconds, for the life of the agent), and almost every
-# process on the machine is unrelated: one compiled substring scan rejects
-# those lines instead of four regex searches over the full command line.
+# Pre-compiled: classify() runs on every `ps` line on every tick, and
+# re.search(pattern_str, ...) pays a cache lookup per call. Module-level
+# patterns compile once at import.
 _CLASSIFY_HINTS = re.compile(r"OpenChamber|openchamber|opencode|mcpx|server/index\.js")
+_CLASSIFY_SERVER_RE = re.compile(r"openchamber/packages/web/bin/cli\.js serve|/bin/openchamber serve")
+_CLASSIFY_DEV_RE = re.compile(r"\bbun server/index\.js\b")
+_CLASSIFY_OPENCODE_RE = re.compile(r"opencode(-wrapped)? serve\b")
+_CLASSIFY_MCPX_RE = re.compile(r"\bmcpx daemon\b")
 
 
 def classify(command):
@@ -123,13 +124,13 @@ def classify(command):
         return None
     if "/OpenChamber.app/Contents/MacOS/OpenChamber" in command:
         return "openchamber-desktop"
-    if re.search(r"openchamber/packages/web/bin/cli\.js serve|/bin/openchamber serve", command):
+    if _CLASSIFY_SERVER_RE.search(command):
         return "openchamber-server"
-    if re.search(r"\bbun server/index\.js\b", command):
+    if _CLASSIFY_DEV_RE.search(command):
         return "openchamber-dev"
-    if re.search(r"opencode(-wrapped)? serve\b", command):
+    if _CLASSIFY_OPENCODE_RE.search(command):
         return "opencode-service" if "--service" in command else "opencode"
-    if re.search(r"\bmcpx daemon\b", command):
+    if _CLASSIFY_MCPX_RE.search(command):
         return "mcpx-daemon"
     return None
 

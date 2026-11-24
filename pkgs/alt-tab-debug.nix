@@ -1,17 +1,23 @@
 {
   alt-tab-macos,
+  lib,
 }:
 
+let
+  needle = "-emit-executable -module-name AltTab";
+in
 alt-tab-macos.overrideAttrs (old: {
   pname = "alt-tab-debug";
   patches = (old.patches or [ ]) ++ [ ./alt-tab-debug-defaults.patch ];
 
   # Upstream exposes its local Pro test mode only in DEBUG builds.
   buildPhase =
-    builtins.replaceStrings
-      [ "-emit-executable -module-name AltTab" ]
-      [ "-D DEBUG -emit-executable -module-name AltTab" ]
-      old.buildPhase;
+    let
+      occurrences = (builtins.length (builtins.split needle old.buildPhase) - 1) / 2;
+    in
+    assert lib.assertMsg (occurrences == 1)
+      "alt-tab-debug: upstream buildPhase must contain '${needle}' exactly once, found ${toString occurrences}";
+    builtins.replaceStrings [ needle ] [ "-D DEBUG ${needle}" ] old.buildPhase;
 
   postPatch = (old.postPatch or "") + ''
     # Keep DEBUG's diagnostics available without opening QA at launch, and use

@@ -154,24 +154,44 @@ def write_program(target: Path, program: str) -> None:
     (target / "LEDS.LED").write_text(program + "\n", encoding="utf-8")
 
 
-def launchctl(action: str) -> None:
+def launchctl(action: str) -> bool:
+    """Run launchctl for the status bar; surface a nonzero exit (#2026).
+
+    Returns True on success. On failure, prints the exit status and any
+    captured stderr to stderr and returns False, so callers can stop
+    instead of racing the status-bar app for the device.
+    """
     uid = os.getuid()
     plist = Path.home() / "Library/LaunchAgents" / f"{STATUS_BAR_JOB}.plist"
     if action == "stop":
-        result = subprocess.run(
-            ["launchctl", "bootout", f"gui/{uid}/{STATUS_BAR_JOB}"],
-            capture_output=True,
-        )
+        command = ["launchctl", "bootout", f"gui/{uid}/{STATUS_BAR_JOB}"]
     else:
-        result = subprocess.run(
-            ["launchctl", "bootstrap", f"gui/{uid}", str(plist)],
-            capture_output=True,
+        command = ["launchctl", "bootstrap", f"gui/{uid}", str(plist)]
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode != 0:
+        detail = (result.stderr or "").strip()
+        print(
+            f"launchctl failed to {action} the status bar "
+            f"(exit {result.returncode})" + (f": {detail}" if detail else ""),
+            file=sys.stderr,
         )
-    if result.returncode:
-        detail = result.stderr.decode(errors="replace").strip()
-        raise RuntimeError(
-            detail or f"launchctl exited with status {result.returncode}"
-        )
+        return False
+    return True
+
+
+def restart_status_bar(target: Path) -> bool:
+    """Hand the device back and restart the status bar, reporting honestly."""
+    write_program(target, "off")
+    if launchctl("start"):
+        print("\nstatus bar restarted; device handed back.")
+        return True
+    print(
+        "\nstatus bar restart FAILED; device handed back without its "
+        "status-bar owner.",
+        file=sys.stderr,
+    )
+    return False
+
 
 
 def speed_up_purple(program: str, period_seconds: float) -> str:
@@ -417,32 +437,24 @@ def main() -> int:
     target = device_path(args.device)
     print(f"device: {target}")
     print("stopping the status bar so it does not fight for the device...")
-    try:
-        launchctl("stop")
-    except RuntimeError as error:
-        print(
-            f"Could not stop the status bar; demo not started: {error}",
-            file=sys.stderr,
+    if not launchctl("stop"):
+        raise SystemExit(
+            "status bar did not stop; LED demo not started "
+            "(nothing written to the device)."
         )
-        return 1
 
     restored = False
 
     def restore(*_args):
+        # Idempotent (#2141): the SIGINT handler and the playback finally
+        # blocks all call restore(); without the guard the second call
+        # re-bootstraps an already-loaded service and reports a false
+        # handoff failure.
         nonlocal restored
         if restored:
             return
         restored = True
-        write_program(target, "off")
-        try:
-            launchctl("start")
-        except RuntimeError as error:
-            print(
-                f"\nCould not restart the status bar; device was not handed back: {error}",
-                file=sys.stderr,
-            )
-        else:
-            print("\nstatus bar restarted; device handed back.")
+        restart_status_bar(target)
 
     signal.signal(signal.SIGINT, lambda *_: (restore(), sys.exit(130)))
     if args.palette:

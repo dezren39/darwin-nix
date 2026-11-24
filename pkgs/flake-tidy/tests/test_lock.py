@@ -2772,3 +2772,70 @@ class TestEmbeddedQueryUrls:
                 shallow=True,
             )
         ) == "git+https://example.com/r.git?shallow=1"
+
+
+# -- Tests for the #2069 lock-timeout fix --
+
+import shutil
+import subprocess
+import tempfile
+import time
+
+
+def _sleeping_nix_env(monkeypatch, tmpdir, timeout_s=1):
+    """Put a `nix` stub that sleeps 30s on PATH and force a short
+    subprocess timeout, so the real subprocess.run raises
+    TimeoutExpired quickly (the #2069 repro shape)."""
+    bin_dir = os.path.join(tmpdir, "bin")
+    os.makedirs(bin_dir)
+    stub = os.path.join(bin_dir, "nix")
+    with open(stub, "w") as f:
+        f.write("#!/bin/sh\nsleep 30\n")
+    os.chmod(stub, 0o755)
+    monkeypatch.setenv("PATH", bin_dir + os.pathsep + os.environ["PATH"])
+    real_run = subprocess.run
+
+    def run_with_short_timeout(*args, **kwargs):
+        kwargs["timeout"] = timeout_s
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", run_with_short_timeout)
+
+
+class TestRunNixFlakeLockTimeout:
+    """#2069: run_nix_flake_lock set timeout=120 on the lock call but
+    never handled subprocess.TimeoutExpired, so a hung lock escaped
+    as an uncaught traceback and apply_merge skipped its backout,
+    leaving the repo half-modified."""
+
+    def test_timeout_returns_failure_shape(self, monkeypatch):
+        tmpdir = tempfile.mkdtemp(prefix="flake-tidy-timeout-")
+        try:
+            _sleeping_nix_env(monkeypatch, tmpdir)
+            start = time.monotonic()
+            ok, msg = flake_tidy.run_nix_flake_lock(tmpdir)
+            elapsed = time.monotonic() - start
+            assert ok is False
+            assert "timed out" in msg
+            # The stub sleeps 30s; the timeout must cut it short.
+            assert elapsed < 20
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_timeout_message_parses_no_failed_input(self):
+        """The robust retry loop must give up on a timeout message:
+        extract_failed_input finds no input to override, so
+        run_nix_flake_lock_robust returns the failure at once."""
+        assert flake_tidy.extract_failed_input(
+            "nix flake lock timed out after 120 seconds"
+        ) == (None, None)
+
+    def test_robust_returns_failure_on_timeout(self, monkeypatch):
+        tmpdir = tempfile.mkdtemp(prefix="flake-tidy-timeout-")
+        try:
+            _sleeping_nix_env(monkeypatch, tmpdir)
+            ok, msg = flake_tidy.run_nix_flake_lock_robust(tmpdir)
+            assert ok is False
+            assert "timed out" in msg
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)

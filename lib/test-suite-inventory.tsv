@@ -1,0 +1,65 @@
+# Generated from the current main tree for issue #1475 phase 2.
+# path<TAB>disposition<TAB>reason
+.github/scripts/pm-dispatch-launch.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+brew-adopt-unmanaged.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+browser-remote-debug-activation.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+browser-remote-debug.test.py	interpreter-named	suite is run through python
+chromium-family-cdp.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+clean.test.sh	harness	bash suite sources the shared test harness
+code-install-extensions.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+context7-login.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+full-clean.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+gc-root-activation.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+git-discover-repos.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+git-maintain-repos.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+help-extra-args.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+install-determinate-nix.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+install-vscode-patch-agent.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+lib/test-harness.test.sh	harness	bash suite sources the shared test harness
+mcp-clients-activation.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+mcp-clients.test.py	interpreter-named	suite is run through python
+mcpx-agent-restart.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+openchamber-deploy.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+opencode-db-args.test.sh	harness	bash suite sources the shared test harness
+opencode-db-backup-prune.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+opencode-db-backup.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+opencode-db-pids.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+opencode-db-prune.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+opencode-db-vacuum.test.sh	harness	bash suite sources the shared test harness
+opencode-prune-report.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+opencode-tmp-guard.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+patch-vscode-insiders.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+pkgs/alt-tab-debug.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+pkgs/adopt/adopt.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+pkgs/brew-repair/brew-repair.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+pkgs/buffer-backup/check-lock-sync.test.py	interpreter-named	suite is run through python
+pkgs/buffer-backup/cleanup-count.test.mjs	interpreter-named	suite is run through node
+pkgs/bun-bin/check-pin-sync.test.py	interpreter-named	suite is run through python
+pkgs/flake-tidy/tests/test_cli.py	interpreter-named	suite is run through python
+pkgs/flake-tidy/tests/test_config.py	interpreter-named	suite is run through python
+pkgs/flake-tidy/tests/test_dedup.py	interpreter-named	suite is run through python
+pkgs/flake-tidy/tests/test_edge_cases.py	interpreter-named	suite is run through python
+pkgs/flake-tidy/tests/test_editor.py	interpreter-named	suite is run through python
+pkgs/flake-tidy/tests/test_flatten.py	interpreter-named	suite is run through python
+pkgs/flake-tidy/tests/test_graph.py	interpreter-named	suite is run through python
+pkgs/flake-tidy/tests/test_includes_excludes.py	interpreter-named	suite is run through python
+pkgs/flake-tidy/tests/test_integration.py	interpreter-named	suite is run through python
+pkgs/flake-tidy/tests/test_lock.py	interpreter-named	suite is run through python
+pkgs/flake-tidy/tests/test_malformed_lock.py	interpreter-named	suite is run through python
+pkgs/flake-tidy/tests/test_merge.py	interpreter-named	suite is run through python
+pkgs/opencode-share/opencode-share.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+pkgs/service-events/monitor.test.py	interpreter-named	suite is run through python
+plugins/durable-tmpdir.test.mjs	interpreter-named	suite is run through node
+plugins/tool-definitions.test.mjs	interpreter-named	suite is run through node
+plugins/warp-import.test.mjs	interpreter-named	suite is run through node
+rebuild-backup-zed.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+rebuild-staging.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+search.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+simple-rebuild-staging.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+simple-rebuild.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+spotlight-exclude-artifacts.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+symlink-scripts.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+symlinker.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+system-activation-helper.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+tmux-navigator.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+var-folders-clean.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below

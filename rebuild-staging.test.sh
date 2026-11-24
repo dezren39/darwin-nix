@@ -25,8 +25,8 @@ printf 'input = true\n' >> "$fixture/flake.nix"
 
 # The real simple rebuild is not exercised: this stub makes it observable and
 # ensures the test never invokes Nix or changes the host system.
-cat > "$fixture/simple-rebuild.sh" <<'EOF'
-#!/usr/bin/env bash
+printf '#!%s\n' "$(command -v bash)" > "$fixture/simple-rebuild.sh"
+cat >> "$fixture/simple-rebuild.sh" <<'EOF'
 exit 0
 EOF
 chmod +x "$fixture/simple-rebuild.sh"

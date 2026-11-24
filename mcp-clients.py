@@ -286,6 +286,18 @@ def _scan_depth(text):
     return ml, _value_bracket_depth(outside)
 
 
+# Bolt: pre-compiled TOML key/header patterns. _first_key, _dotted_assignment
+# and _inline_table_keys run per line over every client config on each
+# activation; compiling once at import avoids a re.compile + cache lookup
+# per call, and pos-based matching (pattern.match(s, pos)) avoids copying
+# each line/value into a temporary slice for the match.
+_BARE_KEY_RE = re.compile(r"[A-Za-z0-9_-]+")
+_KEY_TAIL_RE = re.compile(r"(\s*\.\s*(\"[^\"]*\"|'[^']*'|[A-Za-z0-9_-]+))*\s*=")
+_ARRAY_HEADER_RE = re.compile(r"\s*\[\[\s*(.+?)\s*\]\]\s*(#.*)?$")
+_TABLE_HEADER_RE = re.compile(r"\s*\[\s*([^\]]+?)\s*\]\s*(#.*)?$")
+_LEADING_COMMA_RE = re.compile(r"[ \t]*,")
+
+
 def _first_key(line):
     """(name, rest) for the first key of a TOML assignment line, or
     (None, line) when the line does not start with a key followed by '='."""
@@ -306,19 +318,19 @@ def _first_key(line):
         except ValueError:
             name = raw[1:-1]
     else:
-        m = re.match(r"[A-Za-z0-9_-]+", line[i:])
+        m = _BARE_KEY_RE.match(line, i)
         if not m:
             return None, line
-        name, rest = m.group(0), i + m.end()
+        name, rest = m.group(0), m.end()
     # The key (possibly dotted) must be followed by '='.
-    tail = line[rest:]
-    if not re.match(r"(\s*\.\s*(\"[^\"]*\"|'[^']*'|[A-Za-z0-9_-]+))*\s*=", tail):
+    if not _KEY_TAIL_RE.match(line, rest):
         return None, line
     return name, line
 
 
 _KEY_PART = r"(?:[A-Za-z0-9_-]+|\"(?:[^\"\\]|\\.)*\"|\'[^\']*\')"
 _DOTTED_KEY_RE = _KEY_PART + r"(?:\s*\.\s*" + _KEY_PART + r")*"
+_DOTTED_KEY_PAT = re.compile(_DOTTED_KEY_RE)
 
 
 def _dotted_assignment(line):
@@ -340,7 +352,7 @@ def _dotted_assignment(line):
             return None, -1
         elif c == "=":
             key = line[:i].strip()
-            if not key or not re.fullmatch(_DOTTED_KEY_RE, key):
+            if not key or not _DOTTED_KEY_PAT.fullmatch(key):
                 return None, -1
             return _split_dotted(key), i
         else:
@@ -368,8 +380,8 @@ def _inline_table_keys(value):
             # A quoted key in key position (#1005): try the dotted-key
             # match before the string-skip branches below consume it as
             # a string value. _DOTTED_KEY_RE already handles quoted parts.
-            m = re.match(_DOTTED_KEY_RE, value[i:])
-            j = i + m.end() if m else i
+            m = _DOTTED_KEY_PAT.match(value, i)
+            j = m.end() if m else i
             k = j
             while k < n and value[k] in " \t":
                 k += 1
@@ -410,9 +422,9 @@ def _inline_table_keys(value):
             if c in " \t\r\n":
                 i += 1
                 continue
-            m = re.match(_DOTTED_KEY_RE, value[i:])
+            m = _DOTTED_KEY_PAT.match(value, i)
             if m:
-                j = i + m.end()
+                j = m.end()
                 k = j
                 while k < n and value[k] in " \t":
                     k += 1
@@ -487,8 +499,8 @@ def codex(path):
             if kept_depth < 0:
                 kept_depth = 0
             continue
-        array_header = re.match(r"\s*\[\[\s*(.+?)\s*\]\]\s*(#.*)?$", line)
-        header = None if array_header else re.match(r"\s*\[\s*([^\]]+?)\s*\]\s*(#.*)?$", line)
+        array_header = _ARRAY_HEADER_RE.match(line)
+        header = None if array_header else _TABLE_HEADER_RE.match(line)
         if array_header or header:
             name = (array_header or header).group(1)
             parts = _split_dotted(name)
@@ -575,6 +587,14 @@ def codex(path):
                         gml, rest = _ml_string_scan(lines[idx], gml)
                         depth += _value_bracket_depth(rest)
                         idx += 1
+                    if depth > 0:
+                        # #2028: the gather ran out of lines with the root
+                        # inline table still open. Fail closed like the
+                        # other malformed paths instead of dropping every
+                        # gathered line (and harvesting phantom server
+                        # names from the swallowed text) at exit 0.
+                        raise ValueError(
+                            "root mcp_servers inline table never closes; not changed")
                     for server in _inline_table_keys("\n".join(gathered)):
                         removed.add(server)
                     continue
@@ -780,7 +800,7 @@ def _replace_context_servers(text, entry):
     except ValueError:
         pass
     rest = text[end:]
-    comma = re.match(r"[ \t]*,", rest)
+    comma = _LEADING_COMMA_RE.match(rest)
     tail = rest[comma.end() :] if comma else rest
     return text[:key_start] + f'"context_servers": {json.dumps(entry)}' + ("," if comma else "") + tail
 

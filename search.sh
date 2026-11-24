@@ -114,10 +114,16 @@ for c in casks:
 
     # Read into arrays with Bash 3.2-compatible loops. `mapfile` was added
     # in Bash 4, while macOS's system `/usr/bin/env bash` is still 3.2.
+    # The normalized form is folded with expansions, not tr: one fork
+    # per artifact for `printf | tr` adds up over hundreds of installed
+    # casks, and the two ${var//old/new} folds are exactly what
+    # `tr ' .' '-'` does (both characters map to '-'). Output stays
+    # pinned byte-for-byte by the scenarios in search.test.sh.
     if [[ -n "$ARTIFACT_NAMES" ]]; then
         while IFS= read -r lower; do
             BREW_APPS+=("$lower")
-            BREW_NAMES+=("$(printf '%s' "$lower" | tr ' .' '-')")
+            brew_normalized="${lower// /-}"
+            BREW_NAMES+=("${brew_normalized//./-}")
         done < <(printf '%s\n' "$ARTIFACT_NAMES")
     fi
 fi
@@ -126,15 +132,31 @@ check_if_brew_installed() {
     local app_path="$1"
     local app_name
     local normalized_name
+    local base
+    local stripped
 
     # Skip if not an app
     if [[ ! "$app_path" =~ \.app$ ]]; then
         return
     fi
 
-    # Get the app name without .app extension
-    app_name=$(basename "$app_path" .app | tr '[:upper:]' '[:lower:]')
-    normalized_name=$(echo "$app_name" | tr ' .' '-')
+    # Get the app name without .app extension. ${path##*/} matches
+    # basename here (find -print0 never emits a trailing slash) and
+    # ${base%.app} matches basename's suffix strip, including its
+    # refuse-to-return-empty rule (a bundle literally named `.app`
+    # keeps its name under both forms). The old form spent three
+    # forks per scanned app (basename + two tr pipes); this spends
+    # one tr for the lower-casing -- expansions have no case-fold
+    # equivalent -- and folds the two separators to '-' with ${var//}
+    # (byte-identical to `tr ' .' '-'` for single characters).
+    base="${app_path##*/}"
+    stripped="${base%.app}"
+    if [[ -z "$stripped" ]]; then
+        stripped="$base"
+    fi
+    app_name=$(printf '%s' "$stripped" | tr '[:upper:]' '[:lower:]')
+    normalized_name="${app_name// /-}"
+    normalized_name="${normalized_name//./-}"
 
     # Check if app exists in brew list: exact whole-name membership
     # in either form. The old space-joined substring test

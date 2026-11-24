@@ -158,7 +158,7 @@ rec {
       # mcpx-src) carry every fix this flake used to pin forward
       # (opencode #1547 route overrides, the #1791 node_modules hash,
       # code #11443/#11453/#11476 for mcpx on aarch64-darwin), as of
-      # openchamber 877cf35 / opencode 0a8dbad / code d3a0db8 (2026-11-18).
+      # openchamber 88ca37a / opencode dfa989e / code 2dc8cb8 (2026-11-23).
       # If the chain regresses, pin here again with
       # inputs.opencode.url / inputs.opencode.inputs.mcpx-src.url.
     };
@@ -217,11 +217,11 @@ rec {
     nixpkgs-hoisted-4.url = "github:NixOS/nixpkgs/nixos-unstable";
     nixpkgs-hoisted-5.follows = "nixpkgs-23-11";
     systems-hoisted.url = "github:nix-systems/default-darwin";
-    determinate-nixd-aarch64-darwin.url = "file+https://install.determinate.systems/determinate-nixd/tag/v3.23.2/macOS";
+    determinate-nixd-aarch64-darwin.url = "file+https://install.determinate.systems/determinate-nixd/tag/v3.24.3/macOS";
     determinate-nixd-aarch64-darwin.flake = false;
-    determinate-nixd-aarch64-linux.url = "file+https://install.determinate.systems/determinate-nixd/tag/v3.23.2/aarch64-linux";
+    determinate-nixd-aarch64-linux.url = "file+https://install.determinate.systems/determinate-nixd/tag/v3.24.3/aarch64-linux";
     determinate-nixd-aarch64-linux.flake = false;
-    determinate-nixd-x86_64-linux.url = "file+https://install.determinate.systems/determinate-nixd/tag/v3.23.2/x86_64-linux";
+    determinate-nixd-x86_64-linux.url = "file+https://install.determinate.systems/determinate-nixd/tag/v3.24.3/x86_64-linux";
     determinate-nixd-x86_64-linux.flake = false;
     nixpkgs-23-11-hoisted.follows = "nixpkgs-23-11";
     nixpkgs-regression-hoisted.follows = "nixpkgs-23-11";
@@ -318,7 +318,6 @@ rec {
     nixosModules.mcpx = inputs.openchamber.nixosModules.mcpx;
     homeManagerModules.mcpx = inputs.openchamber.homeManagerModules.mcpx;
     darwinModules.mcpx = inputs.openchamber.darwinModules.mcpx;
-    homeManagerModules.fleet-brokers = import ./pkgs/fleet-brokers/home-module.nix;
     homeManagerModules.meta-quota-export = import ./pkgs/meta-quota-export/home-module.nix;
     homeManagerModules.rustdesk-units = import ./pkgs/rustdesk-units/home-module.nix;
 
@@ -401,9 +400,6 @@ rec {
         codedb = pkgs.callPackage ./pkgs/codedb/package.nix { };
         flake-tidy = import ./pkgs/flake-tidy { inherit pkgs; };
         twg-cli = pkgs.callPackage ./pkgs/twg-cli/package.nix { };
-        # code#5362: the laptop fleet brokers (secrets + queue) and
-        # the repo-queue client, as one workspace package.
-        fleet-brokers = pkgs.callPackage ./pkgs/fleet-brokers/package.nix { };
         # code#5343: the resident laptop execution agent daemon.
         laptop-agent = pkgs.callPackage ./pkgs/laptop-agent/package.nix { };
         # mcp-remote and chrome-devtools-mcp, which mcpx.config.nix runs.
@@ -564,6 +560,56 @@ rec {
               bash ./simple-rebuild.test.sh
               touch $out
             '';
+        # #2030: simple-rebuild-phase-build.test.sh pins phase_build's
+        # staleness guard -- a zero-exit build that leaves an old ./result
+        # is rejected, and only a link this build wrote is recorded. It
+        # extracts the real phase_build and stubs nix, so it needs no build.
+        simple-rebuild-phase-build-tests =
+          pkgs.runCommandLocal "simple-rebuild-phase-build-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.coreutils
+                pkgs.gnugrep
+                pkgs.gawk
+              ];
+            }
+            ''
+              cp ${./simple-rebuild.sh} simple-rebuild.sh
+              cp ${./simple-rebuild-phase-build.test.sh} simple-rebuild-phase-build.test.sh
+              chmod u+w simple-rebuild.sh simple-rebuild-phase-build.test.sh
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./simple-rebuild-phase-build.test.sh
+              touch $out
+            '';
+        # #2052: simple-rebuild-token-race.test.sh pins
+        # refresh_nix_access_token()'s per-invocation temp file -- overlapping
+        # refreshes each exit 0 with an atomic single-line result and no temp
+        # debris, where the old shared temp path aborted colliding rebuilds
+        # under set -e. The suite extracts the real function from the script
+        # and runs it under zsh (the script's interpreter), so it needs zsh
+        # but no build/activation.
+        simple-rebuild-token-race-tests =
+          pkgs.runCommandLocal "simple-rebuild-token-race-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.zsh
+                pkgs.coreutils
+                pkgs.gnugrep
+                pkgs.gawk
+              ];
+            }
+            ''
+              cp ${./simple-rebuild.sh} simple-rebuild.sh
+              cp ${./simple-rebuild-token-race.test.sh} simple-rebuild-token-race.test.sh
+              chmod u+w simple-rebuild.sh simple-rebuild-token-race.test.sh
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./simple-rebuild-token-race.test.sh
+              touch $out
+            '';
         # #1864: simple-rebuild-staging.test.sh pins simple-rebuild.sh's
         # scoped staging -- a valid run registers only the new flake
         # inputs a tracked file references (intent-to-add, removed
@@ -718,9 +764,9 @@ rec {
               mkdir -p lib
               cp $src/lib/common.sh lib/
               cp $src/lib/arg-probe.sh lib/
+              cp $src/lib/test-harness.sh lib/
               chmod u+w ./opencode-db-vacuum.sh ./opencode-db-prune.sh ./opencode-db-backup-prune.sh ./opencode-db-args.test.sh
-              export HOME="$TMPDIR/home"
-              mkdir -p "$HOME"
+              export HARNESS_CHECK=1
               bash ./opencode-db-args.test.sh
               touch $out
             '';
@@ -776,9 +822,9 @@ rec {
               mkdir -p lib
               cp $src/lib/common.sh lib/
               cp $src/lib/arg-probe.sh lib/
+              cp $src/lib/test-harness.sh lib/
               chmod u+w ./opencode-db-vacuum.sh ./opencode-db-vacuum.test.sh
-              export HOME="$TMPDIR/home"
-              mkdir -p "$HOME"
+              export HARNESS_CHECK=1
               bash ./opencode-db-vacuum.test.sh
               touch $out
             '';
@@ -1151,13 +1197,33 @@ rec {
               cp $src/clean.sh $src/clean.test.sh $src/git-discover-repos $src/var-folders-clean.sh ./
               mkdir -p lib
               cp $src/lib/common.sh lib/
+              cp $src/lib/test-harness.sh lib/
               cp $src/lib/arg-probe.sh lib/
               cp $src/lib/outcome-probe.sh lib/
               chmod u+w ./clean.sh ./clean.test.sh ./git-discover-repos ./var-folders-clean.sh
               patchShebangs ./git-discover-repos
               export HOME="$TMPDIR/home"
               mkdir -p "$HOME"
+              export HARNESS_CHECK=1
               bash ./clean.test.sh
+              touch $out
+            '';
+        # #1475 phase 2: keep the suite inventory complete, check source
+        # spellings that can make stubs fail in a Nix sandbox, and exercise
+        # the shared stat double's BSD forms and GNU -c rejection.
+        test-harness-conformance =
+          pkgs.runCommandLocal "test-harness-conformance"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.coreutils
+                pkgs.python3
+              ];
+              src = inputs.self;
+            }
+            ''
+              export HARNESS_CHECK=1
+              ${pkgs.python3}/bin/python3 $src/scripts/test-harness-conformance.py $src
               touch $out
             '';
         # #1077: pkgs/adopt/adopt.test.sh was run by nothing — no flake
@@ -1192,6 +1258,9 @@ rec {
         # copies of itself via xargs, and its consumers execute the sibling
         # git-discover-repos directly. The nix build sandbox has no
         # /usr/bin/env, so an unpatched `#!/usr/bin/env bash` copy cannot run.
+        # #1999: the suite runs a second time with an external read-only
+        # XDG_CONFIG_HOME, pinning the harness's XDG isolation of the
+        # scheduler fixture's global-config registration.
         git-maintain-repos-tests =
           pkgs.runCommandLocal "git-maintain-repos-tests"
             {
@@ -1211,6 +1280,18 @@ rec {
               export HOME="$TMPDIR/home"
               mkdir -p "$HOME"
               bash ./git-maintain-repos.test.sh
+              # #1999: a second run starts with an external, read-only
+              # XDG_CONFIG_HOME -- the shape that broke the scheduler
+              # fixture's `git config --global` registration. The
+              # harness isolates the fixture into its own per-run XDG
+              # dirs, so the suite passes and the external config is
+              # left byte-identical.
+              mkdir -p ./external-xdg/git
+              printf '[fixture-sentinel]\n\tkey = untouched\n' > ./external-xdg/git/config
+              cp ./external-xdg/git/config ./external-xdg/git/config.expected
+              chmod -R a-w ./external-xdg
+              XDG_CONFIG_HOME=$PWD/external-xdg bash ./git-maintain-repos.test.sh
+              diff ./external-xdg/git/config.expected ./external-xdg/git/config
               touch $out
             '';
         # #951: spotlight-exclude-artifacts.test.sh drives the real
@@ -1968,93 +2049,6 @@ rec {
                 || { echo "rendered config.json mismatch:" >&2; cat "$configFile" >&2; exit 1; }
               touch $out
             '';
-        # code#5362: the fleet-brokers home-manager module must render
-        # all three fleet service units pointing at the flake's own packages.
-        fleet-brokers-home-manager-module =
-          # The module's service config is guarded by hostPlatform.isLinux,
-          # so the check must not evaluate it on Darwin (codex P1 on #1459).
-          if !pkgs.stdenv.hostPlatform.isLinux then
-            pkgs.runCommandLocal "fleet-brokers-home-manager-module-check" { } "touch $out"
-          else
-            let
-              selfPkgs = mkPackages pkgs;
-              eval = inputs.home-manager.lib.homeManagerConfiguration {
-                inherit pkgs;
-                modules = [
-                  inputs.self.homeManagerModules.fleet-brokers
-                  {
-                    services.fleet-brokers = {
-                      enable = true;
-                      package = selfPkgs.fleet-brokers;
-                      laptopAgentPackage = selfPkgs.laptop-agent;
-                      # nixpkgs' bws is unfree; the check only needs a
-                      # package on the unit PATH, so a stub stands in.
-                      bwsPackage = pkgs.coreutils;
-                    };
-                    home = {
-                      username = "fleet-test";
-                      homeDirectory = "/home/fleet-test";
-                      stateVersion = "25.11";
-                    };
-                  }
-                ];
-              };
-              qb = eval.config.systemd.user.services.queue-broker.Service;
-              sb = eval.config.systemd.user.services.secrets-broker.Service;
-              la = eval.config.systemd.user.services.laptop-agent.Service;
-              repoQueueAlias = eval.config.home.file.".local/bin/repo-queue".source;
-            in
-            pkgs.runCommandLocal "fleet-brokers-home-manager-module-check"
-              {
-                qbExec = qb.ExecStart;
-                sbExec = sb.ExecStart;
-                sbPath = pkgs.lib.concatStringsSep ":" sb.Environment;
-                bwsBin = "${pkgs.coreutils}/bin";
-                laExec = la.ExecStart;
-                inherit repoQueueAlias;
-                repoQueueBinary = "${selfPkgs.fleet-brokers}/bin/repo-queue";
-                wantedBy = pkgs.lib.concatStringsSep " " eval.config.systemd.user.services.queue-broker.Install.WantedBy;
-              }
-              ''
-                case "$qbExec" in
-                *"/bin/queue-broker") ;;
-                *)
-                  echo "queue-broker ExecStart wrong: $qbExec" >&2
-                  exit 1
-                  ;;
-                esac
-                case "$sbExec" in
-                *"/bin/secrets-broker") ;;
-                *)
-                  echo "secrets-broker ExecStart wrong: $sbExec" >&2
-                  exit 1
-                  ;;
-                esac
-                case "$sbPath" in
-                *"$bwsBin"*) ;;
-                *)
-                  echo "secrets-broker PATH lacks bwsPackage: $sbPath" >&2
-                  exit 1
-                  ;;
-                esac
-                case "$laExec" in
-                *"/bin/laptop-agent") ;;
-                *)
-                  echo "laptop-agent ExecStart wrong: $laExec" >&2
-                  exit 1
-                  ;;
-                esac
-                [ "$repoQueueAlias" = "$repoQueueBinary" ] || {
-                  echo "repo-queue alias target=$repoQueueAlias, want packaged binary $repoQueueBinary" >&2
-                  exit 1
-                }
-                [ -x "$repoQueueAlias" ] || {
-                  echo "repo-queue alias target is not an executable provisioned binary: $repoQueueAlias" >&2
-                  exit 1
-                }
-                [ "$wantedBy" = "default.target" ] || { echo "WantedBy=$wantedBy, want default.target" >&2; exit 1; }
-                touch $out
-              '';
         # darwin-nix#1776: the meta-quota-export home-manager module must
         # render the service + timer faithful to the live hand-installed
         # units on amd (oneshot, TimeoutStartSec=120, same ExecStart;
@@ -2167,6 +2161,14 @@ rec {
             ''
               cp -r ${./pkgs/laptop-agent/src} src
               cp -r ${./pkgs/laptop-agent/tests} tests
+              # The suite exercises real subprocess execs whose default cwd
+              # is the server's home directory (str(Path.home()), the
+              # documented restore-tail default), so HOME must exist. In
+              # the build sandbox HOME is /homeless-shelter, which does not
+              # (run 44780604603: 7 FileNotFoundError failures). Give the
+              # suite a real home instead of changing the agent contract.
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
               python3 -m unittest discover -s tests -v
               touch $out
             '';

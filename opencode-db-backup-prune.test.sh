@@ -380,6 +380,8 @@ touch -t 202603010000 "$LOOSE/opencode.db.bak-c"
 
 out="$(bash "$PRUNE" --dir "$WORK/no-such-dir" --db-dir "$LOOSE" --keep 2 2>&1)"; rc=$?
 [ "$rc" -eq 0 ] || fail "loose dry run exited $rc: $out"
+printf '%s' "$out" | grep -q 're-run with --apply to delete' \
+  || fail "loose dry run omitted the next step: $out"
 printf '%s' "$out" | grep -q "would delete loose: $LOOSE/opencode.db.bak-a\$" \
   || fail "loose dry run did not list the oldest copy: $out"
 printf '%s' "$out" | grep -q "opencode.db.bak-b" && fail "loose dry run listed the second-newest copy: $out"

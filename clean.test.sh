@@ -21,6 +21,9 @@ set -uo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="$SELF_DIR/clean.sh"
+# Shared environment and platform-double harness (design #1473 phase 2).
+# shellcheck source=lib/test-harness.sh
+. "$SELF_DIR/lib/test-harness.sh"
 # Shared conformance probe matrix helpers (#1146, design #1145 phase 1).
 # shellcheck source=lib/arg-probe.sh
 . "$SELF_DIR/lib/arg-probe.sh"
@@ -29,10 +32,8 @@ SCRIPT="$SELF_DIR/clean.sh"
 . "$SELF_DIR/lib/outcome-probe.sh"
 
 
-TMP_ROOT="$(mktemp -d)"
-trap 'rm -rf "$TMP_ROOT"' EXIT
-export HOME="$TMP_ROOT/home"
-mkdir -p "$HOME"
+harness_init
+TMP_ROOT="$HARNESS_ROOT"
 # The control sweeps $HOME/.local/share/opencode/tmp; keep it absent so
 # the sweep is a no-op regardless of the caller's real home.
 unset DOCKER_AGE_DAYS DEPTH_LIMIT
@@ -227,52 +228,14 @@ esac
 # clean.sh is a macOS tool, but three sites used GNU-only `stat -c`;
 # BSD stat rejects -c, 2>/dev/null swallowed it, and the values came
 # back empty: the pytest newest-run guard never fired and the
-# unknown-scratch report always printed "unknown" dates. The shim
-# below rejects -c exactly as macOS stat does and implements the BSD
-# -f forms clean.sh's portable helpers use, translating them to the
-# real (GNU) stat captured before the shim enters PATH. (The shim is
-# test-only: using GNU date/stat internally to model BSD output is
-# the point -- production clean.sh never sees it.)
-REAL_STAT="$(command -v stat)"
-SHIM_DIR="$TMP_ROOT/bsd-shim"
-mkdir -p "$SHIM_DIR"
+# unknown-scratch report always printed "unknown" dates. The shared
+# harness double rejects -c exactly as macOS stat does and implements
+# the BSD -f forms clean.sh's portable helpers use.
+harness_stat_double_begin || { fail "could not start shared stat double"; exit 1; }
 LSOF_STUB_DIR="$TMP_ROOT/lsof-stub"
 mkdir -p "$LSOF_STUB_DIR"
 printf '#!/bin/sh\nexit 1\n' > "$LSOF_STUB_DIR/lsof"
 chmod +x "$LSOF_STUB_DIR/lsof"
-# Executed by name via PATH, so the shebang must name a real interpreter: /usr/bin/env does not exist in the nix build sandbox (#1099). Resolved bash works in both sandbox and direct runs.
-echo "#!$(command -v bash)" > "$SHIM_DIR/stat"
-cat >> "$SHIM_DIR/stat" <<'SHIM_EOF'
-[ -n "${REAL_STAT:-}" ] || exit 1
-for _a in "$@"; do
-  if [ "$_a" = "-c" ]; then echo "stat: illegal option -- c" >&2; exit 1; fi
-done
-_fmt=""; _tfmt=""; _file=""
-while [ $# -gt 0 ]; do
-  case "$1" in
-    -f) _fmt="$2"; shift 2 ;;
-    -t) _tfmt="$2"; shift 2 ;;
-    *) _file="$1"; shift ;;
-  esac
-done
-[ -n "$_fmt" ] && [ -n "$_file" ] || exit 1
-case "$_fmt" in
-  '%m') "$REAL_STAT" -c '%Y' "$_file" ;;
-  '%u') "$REAL_STAT" -c '%u' "$_file" ;;
-  '%SB'|'%Sm')
-    if [ "$_fmt" = '%SB' ]; then
-      _epoch="$("$REAL_STAT" -c '%W' "$_file" 2>/dev/null)"
-      # Filesystems without btime report %W as 0; a BSD file always
-      # has a birth time, so model it with the mtime there.
-      case "$_epoch" in ''|*[!0-9]*|0) _epoch="$("$REAL_STAT" -c '%Y' "$_file")" ;; esac
-    else
-      _epoch="$("$REAL_STAT" -c '%Y' "$_file")"
-    fi
-    date -d "@$_epoch" +"${_tfmt:-%Y-%m-%d %H:%M:%S}" ;;
-  *) echo "stat shim: unsupported -f format: $_fmt" >&2; exit 1 ;;
-esac
-SHIM_EOF
-chmod +x "$SHIM_DIR/stat"
 
 SCRATCH_BASE="$HOME/.local/share/opencode/tmp"
 mkdir -p "$SCRATCH_BASE"
@@ -286,8 +249,9 @@ dd if=/dev/zero of="$UENTRY/blob" bs=1024 count=1536 2>/dev/null
 touch -d '2020-01-02 03:04:05' "$UENTRY"
 for mode in bsd gnu; do
   if [ "$mode" = "bsd" ]; then
-    OUT="$(REAL_STAT="$REAL_STAT" PATH="$LSOF_STUB_DIR:$SHIM_DIR:$PATH" UNKNOWN_SCRATCH_MIN_MB=1 UNKNOWN_SCRATCH_STALE_DAYS=1 bash "$SCRIPT" --only-unknown-scratch 2>"$TMP_ROOT/err")"; STATUS=$?
+    OUT="$(PATH="$LSOF_STUB_DIR:$PATH" UNKNOWN_SCRATCH_MIN_MB=1 UNKNOWN_SCRATCH_STALE_DAYS=1 bash "$SCRIPT" --only-unknown-scratch 2>"$TMP_ROOT/err")"; STATUS=$?
   else
+    harness_stat_double_end
     OUT="$(PATH="$LSOF_STUB_DIR:$PATH" UNKNOWN_SCRATCH_MIN_MB=1 UNKNOWN_SCRATCH_STALE_DAYS=1 bash "$SCRIPT" --only-unknown-scratch 2>"$TMP_ROOT/err")"; STATUS=$?
   fi
   ERR="$(cat "$TMP_ROOT/err")"
@@ -303,6 +267,7 @@ for mode in bsd gnu; do
     *) echo "ok: unknown-scratch ($mode stat) report shows a created date" ;;
   esac
 done
+harness_stat_double_end
 
 # ─── Unknown-scratch sweep honors VAR_FOLDERS_ROOT (#1865) ───────
 # Both unknown-scratch scans (the --only-unknown-scratch early exit
@@ -351,8 +316,10 @@ touch -d '6 hours ago' "$PTDIR/pytest-2"
 ln -s pytest-2 "$PTDIR/pytest-current"
 for mode in bsd gnu; do
   if [ "$mode" = "bsd" ]; then
-    OUT="$(REAL_STAT="$REAL_STAT" PATH="$SHIM_DIR:$PATH" PYTEST_KEEP_HOURS=4 TMPDIR="$SCRATCH_BASE" bash "$SCRIPT" --system --dry-run 2>"$TMP_ROOT/err")"; STATUS=$?
+    harness_stat_double_begin || fail "could not restart shared stat double"
+    OUT="$(PATH="$PATH" PYTEST_KEEP_HOURS=4 TMPDIR="$SCRATCH_BASE" bash "$SCRIPT" --system --dry-run 2>"$TMP_ROOT/err")"; STATUS=$?
   else
+    harness_stat_double_end
     OUT="$(PYTEST_KEEP_HOURS=4 TMPDIR="$SCRATCH_BASE" bash "$SCRIPT" --system --dry-run 2>"$TMP_ROOT/err")"; STATUS=$?
   fi
   ERR="$(cat "$TMP_ROOT/err")"
@@ -378,6 +345,7 @@ for mode in bsd gnu; do
   fi
   [ -e "$PTDIR/pytest-current" ] || fail "pytest guard ($mode stat): pytest-current dangling after the run"
 done
+harness_stat_double_end
 
 # ─── --tmpdir sweep failure surfaces in clean.sh's result (#1270) ──
 # var-folders-clean.sh exits 1 naming failed deletions (#1262), but
@@ -913,16 +881,23 @@ echo "ok: mark_dir skips both symlinked markers and marks the clean sibling"
 # Drive the real sweep with a failing find stub. Neither fresh nor stale
 # matching entries may be offered to del when the scan is incomplete.
 SS_DIR="$TMP_ROOT/short-scratch"
-mkdir -p "$SS_DIR/base" "$SS_DIR/bin"
+mkdir -p "$SS_DIR/base" "$SS_DIR/bin" "$SS_DIR/bin-idle"
 touch "$SS_DIR/base/openchamber-fresh-fixture"
 touch -t 200001010000 "$SS_DIR/base/openchamber-stale-fixture"
-sed -n '/^sweep_short_lived_scratch() {/,/^}/p' "$SCRIPT" > "$SS_DIR/sweep.sh"
+{ sed -n '/^dir_has_open_handles() {/,/^}/p' "$SCRIPT"
+  sed -n '/^sweep_short_lived_scratch() {/,/^}/p' "$SCRIPT"; } > "$SS_DIR/sweep.sh"
 [ -s "$SS_DIR/sweep.sh" ] || fail "could not extract sweep_short_lived_scratch"
+grep -q 'dir_has_open_handles' "$SS_DIR/sweep.sh" \
+  || fail "could not extract dir_has_open_handles from clean.sh (#1803)"
 cat > "$SS_DIR/bin/find" <<'STUB'
 #!/bin/sh
 exit 1
 STUB
-chmod +x "$SS_DIR/bin/find"
+cat > "$SS_DIR/bin-idle/lsof" <<'STUB'
+#!/bin/sh
+exit 1
+STUB
+chmod +x "$SS_DIR/bin/find" "$SS_DIR/bin-idle/lsof"
 SHORT_SCRATCH_GLOBS=('openchamber-*')
 SHORT_SCRATCH_STALE_HOURS=8
 CALLER_USER_HOME="$SS_DIR"
@@ -949,8 +924,20 @@ grep -q 'freshness scan failed; skipping this base' "$SS_DIR/failure.err" \
   || fail "failed freshness scan did not warn and skip the base"
 
 # Successful scan still deletes stale matching entries but keeps fresh ones.
+# The #2035 open-handle guard runs before del, so drive it with a working
+# lsof that reports no holder (bin-idle), under the same set +e capture as
+# the failed-scan call above: the guard's nonzero return is data, not an
+# error, and this section runs under set -e.
 rm -f "$SS_DIR/deleted"
+PATH="$SS_DIR/bin-idle:$SS_OLD_PATH"
+export PATH
+set +e
 sweep_short_lived_scratch "$SS_DIR/base"
+SS_RC=$?
+set -e
+PATH="$SS_OLD_PATH"
+export PATH
+[ "$SS_RC" -eq 0 ] || fail "successful freshness scan returned $SS_RC"
 grep -Fxq "$SS_DIR/base/openchamber-stale-fixture" "$SS_DIR/deleted" \
   || fail "successful freshness scan did not offer stale entry to del"
 if grep -Fxq "$SS_DIR/base/openchamber-fresh-fixture" "$SS_DIR/deleted"; then
@@ -1100,6 +1087,64 @@ if grep -Eq '^(purge_pg|purge_large|archive|del )' "$TC_DIR/calls-kept"; then
 else
   echo "ok: kept nested worktree still protects its whole directory"
 fi
+# --- tidy: failed freshness scan skips purge/archive (#1857) ---
+# Exercise the real freshness helper and classifier. A failing find stub
+# must be distinguishable from a successful empty scan, even when the
+# fixture contains a fresh file. Successful controls pin both the fresh
+# protect path and the stale plain-leaf purge/archive path.
+TF_DIR="$TMP_ROOT/tidy-freshness"
+mkdir -p "$TF_DIR/bin" "$TF_DIR/subject/fail" "$TF_DIR/subject/recent" "$TF_DIR/subject/stale"
+touch "$TF_DIR/subject/fail/fresh.txt" "$TF_DIR/subject/recent/fresh.txt"
+touch -t 200001010000 "$TF_DIR/subject/stale/old.txt"
+{ sed -n '/^tidy_dir_has_recent_file() {/,/^}/p' "$SCRIPT"
+  sed -n '/^tidy_classify_and_place() {/,/^}/p' "$SCRIPT"; } > "$TF_DIR/fn.sh"
+[ -s "$TF_DIR/fn.sh" ] || fail "could not extract tidy freshness/classifier functions"
+cat > "$TF_DIR/bin/find" <<'STUB'
+#!/bin/sh
+for arg do
+  if [ "$arg" = "-mtime" ]; then
+    [ "$TF_MODE" != fail ] || exit 1
+    break
+  fi
+done
+exec "$TF_REAL_FIND" "$@"
+STUB
+chmod +x "$TF_DIR/bin/find"
+TF_REAL_FIND="$(command -v find)"
+export TF_REAL_FIND
+tf_run() { # tf_run <mode: fail|recent|stale>
+  (
+    DRY_RUN=0; OPENCODE_WORKTREE_STALE_DAYS=30; OPENCODE_TIDY_PROTECT_DAYS=1
+    CALLER_USER_HOME="$HOME"; TF_MODE="$1"; export TF_MODE; TF_CALLS="$TF_DIR/calls-$1"
+    : > "$TF_CALLS"
+    warn() { echo "warn: $*" >> "$TF_CALLS"; }
+    tidy_purge_postgres_dirs() { echo purge_pg >> "$TF_CALLS"; }
+    tidy_purge_large_entries() { echo purge_large >> "$TF_CALLS"; }
+    tidy_dir_to_bucket() { echo archive >> "$TF_CALLS"; }
+    del() { echo "del $*" >> "$TF_CALLS"; }
+    . "$TF_DIR/fn.sh"
+    PATH="$TF_DIR/bin:$PATH"
+    tidy_classify_and_place "$TF_DIR/subject/$1" "$TF_DIR/bucket"
+  )
+}
+tf_run fail
+grep -q 'freshness scan failed' "$TF_DIR/calls-fail" \
+  || fail "failed freshness scan did not warn (#1857)"
+if grep -Eq '^(purge_pg|purge_large|archive|del )' "$TF_DIR/calls-fail"; then
+  fail "failed freshness scan still purged/archived: $(cat "$TF_DIR/calls-fail")"
+else
+  echo "ok: failed freshness scan skips purge/archive (#1857)"
+fi
+tf_run recent
+if grep -Eq '^(purge_pg|purge_large|archive|del )' "$TF_DIR/calls-recent"; then
+  fail "successful recent-file scan no longer protects its directory: $(cat "$TF_DIR/calls-recent")"
+else
+  echo "ok: successful recent-file scan still protects its directory"
+fi
+tf_run stale
+grep -q '^purge_large$' "$TF_DIR/calls-stale" && grep -q '^archive$' "$TF_DIR/calls-stale" \
+  || fail "successful empty freshness scan no longer purges/archives: $(cat "$TF_DIR/calls-stale")"
+echo "ok: successful empty freshness scan preserves normal tidy behavior"
 # ─── #1861: artifact_is_prunable fails closed on a failed freshness scan ──
 # The freshness find's exit status used to be discarded, so a failed scan
 # read as "no fresh files" and the caller deleted the artifact. Extract
@@ -1266,6 +1311,98 @@ grep -q "^$PG_DIR/base/pgdata$" "$PG_DIR/deleted" \
 echo "ok: working lsof with no holder still removes the idle postgres data dir"
 rm -rf "$PG_DIR"
 
+# ─── #2035: short-lived scratch sweep fails closed when lsof cannot run ──
+# sweep_short_lived_scratch deleted stale known-tool scratch (and stale
+# uv locks) with no open-handle check at all, unlike its sibling sweeps
+# (#1803): a tool holding an old-mtime directory open lost it anyway, and
+# an lsof that never ran could not keep anything. Extract the real sweep
+# + its dir_has_open_handles helper and drive four PATH-stub scenarios
+# against a stale glob-matched fixture dir and a stale uv lock. Oracle:
+# the del recorder + the "cannot verify" note -- missing/erroring lsof
+# keeps, a holder keeps, a working lsof with no holder still removes.
+# Mutation check: reverting the sweep to the unguarded del makes the
+# missing/erroring cases record a deletion.
+SG_DIR="$TMP_ROOT/short-scratch-fail-closed"
+mkdir -p "$SG_DIR/base/opencode-stale-fixture" "$SG_DIR/bin-missing" \
+  "$SG_DIR/bin-error" "$SG_DIR/bin-held" "$SG_DIR/bin-idle"
+touch -t 200001010000 "$SG_DIR/base/opencode-stale-fixture"
+touch "$SG_DIR/base/uv-fixture.lock"
+touch -t 200001010000 "$SG_DIR/base/uv-fixture.lock"
+{ sed -n '/^dir_has_open_handles() {/,/^}/p' "$SCRIPT"
+  sed -n '/^sweep_short_lived_scratch() {/,/^}/p' "$SCRIPT"; } > "$SG_DIR/fn.sh"
+grep -q 'sweep_short_lived_scratch' "$SG_DIR/fn.sh" \
+  || fail "could not extract sweep_short_lived_scratch from clean.sh (#2035)"
+grep -q 'dir_has_open_handles' "$SG_DIR/fn.sh" \
+  || fail "extracted sweep has no dir_has_open_handles helper to test (#2035)"
+# bin-missing gets the real find/mktemp/rm and NO lsof at all.
+ln -s "$(command -v find)" "$SG_DIR/bin-missing/find"
+ln -s "$(command -v mktemp)" "$SG_DIR/bin-missing/mktemp"
+ln -s "$(command -v rm)" "$SG_DIR/bin-missing/rm"
+cat > "$SG_DIR/bin-error/lsof" <<'STUB'
+#!/bin/sh
+exit 2
+STUB
+cat > "$SG_DIR/bin-held/lsof" <<'STUB'
+#!/bin/sh
+echo "opencode 4242 user 9r DIR 1,5 0 0 /fixture"
+exit 0
+STUB
+cat > "$SG_DIR/bin-idle/lsof" <<'STUB'
+#!/bin/sh
+exit 1
+STUB
+chmod +x "$SG_DIR/bin-error/lsof" "$SG_DIR/bin-held/lsof" "$SG_DIR/bin-idle/lsof"
+
+sg_run() { # sg_run <PATH> -- runs the extracted sweep in a subshell
+  (
+    # shellcheck disable=SC2034 # consumed by the sourced sweep
+    SHORT_SCRATCH_STALE_HOURS=8; CALLER_USER_HOME="$HOME"
+    # shellcheck disable=SC2034 # consumed by the sourced sweep
+    SHORT_SCRATCH_GLOBS=('opencode-*'); _ss_total_removed=0
+    TMPDIR="$SG_DIR"
+    PATH="$1"
+    del() { printf '%s\n' "$1" >> "$SG_DIR/deleted"; }
+    warn() { printf '%s\n' "$*" >&2; }
+    info() { :; }
+    short_scratch_is_kept() { return 1; }
+    . "$SG_DIR/fn.sh"
+    sweep_short_lived_scratch "$SG_DIR/base"
+  )
+}
+
+: > "$SG_DIR/deleted"
+OUT="$(sg_run "$SG_DIR/bin-missing" 2>&1 || true)"
+[ ! -s "$SG_DIR/deleted" ] \
+  || fail "lsof missing: short-lived scratch sweep deleted an entry it could not verify (#2035)"
+case "$OUT" in
+  *"keeping (cannot verify open handles; lsof unavailable)"*) echo "ok: lsof missing keeps the short-lived scratch entry with a cannot-verify note" ;;
+  *) fail "lsof missing: no cannot-verify note (got: $OUT)" ;;
+esac
+
+: > "$SG_DIR/deleted"
+OUT="$(sg_run "$SG_DIR/bin-error:$PATH" 2>&1 || true)"
+[ ! -s "$SG_DIR/deleted" ] \
+  || fail "lsof erroring: short-lived scratch sweep deleted an entry it could not verify (#2035)"
+case "$OUT" in
+  *"keeping (cannot verify open handles; lsof unavailable)"*) echo "ok: lsof erroring keeps the short-lived scratch entry with a cannot-verify note" ;;
+  *) fail "lsof erroring: no cannot-verify note (got: $OUT)" ;;
+esac
+
+: > "$SG_DIR/deleted"
+OUT="$(sg_run "$SG_DIR/bin-held:$PATH" 2>&1 || true)"
+[ ! -s "$SG_DIR/deleted" ] \
+  || fail "lsof reporting a holder: short-lived scratch sweep deleted a held entry (#2035)"
+echo "ok: lsof reporting a holder keeps the short-lived scratch entry"
+
+: > "$SG_DIR/deleted"
+OUT="$(sg_run "$SG_DIR/bin-idle:$PATH" 2>&1 || true)"
+grep -q "^$SG_DIR/base/opencode-stale-fixture$" "$SG_DIR/deleted" \
+  || fail "working lsof with no holder: short-lived scratch sweep no longer removes a stale entry (deleted: $(cat "$SG_DIR/deleted"); out: $OUT)"
+grep -q "^$SG_DIR/base/uv-fixture.lock$" "$SG_DIR/deleted" \
+  || fail "working lsof with no holder: short-lived scratch sweep no longer removes a stale uv lock (deleted: $(cat "$SG_DIR/deleted"); out: $OUT)"
+echo "ok: working lsof with no holder still removes the stale short-lived scratch entry and uv lock"
+rm -rf "$SG_DIR"
+
 # ─── #1904: del() must not skip dangling symlinks ─────────────────────
 # del() gated every deletion on [ -e "$p" ], which is false for a
 # dangling symlink, so stale dangling links in caches/logs/Trash were
@@ -1363,7 +1500,9 @@ chmod +x "$SW_DIR/no-holder-bin/lsof"
   warn() { printf '%s\n' "$*" >&2; }
   info() { printf '%s\n' "$*"; }
   short_scratch_is_kept() { return 1; }
+  PATH="$SW_DIR/no-holder-bin:$PATH"
   . "$SW_DIR/del.sh"
+  . "$SW_DIR/dir_has_open_handles.sh"
   . "$SW_DIR/sweep_short_lived_scratch.sh"
   mkdir -p "$SW_DIR/short"
   ln -s "$SW_DIR/no-such-target" "$SW_DIR/short/opencode-stale123"
@@ -1656,6 +1795,271 @@ case "$COLIMA_OUT" in
     echo "ok: two verified empty listings permit Colima recreation" ;;
   *) fail "two verified empty listings did not enter recreation path (got: $COLIMA_OUT)" ;;
 esac
+
+# ─── #1902: dead-cask extraction spans multi-word app names ─────────────
+# The dead-cask check extracted the installed app path from `brew info`
+# with grep -oE '/Applications/[^ ]*\.app'. [^ ]* cannot span the space in
+# a multi-word bundle name, so those casks extracted empty and were
+# silently skipped by the MISSING-from-disk warning. Extract the real
+# block from clean.sh at test time, point it at a stub brew through the
+# CLEAN_APPS_DIR seam, and pin: multi-word dead flags, multi-word present
+# does not, and the single-word control still flags exactly as before.
+DC_DIR="$TMP_ROOT/dead-cask"
+mkdir -p "$DC_DIR/apps/Present Multi.app"
+# The nix build sandbox has no /usr/bin/env, so this runtime-generated stub
+# must use a shebang that exists there (same failure class as the unpatched
+# script copies flake.nix patches with patchShebangs). /bin/sh suffices: the
+# stub only uses printf/case/exit.
+cat > "$DC_DIR/brew" <<'EOF'
+#!/bin/sh
+if [ "$1" = list ]; then printf '%s\n' dead-multi present-multi single-word; exit 0; fi
+if [ "$1" = info ]; then
+  case "$3" in
+    dead-multi)    printf '%s (App)\n' "$CLEAN_APPS_DIR/Dead Multi.app" ;;
+    present-multi) printf '%s (App)\n' "$CLEAN_APPS_DIR/Present Multi.app" ;;
+    single-word)   printf '%s (App)\n' "$CLEAN_APPS_DIR/Single.app" ;;
+  esac
+  exit 0
+fi
+exit 0
+EOF
+chmod +x "$DC_DIR/brew"
+sed -n '/^  _dead=""/,/MISSING from disk/p' "$SCRIPT" > "$DC_DIR/block.sh"
+[ -s "$DC_DIR/block.sh" ] || fail "could not extract the dead-cask block from clean.sh"
+grep -q 'info --cask' "$DC_DIR/block.sh" || fail "extracted dead-cask block lacks the brew info extraction"
+grep -q 'CLEAN_APPS_DIR:-/Applications' "$SCRIPT" || fail "dead-cask extraction lost its /Applications default"
+# This section runs under set -e, and the extracted block ends in a
+# `[ -n "$_dead" ] && {...}` list: an empty _dead makes it return 1, which
+# under set -e would abort the whole suite with no diagnostic. Capture
+# without letting that status kill the run; the case checks below still
+# report a real failure (mirrors the CACHE_OUT capture above).
+# Section-local TMPDIR (the #1918 precedent above): the #1853 section
+# exports a TMPDIR it later removes, and the dead-cask block's mktemp
+# (#2066) would fail against the removed dir -- point TMPDIR at a live
+# dir for the capture, then restore it.
+DC_TMPDIR_SAVE="${TMPDIR:-}"
+TMPDIR="$DC_DIR"
+export TMPDIR
+DC_OUT="$(
+  as_user() { "$@"; }
+  warn() { printf 'WARN: %s\n' "$*"; }
+  _b="$DC_DIR/brew"
+  _cask_list="dead-multi present-multi single-word"
+  export CLEAN_APPS_DIR="$DC_DIR/apps"
+  . "$DC_DIR/block.sh"
+  exit 0
+)"
+if [ -n "$DC_TMPDIR_SAVE" ]; then TMPDIR="$DC_TMPDIR_SAVE"; else unset TMPDIR; fi
+export TMPDIR
+case "$DC_OUT" in
+  *"MISSING from disk"*) echo "ok: dead-cask block warns on missing apps" ;;
+  *) fail "dead-cask block produced no MISSING warning (got: $DC_OUT)" ;;
+esac
+case "$DC_OUT" in
+  *dead-multi*) echo "ok: multi-word dead cask is flagged" ;;
+  *) fail "multi-word dead cask was not flagged (got: $DC_OUT)" ;;
+esac
+case "$DC_OUT" in
+  *present-multi*) fail "multi-word present cask was flagged (got: $DC_OUT)" ;;
+  *) echo "ok: multi-word present cask is not flagged" ;;
+esac
+case "$DC_OUT" in
+  *single-word*) echo "ok: single-word dead cask still flagged (control)" ;;
+  *) fail "single-word dead cask was not flagged (got: $DC_OUT)" ;;
+esac
+
+# ─── #2066: dead-cask per-cask `brew info --cask` failure fails closed ──
+# The dead-cask half enumerated each cask's app path with `brew info
+# --cask` inside a 2>/dev/null pipeline whose status is head's, not
+# brew's, so a failed per-cask query produced an empty app path, the
+# [ -n "$_app" ] guard skipped the cask, and the run claimed "no dead
+# casks" at exit 0. Pin the fail-closed contract with a stub brew,
+# extracting the real brew_cask_drift_check from clean.sh at test time
+# (the #1918 extraction pattern above -- sourced and driven in this
+# shell, not a subshell: the failure counter is a shell variable, and
+# this suite's EXIT trap fires in subshells): a failing per-cask query
+# warns naming the cask and the step, surfaces brew's stderr, and
+# records BREW_DRIFT_FAILURES; a successful query naming a missing app
+# still flags that dead cask, and a successful query naming a present
+# app still does not flag.
+DI_DIR="$TMP_ROOT/dead-info"
+mkdir -p "$DI_DIR/apps/Present App.app"
+cat > "$DI_DIR/casks.nix" <<'NIX'
+_: {
+  homebrew.casks = [
+    "dead-cask"
+    "present-cask"
+    "failing-cask"
+  ];
+}
+NIX
+cat > "$DI_DIR/brew" <<'EOF'
+#!/bin/sh
+if [ "$1 $2" = "list --cask" ]; then printf '%s\n' dead-cask present-cask failing-cask; exit 0; fi
+if [ "$1" = info ]; then
+  case "$3" in
+    dead-cask)    printf '%s (App)\n' "$CLEAN_APPS_DIR/Dead App.app" ;;
+    present-cask) printf '%s (App)\n' "$CLEAN_APPS_DIR/Present App.app" ;;
+    failing-cask) echo "Error: nonexistent cask failing-cask" >&2; exit 1 ;;
+  esac
+  exit 0
+fi
+exit 0
+EOF
+chmod +x "$DI_DIR/brew"
+sed -n '/^brew_cask_drift_check() {/,/^}/p' "$SCRIPT" > "$DI_DIR/drift.sh"
+[ -s "$DI_DIR/drift.sh" ] || fail "could not extract brew_cask_drift_check from clean.sh (#2066)"
+grep -q 'BREW_DRIFT_FAILURES' "$DI_DIR/drift.sh" || fail "extracted drift check lacks the failure counter (#2066)"
+DI_SELF_DIR_SAVE="$SELF_DIR"
+SELF_DIR="$DI_DIR"
+real_brew() { printf '%s' "$DI_DIR/brew"; }
+BREW_DRIFT_FAILURES=0
+DI_TMPDIR_SAVE="${TMPDIR:-}"
+TMPDIR="$DI_DIR"
+export TMPDIR
+export CLEAN_APPS_DIR="$DI_DIR/apps"
+brew_cask_drift_check >"$DI_DIR/out" 2>"$DI_DIR/err"
+DI_FAILURES=$BREW_DRIFT_FAILURES
+DI_OUT="$(cat "$DI_DIR/out")"
+DI_ERR="$(cat "$DI_DIR/err")"
+SELF_DIR="$DI_SELF_DIR_SAVE"
+if [ -n "$DI_TMPDIR_SAVE" ]; then TMPDIR="$DI_TMPDIR_SAVE"; else unset TMPDIR; fi
+export TMPDIR
+unset CLEAN_APPS_DIR
+[ "$DI_FAILURES" -eq 1 ] \
+  || fail "failing brew info --cask recorded $DI_FAILURES drift failure(s) (want 1) (#2066)"
+case "$DI_ERR" in
+  *"brew info --cask failing-cask failed"*) echo "ok: dead-cask check names the cask and the failed step (#2066)" ;;
+  *) fail "dead-cask check did not name the cask and step (got: $DI_ERR) (#2066)" ;;
+esac
+case "$DI_ERR" in
+  *"nonexistent cask failing-cask"*) echo "ok: dead-cask check surfaces brew's own stderr (#2066)" ;;
+  *) fail "dead-cask check swallowed brew's stderr (got: $DI_ERR) (#2066)" ;;
+esac
+case "$DI_ERR" in
+  *"MISSING from disk"*) echo "ok: dead-cask check still warns on missing apps (#2066)" ;;
+  *) fail "dead-cask check produced no MISSING warning (got: $DI_OUT / $DI_ERR) (#2066)" ;;
+esac
+case "$DI_OUT" in
+  *dead-cask*) echo "ok: successful query naming a missing app still flags that dead cask (#2066)" ;;
+  *) fail "successful query naming a missing app did not flag it (got: $DI_OUT) (#2066)" ;;
+esac
+case "$DI_OUT" in
+  *present-cask*) fail "successful query naming a present app was flagged (got: $DI_OUT) (#2066)" ;;
+  *) echo "ok: successful query naming a present app still does not flag (#2066)" ;;
+esac
+case "$DI_OUT" in
+  *failing-cask*) fail "failed query was reported as a dead cask instead of an enumeration failure (got: $DI_OUT) (#2066)" ;;
+  *) echo "ok: failed query is never reported as a dead cask (#2066)" ;;
+esac
+
+
+
+# ─── oseries checkout guard: local work is never deleted (#2040) ───
+# clean.sh used to `del "$CALLER_USER_HOME/git/oseries"` unconditionally,
+# so a checkout holding uncommitted changes or commits no remote has was
+# destroyed by a cleanup run. The guard (git_checkout_keep_reason) must
+# keep such a checkout and say why, in --dry-run too, while a clean,
+# fully pushed checkout -- and a plain non-repo directory -- are still
+# deleted exactly as before. Following the dead-cask precedent above,
+# the real blocks are extracted from clean.sh at test time (never pasted
+# copies) and driven against fixture repos; a full system-half run is
+# not an option here because on a developer machine it would reach real
+# docker/brew/nix tooling. The warn sink is stubbed (logging only, per
+# the dead-cask precedent); del, have and the guard itself are the real
+# extracted code.
+export GIT_AUTHOR_NAME="clean.test" GIT_AUTHOR_EMAIL="clean.test@example.invalid"
+export GIT_COMMITTER_NAME="clean.test" GIT_COMMITTER_EMAIL="clean.test@example.invalid"
+OS_DIR_BASE="$TMP_ROOT/oseries-guard"
+OS_HOME="$OS_DIR_BASE/home"
+OS_DIR="$OS_HOME/git/oseries"
+OS_REMOTE="$OS_DIR_BASE/remote.git"
+mkdir -p "$OS_HOME/git"
+OS_HELPERS="$OS_DIR_BASE/helpers.sh"
+OS_CALL="$OS_DIR_BASE/callsite.sh"
+sed -n '/^del() {/,/^}/p' "$SCRIPT" > "$OS_HELPERS"
+grep '^have() {' "$SCRIPT" >> "$OS_HELPERS"
+sed -n '/^git_checkout_keep_reason() {/,/^}/p' "$SCRIPT" >> "$OS_HELPERS"
+sed -n '/^# The oseries checkout is a real working repo/,/^unset _oseries_reason/p' "$SCRIPT" > "$OS_CALL"
+[ -s "$OS_HELPERS" ] || fail "could not extract the oseries guard helpers from clean.sh"
+[ -s "$OS_CALL" ] || fail "could not extract the oseries call site from clean.sh"
+grep -q 'status --porcelain' "$OS_HELPERS" || fail "extracted guard lacks the dirty check"
+grep -q 'rev-list' "$OS_HELPERS" || fail "extracted guard lacks the unpushed check"
+grep -q 'git_checkout_keep_reason' "$OS_CALL" || fail "extracted call site does not call the guard"
+grep -q 'del "$OSERIES_DIR"' "$OS_CALL" || fail "extracted call site does not delete via del"
+oseries_run() { # <dry-run 0|1> — sets OUT
+  OUT="$(
+    HOME="$OS_HOME"
+    CALLER_USER_HOME="$OS_HOME"
+    DRY_RUN="$1"
+    warn() { printf 'WARN: %s\n' "$*"; }
+    . "$OS_HELPERS"
+    . "$OS_CALL"
+    exit 0
+  )"
+}
+oseries_fresh_repo() { # one commit, pushed to the bare remote; tree clean
+  rm -rf "$OS_DIR" "$OS_REMOTE"
+  mkdir -p "$OS_DIR"
+  git init -q --bare -b main "$OS_REMOTE" || fail "oseries fixture: bare init failed"
+  git init -q -b main "$OS_DIR" || fail "oseries fixture: init failed"
+  echo base > "$OS_DIR/file.txt"
+  git -C "$OS_DIR" add file.txt || fail "oseries fixture: add failed"
+  git -C "$OS_DIR" commit -qm base || fail "oseries fixture: commit failed"
+  git -C "$OS_DIR" remote add origin "$OS_REMOTE" || fail "oseries fixture: remote add failed"
+  git -C "$OS_DIR" push -q -u origin main || fail "oseries fixture: push failed"
+}
+# Dirty checkout (modified tracked file + untracked file): kept, reason named.
+oseries_fresh_repo
+echo dirty >> "$OS_DIR/file.txt"
+echo scratch > "$OS_DIR/untracked.txt"
+oseries_run 0
+[ -d "$OS_DIR" ] && echo "ok: dirty oseries checkout is kept" || fail "dirty oseries checkout was deleted"
+case "$OUT" in
+  *"keeping"*"uncommitted changes"*) echo "ok: dirty keep names the reason" ;;
+  *) fail "dirty keep did not name the reason (got: $OUT)" ;;
+esac
+# Same checkout under --dry-run: kept, and no "would delete" for it.
+oseries_run 1
+[ -d "$OS_DIR" ] && echo "ok: dry-run leaves the dirty checkout in place" || fail "dry-run removed the dirty checkout"
+case "$OUT" in
+  *"would delete"*) fail "dry-run offered to delete the dirty checkout (got: $OUT)" ;;
+  *"keeping"*) echo "ok: dry-run reports the keep instead of a delete" ;;
+  *) fail "dry-run neither kept nor deleted the dirty checkout (got: $OUT)" ;;
+esac
+# Clean tree but one commit no remote has: kept, reason named.
+oseries_fresh_repo
+echo more >> "$OS_DIR/file.txt"
+git -C "$OS_DIR" commit -qam second || fail "oseries fixture: second commit failed"
+oseries_run 0
+[ -d "$OS_DIR" ] && echo "ok: unpushed oseries checkout is kept" || fail "unpushed oseries checkout was deleted"
+case "$OUT" in
+  *"keeping"*"not pushed to any remote"*) echo "ok: unpushed keep names the reason" ;;
+  *) fail "unpushed keep did not name the reason (got: $OUT)" ;;
+esac
+# Clean and fully pushed: deleted exactly as before.
+oseries_fresh_repo
+oseries_run 0
+[ ! -e "$OS_DIR" ] && echo "ok: clean pushed oseries checkout is deleted as before" || fail "clean pushed oseries checkout was kept"
+case "$OUT" in
+  *"keeping"*) fail "clean pushed checkout printed a keep warning (got: $OUT)" ;;
+  *) echo "ok: clean pushed checkout printed no keep warning" ;;
+esac
+# Clean and fully pushed under --dry-run: reported, not deleted.
+oseries_fresh_repo
+oseries_run 1
+[ -d "$OS_DIR" ] && echo "ok: dry-run leaves the clean checkout in place" || fail "dry-run removed the clean checkout"
+case "$OUT" in
+  *"would delete:"*"oseries"*) echo "ok: dry-run still reports the clean checkout as would-delete" ;;
+  *) fail "dry-run did not report would-delete for the clean checkout (got: $OUT)" ;;
+esac
+# A plain directory (not a git work tree): deleted as before.
+rm -rf "$OS_DIR"
+mkdir -p "$OS_DIR"
+echo junk > "$OS_DIR/junk.txt"
+oseries_run 0
+[ ! -e "$OS_DIR" ] && echo "ok: non-repo oseries directory is deleted as before" || fail "non-repo oseries directory was kept"
+
 
 [ "$failures" -eq 0 ] || { echo "$failures failure(s)" >&2; exit 1; }
 echo "all clean.sh flag-shaped-value checks passed"

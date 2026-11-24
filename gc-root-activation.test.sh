@@ -96,8 +96,8 @@ check "entry still uses --indirect and --realise" \
 # indirect gcroot) and logging the call.
 mkdir -p "$tmp/bin"
 cat >"$tmp/bin/nix-store" <<'STUB'
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 root="" target=""
 while [ $# -gt 0 ]; do
   case "$1" in

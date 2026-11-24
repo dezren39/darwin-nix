@@ -18,12 +18,15 @@
 #    the clones are taken under, and compares the staged copy against
 #    them before publishing; any difference fails the run.
 #
-# The copy is staged under backup/.<ts>-partial — a name
+# The copy is staged in a unique per-invocation directory under
+# backup/ (mktemp -d backup/.partial.XXXXXX) — a name
 # opencode-db-backup-prune.sh does not count as a backup — and is
-# renamed to backup/<ts> only after both proofs pass, so a failed run
-# is invisible to retention by construction and leaves no
+# published into backup/<ts> only after both proofs pass, so a failed
+# run is invisible to retention by construction and leaves no
 # timestamp-named directory behind (the staging dir is removed on
-# failure).
+# failure). Staging is unique per invocation (#2065): two runs started
+# in the same second never share it, and the EXIT trap only ever
+# removes the run's own staging.
 #
 # Test seams (used by opencode-db-backup.test.sh):
 #   OPENCODE_DB_PATH     database to back up
@@ -33,7 +36,7 @@
 #                        macOS clonefile copy the recipe has always
 #                        used; word-split on purpose)
 #
-# Run: ./opencode-db-backup.sh
+# Run: ./opencode-db-backup.sh (takes no arguments; --help prints usage)
 # It is run by the flake check `opencode-db-backup-tests`
 # (via opencode-db-backup.test.sh) and by the just recipe
 # `opencode-db-backup`.
@@ -41,21 +44,57 @@ set -euo pipefail
 
 die() { echo "opencode-db-backup: $1" >&2; exit 1; }
 
+usage() { echo "usage: opencode-db-backup.sh"; }
+
+# Argument contract: this script takes no arguments (#2063). Any
+# argument — a typo, or --help with trailing words — is rejected by
+# name, with usage on stderr and exit 2, before any staging directory
+# or sqlite work. Bare -h/--help prints usage and exits 0 with no
+# side effects. `just opencode-db-backup` passes nothing, so strict
+# parsing changes no valid invocation.
+if [ $# -gt 0 ]; then
+  case "$1" in
+    -h | --help)
+      if [ $# -gt 1 ]; then
+        echo "opencode-db-backup: unexpected argument: $2" >&2
+        usage >&2
+        exit 2
+      fi
+      usage
+      exit 0
+      ;;
+    *)
+      echo "opencode-db-backup: unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+fi
+
 db="${OPENCODE_DB_PATH:-$HOME/.local/share/opencode/opencode.db}"
 sqlite3_bin="${OPENCODE_DB_SQLITE3:-/usr/bin/sqlite3}"
 clone_cp="${OPENCODE_DB_CLONE_CP:-/bin/cp -c}"
 root="$(dirname "$db")/backup"
-ts="$(date +%Y%m%dT%H%M%S)"
-staging="$root/.${ts}-partial"
-dest="$root/$ts"
 
 [ -f "$db" ] || die "no database at $db"
-[ ! -e "$dest" ] || die "backup directory already exists: $dest"
-mkdir -p "$root" "$staging"
+mkdir -p "$root"
 
+# Unique staging per invocation (#2065): a second-resolution timestamp
+# name is shared by every run started in the same second, so one run's
+# EXIT trap could delete another run's in-progress staging. mktemp -d
+# gives each run its own staging dir; the trap below only ever names
+# this run's.
+staging="$(mktemp -d "$root/.partial.XXXXXX")"
+dest=""
+claimed=0
 published=0
 cleanup() {
-  if [ "$published" -ne 1 ]; then rm -rf "$staging"; fi
+  if [ "$published" -ne 1 ]; then
+    rm -rf "$staging"
+    # A claimed-but-unpublished dest is this run's own directory (the
+    # mkdir claim below is atomic); no other run can hold the name.
+    if [ "$claimed" -eq 1 ]; then rm -rf "$dest"; fi
+  fi
 }
 trap cleanup EXIT
 
@@ -96,7 +135,26 @@ expected="$(cat "$staging/.expected")"
 
 rm -f "$staging/.expected" "$staging/.db-cloned" "$staging/.wal-cloned" "$staging/.wal-absent"
 chmod 600 "$staging"/opencode.db*
-mv "$staging" "$dest"
+
+# Publish: claim the destination name atomically with mkdir. If this
+# second's name is already taken (a backup published by a concurrent
+# or just-finished run), wait for the clock to tick and retry with
+# the new timestamp instead of dying (#2065). The name stays a plain
+# timestamp so opencode-db-backup-prune.sh keeps counting it.
+attempts=0
+while :; do
+  ts="$(date +%Y%m%dT%H%M%S)"
+  dest="$root/$ts"
+  if mkdir "$dest" 2>/dev/null; then
+    claimed=1
+    break
+  fi
+  attempts=$((attempts + 1))
+  [ "$attempts" -lt 50 ] || die "could not claim a free backup timestamp after $attempts attempts"
+  sleep 0.2
+done
+mv "$staging"/opencode.db* "$dest"/
+rmdir "$staging"
 published=1
 echo "backup: $dest"
 "$sqlite3_bin" "file:$dest/opencode.db?mode=ro" \

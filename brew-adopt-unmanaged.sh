@@ -75,6 +75,7 @@ usage() {
 case ${1:-} in
   --help | -h)
     if [ $# -ne 1 ]; then
+      echo "brew-adopt-unmanaged.sh: unexpected argument: $2" >&2
       usage >&2
       exit 2
     fi
@@ -83,6 +84,9 @@ case ${1:-} in
     ;;
 esac
 if [ $# -ne 1 ]; then
+  if [ $# -gt 1 ]; then
+    echo "brew-adopt-unmanaged.sh: unexpected argument: $2" >&2
+  fi
   usage >&2
   exit 2
 fi

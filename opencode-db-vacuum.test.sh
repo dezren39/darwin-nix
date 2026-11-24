@@ -18,9 +18,9 @@
 # a no-op on any non-empty DB; the script now applies the pragma in
 # the same connection as its VACUUM INTO.
 #
-# Hermetic: a stub `ps` that reports no processes is prepended to PATH
-# (the prune suite's shadowing trick), so vacuum's running-process guard
-# sees a stopped opencode on any machine. Fixture DBs only -- never a
+# Hermetic: lib/test-harness.sh supplies the scratch environment and the
+# scoped `ps` double (no processes, so vacuum's running-process guard
+# sees a stopped opencode on any machine). Fixture DBs only -- never a
 # real user database.
 #
 # Run: ./opencode-db-vacuum.test.sh
@@ -29,9 +29,9 @@ set -u
 
 cd "$(dirname "$0")" || exit
 
-HOME="$(mktemp -d)"
-export HOME
-trap 'rm -rf "$HOME"' EXIT
+# shellcheck source=lib/test-harness.sh
+. ./lib/test-harness.sh
+harness_init || exit 1
 
 failures=0
 fail() { echo "FAIL: $1" >&2; failures=$((failures + 1)); }
@@ -43,9 +43,7 @@ ok_if_clean() { [ "$failures" -eq "$1" ] && ok "$2"; return 0; }
 command -v sqlite3 >/dev/null || { echo "sqlite3 required" >&2; exit 1; }
 
 # Stub ps: no processes at all, so opencode_pids() finds nothing running.
-stub="$HOME/stubbin"; mkdir -p "$stub"
-printf '#!/bin/sh\nexit 0\n' >"$stub/ps"; chmod +x "$stub/ps"
-PATH="$stub:$PATH"; export PATH
+harness_ps_double_begin || exit 1
 
 VACUUM=./opencode-db-vacuum.sh
 
@@ -419,7 +417,7 @@ cmp -s "$db" "$fx/stagefail.before" || fail "staging cp failure changed the DB (
 rm -f "$xdir/stagefail-$$.compact"
 ok_if_clean "$before" "injected staging cp failure (cross-filesystem --into) aborts before any rename, original untouched, no partial staging file"
 else
-  echo "skip: staging cp failure case (no second filesystem available)"
+  harness_skip "staging cp failure case (no second filesystem available)"
 fi
 
 # --- Same-filesystem swap never copies (Codex review on #1781).
@@ -509,7 +507,7 @@ if [ -n "$xdir" ]; then
   rm -f "$into"
   ok_if_clean "$before" "cross-filesystem --into (DB on one volume, copy on /dev/shm) swaps in via staging, backup kept, no leftovers"
 else
-  echo "skip: cross-filesystem --into case (no second filesystem available)"
+  harness_skip "cross-filesystem --into case (no second filesystem available)"
 fi
 
 # --- Failing ps snapshot: real run refuses, DB byte-identical (#1816). -
@@ -601,8 +599,7 @@ cmp -s "$db" "$fx/lsofholder.before" || fail "positive-holder lsof: real run mut
 [ ! -e "${db}.old" ] || fail "positive-holder lsof: real run created .old"
 ok_if_clean "$before" "successful positive lsof result preserves behavior: real vacuum refuses and DB is unchanged"
 
-if [ "$failures" -ne 0 ]; then
-  echo "$failures failure(s)" >&2
-  exit 1
-fi
-echo "all opencode-db-vacuum core checks passed"
+HARNESS_FAILURES="$failures"
+[ "$failures" -eq 0 ] && echo "all opencode-db-vacuum core checks passed"
+harness_ps_double_end
+harness_summary

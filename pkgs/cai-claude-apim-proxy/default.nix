@@ -19,7 +19,7 @@ buildNpmPackage {
   pname = "cai-claude-apim-proxy";
   version = (lib.importJSON "${src}/package.json").version;
   inherit src;
-  npmDepsHash = "sha256-Loi0/B51RvGuyhiHqiMZ3yxKmxD8ASWPiUZ5arR13SU=";
+  npmDepsHash = "sha256-VUZeQDFl+UDokiJKW8/u7L6ccRyezB1NmhjCqpxCwTs=";
   dontNpmBuild = true;
   meta = {
     description = "Local proxy that lets Claude Code CLI talk to the Vertex AI Foundation APIM gateway";

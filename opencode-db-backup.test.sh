@@ -9,6 +9,8 @@
 # - a clone cp that fails: the run exits non-zero, prints no success
 #   line, and leaves no timestamp-named (or staging) directory, so
 #   opencode-db-backup-prune.sh sees nothing to keep or delete;
+# - a final re-read that fails (#2032): the run exits non-zero, prints
+#   no success line, and publishes no timestamp-named directory;
 # - a clone cp that silently drops the WAL copy: the content check
 #   (live counts recorded under the write lock vs the staged copy)
 #   fails the run and nothing is published.
@@ -161,6 +163,44 @@ printf '%s' "$out" | grep -q '^backup:' && fail "failing cp still printed the su
 out="$(bash "$PRUNE" --dir "$D/backup" --keep 1 2>&1)"
 printf '%s' "$out" | grep -q 'would delete:' && fail "pruner sees a phantom backup after a failed run: $out"
 [ "$failures" -eq "$before" ] && ok "failing clone exits non-zero and publishes nothing retention can see"
+
+# --- final re-read fails (#2032) ---------------------------------------
+# Stub sqlite3 that delegates to the real binary except for the second
+# read of the staged copy (file:...-partial...?mode=ro): the first such
+# read is the content check, the second is the final re-read. Failing
+# exactly the final re-read must publish nothing and print no success
+# line, so exit status and output cannot disagree.
+{
+  printf '#!%s\n' "$BASH_BIN"
+  echo 'n=0'
+  echo 'if [ -f "$OPENCODE_DB_TEST_COUNT" ]; then n="$(cat "$OPENCODE_DB_TEST_COUNT")"; fi'
+  echo 'for arg in "$@"; do'
+  echo '  case "$arg" in'
+  echo '    file:*-partial*)'
+  echo '      n=$((n + 1))'
+  echo '      echo "$n" > "$OPENCODE_DB_TEST_COUNT"'
+  echo '      if [ "$n" -ge 2 ]; then echo "stub sqlite3: forced final re-read failure" >&2; exit 1; fi'
+  echo '      ;;'
+  echo '  esac'
+  echo 'done'
+  echo 'exec "$OPENCODE_DB_TEST_REAL_SQLITE3" "$@"'
+} >"$WORK/sqlite3-fail-final-read"
+chmod +x "$WORK/sqlite3-fail-final-read"
+before=$failures
+D="$WORK/finalread"
+make_db "$D"
+out="$(OPENCODE_DB_PATH="$D/opencode.db" \
+  OPENCODE_DB_SQLITE3="$WORK/sqlite3-fail-final-read" \
+  OPENCODE_DB_TEST_COUNT="$WORK/final-read-count" \
+  OPENCODE_DB_TEST_REAL_SQLITE3="$SQLITE3" \
+  OPENCODE_DB_CLONE_CP="$WORK/cp-ok" \
+  bash "$BACKUP" 2>&1)"
+rc=$?
+[ "$rc" -ne 0 ] || fail "failing final re-read exited 0: $out"
+printf '%s' "$out" | grep -q '^backup:' && fail "failing final re-read still printed the success line: $out"
+[ "$(ts_dirs "$D/backup")" -eq 0 ] || fail "failing final re-read left a timestamp dir behind"
+[ "$(partial_dirs "$D/backup")" -eq 0 ] || fail "failing final re-read left a staging dir behind"
+[ "$failures" -eq "$before" ] && ok "a failing final re-read exits non-zero, publishes nothing, and prints no success line"
 
 # --- WAL copy silently dropped -----------------------------------------
 before=$failures

@@ -123,9 +123,14 @@ expected="$(cat "$staging/.expected")"
 
 rm -f "$staging/.expected" "$staging/.db-cloned" "$staging/.wal-cloned" "$staging/.wal-absent"
 chmod 600 "$staging"/opencode.db*
+# Final re-read of the staged copy (#2032): this runs BEFORE the mv,
+# published=1, and the success line, so if it fails the run exits
+# non-zero with nothing published and no success line printed —
+# exit status and output cannot disagree, and the header invariant
+# (a failed run leaves no timestamp-named directory) holds.
+"$sqlite3_bin" "file:$staging/opencode.db?mode=ro" \
+  "select 'sessions', count(*) from session;" \
+  "select 'migrations', count(*), max(id) from migration;"
 mv "$staging" "$dest"
 published=1
 echo "backup: $dest"
-"$sqlite3_bin" "file:$dest/opencode.db?mode=ro" \
-  "select 'sessions', count(*) from session;" \
-  "select 'migrations', count(*), max(id) from migration;"

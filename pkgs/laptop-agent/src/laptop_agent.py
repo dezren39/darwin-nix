@@ -73,6 +73,13 @@ STATE_DIR = Path(os.environ.get(
     "LAPTOP_AGENT_STATE", Path.home() / ".local/state/laptop-agent"))
 MAX_OUT = 1 << 20            # per-stream capture cap for /exec (tail kept)
 MAX_BODY = 1 << 20           # request body cap for /exec and /jobs
+# Spool meta.json read cap (#2094): load_persisted_jobs() reads each
+# persisted job's meta.json at startup. The daemon's own metas are a
+# few hundred bytes; an uncapped read_text() let one oversized spool
+# file spike daemon memory before any validation could run. Reads
+# are capped at this many bytes (plus one, to detect overflow) and
+# anything larger is skipped with a logged reason.
+MAX_META = 1 << 20
 _META_WRITE_ATTEMPTS = 3     # bounded retries for a meta.json write (#2037)
 _META_WRITE_RETRY_DELAY_S = 0.1  # pause between meta.json write attempts
 EXEC_TIMEOUT_DEFAULT = 120
@@ -558,7 +565,14 @@ def load_persisted_jobs():
         if not d.is_dir():
             continue
         try:
-            meta = json.loads((d / "meta.json").read_text())
+            with open(d / "meta.json", "rb") as f:
+                raw = f.read(MAX_META + 1)
+            if len(raw) > MAX_META:
+                print(f"laptop-agent: skipping persisted job {d}: "
+                      f"meta.json exceeds {MAX_META} bytes",
+                      file=sys.stderr, flush=True)
+                continue
+            meta = json.loads(raw)
         except ValueError as e:
             print(f"laptop-agent: skipping persisted job {d}: "
                   f"invalid JSON in meta.json ({e})",

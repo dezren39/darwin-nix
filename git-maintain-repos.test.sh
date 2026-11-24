@@ -37,7 +37,12 @@ export XDG_CONFIG_HOME="$TMP_ROOT/xdg/config"
 export XDG_CACHE_HOME="$TMP_ROOT/xdg/cache"
 export XDG_DATA_HOME="$TMP_ROOT/xdg/data"
 export XDG_STATE_HOME="$TMP_ROOT/xdg/state"
-mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME"
+mkdir -p "$HOME" "$XDG_CONFIG_HOME/git" "$XDG_CACHE_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME"
+# git chooses the --global write target by existence: the XDG config
+# file when it exists, else $HOME/.gitconfig. Create the fixture file
+# so registrations land in the fixture config even after the suite
+# redirects HOME again below (#1999).
+: > "$XDG_CONFIG_HOME/git/config"
 unset JOBS PACK_THREADS REFLOG_EXPIRE DEPTH SCOPE
 
 failures=0
@@ -580,10 +585,12 @@ echo "ok: full-scope control run exits 0"
 unset GIT_STUB_MAINT_START_RC
 
 # ─── Scheduler registration lands in the fixture config (#1999) ────
-# git resolves --global through XDG_CONFIG_HOME before HOME. The
-# harness pointed XDG_CONFIG_HOME at a per-run temp dir at startup, so
-# a caller-inherited XDG_CONFIG_HOME (read-only in some CI sandboxes)
-# can neither break the registration above nor receive its writes: the
+# The harness pointed XDG_CONFIG_HOME at a per-run temp dir at startup
+# and created its git/config, so git's --global writes land there (the
+# XDG file wins by existence; see the setup block) instead of in
+# whichever $HOME/.gitconfig is current. A caller-inherited
+# XDG_CONFIG_HOME (read-only in some CI sandboxes) can therefore
+# neither break the registration above nor receive its writes: the
 # registration must have landed in the fixture config even though HOME
 # changed twice since the exports. The flake check's second run starts
 # the whole suite with an external read-only XDG_CONFIG_HOME and

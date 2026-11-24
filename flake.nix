@@ -2096,6 +2096,12 @@ rec {
             ''
               cp -r ${./pkgs/laptop-agent/src} src
               cp -r ${./pkgs/laptop-agent/tests} tests
+              # The suite exercises real subprocess execs whose default cwd
+              # is the server's home directory (str(Path.home()), the
+              # documented restore-tail default), so HOME must exist. In
+              # the build sandbox HOME is /homeless-shelter, which does not
+              # (run 44780604603: 7 FileNotFoundError failures). Give the
+              # suite a real home instead of changing the agent contract.
               export HOME="$TMPDIR/home"
               mkdir -p "$HOME"
               python3 -m unittest discover -s tests -v

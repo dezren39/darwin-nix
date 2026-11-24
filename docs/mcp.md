@@ -140,6 +140,8 @@ Agents in OpenCode also see these plugins:
   on itself. Its `api` tool accepts any HTTP method. Write actions are allowed by
   default (#371).
 - **`opencode` and `mcpx_*`:** built in. The `mcpx_*` tools talk to the mcpx daemon.
-- **`tokenscope`:** a file plugin.
+- **`tokenscope`:** not a plugin — a command, installed from
+  `commands/tokenscope.md` by `./symlink-commands`; it invokes the tokenscope
+  tool.
 - **`openchamber*`:** four tools, added through OpenChamber's
   `opencode.managed.json`.

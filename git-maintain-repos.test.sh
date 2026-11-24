@@ -33,7 +33,11 @@ SCRIPT="$SELF_DIR/git-maintain-repos"
 TMP_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TMP_ROOT"' EXIT
 export HOME="$TMP_ROOT/home"
-mkdir -p "$HOME"
+export XDG_CONFIG_HOME="$TMP_ROOT/xdg/config"
+export XDG_CACHE_HOME="$TMP_ROOT/xdg/cache"
+export XDG_DATA_HOME="$TMP_ROOT/xdg/data"
+export XDG_STATE_HOME="$TMP_ROOT/xdg/state"
+mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME"
 unset JOBS PACK_THREADS REFLOG_EXPIRE DEPTH SCOPE
 
 failures=0

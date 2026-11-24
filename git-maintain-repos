@@ -431,7 +431,14 @@ fi
 # and exits 0 when already installed. Safe to run on every switch.
 ensure_scheduler() {
   local mc="$HOME/.config/git/maintenance.config"
-  [ -e "$mc" ] || { mkdir -p "$(dirname "$mc")"; printf '[maintenance]\n' > "$mc"; }
+  if [ ! -e "$mc" ]; then
+    if [ "$DRY_RUN" = "1" ]; then
+      echo "  dry-run: would create $mc"
+    else
+      mkdir -p "$(dirname "$mc")"
+      printf '[maintenance]\n' > "$mc"
+    fi
+  fi
   # launchd *Agents* need a GUI session, which root does not have, so installing
   # the scheduler as root would create plists that never fire. Config checks below
   # still apply -- root reads /etc/gitconfig and /var/root/.gitconfig.

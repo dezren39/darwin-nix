@@ -1,3 +1,7 @@
+## 2026-11-23 - Precompile Line-Loop Regexes and Match by Position, Watching m.end()
+**Learning:** `mcp-clients.py` called `re.match`/`re.fullmatch` with inline pattern strings on per-line slices (`line[i:]`, `value[i:]`) across every client config each activation. Precompiling at module level and matching by position (`pat.match(s, pos)`) skips both the compile/cache lookup and the slice copy (~2x on `_first_key`). Correctness trap: `m.end()` on a slice match is relative (`i + m.end()`), but on a pos-based match it is absolute (`m.end()`) — every index-arithmetic call site must be updated with the switch.
+**Action:** When converting slice-based `re.match` calls to pos-based matching, audit every `m.end()`/`m.start()` use at the call site for the relative-to-absolute change; verify with a differential fuzz against the pre-change implementation.
+
 ## 2026-10-22 - Lazy Candidate Sorting in Plugin Session Resolution
 **Learning:** In session management plugins (like `warp-import.js`), eagerly sorting and slicing candidate arrays before checking exact matches causes unnecessary O(N log N) sorts and array allocations on every happy-path lookup.
 **Action:** Always evaluate error-fallback lists and candidate candidate sorting lazily when resolving session IDs or titles.

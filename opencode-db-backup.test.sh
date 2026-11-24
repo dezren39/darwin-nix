@@ -56,7 +56,8 @@ make_db() {
     "INSERT INTO migration VALUES('m2');" >&9
   local i
   for i in $(seq 1 50); do
-    grep -a -q 's3' "$dir/opencode.db-wal" 2>/dev/null && break
+    grep -a -q 's3' "$dir/opencode.db-wal" 2>/dev/null \
+      && grep -a -q 'm2' "$dir/opencode.db-wal" 2>/dev/null && break
     sleep 0.1
   done
   kill -9 "$holder" 2>/dev/null
@@ -65,6 +66,7 @@ make_db() {
   rm -f "$dir/.holder-in"
   [ -f "$dir/opencode.db-wal" ] || fail "fixture: no WAL left behind in $dir"
   grep -a -q 's3' "$dir/opencode.db-wal" 2>/dev/null || fail "fixture: WAL in $dir lacks the un-checkpointed rows"
+  grep -a -q 'm2' "$dir/opencode.db-wal" 2>/dev/null || fail "fixture: WAL in $dir lacks the last un-checkpointed row"
 }
 
 # Stub clone commands. The backup script invokes the clone command as

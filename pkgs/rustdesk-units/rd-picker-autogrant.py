@@ -98,11 +98,26 @@ def click(x, y, scale):
 
 # evdev codes: SUPER_L=125; digit keys '1'..'9' = 2..10, '0' = 11
 def goto_ws(n):
-    if n is None or n < 1 or n > 10:
-        return
-    code = n + 1 if n < 10 else 11
-    ydotool("key", "125:1", f"{code}:1", f"{code}:0", "125:0")
+    """Switch to workspace n; return True iff the switch was issued.
+
+    The digit-key chord only covers workspaces 1..10, but Hyprland ids
+    have no 10-cap: beyond that range use hyprctl dispatch instead of
+    silently doing nothing (the caller confirms via active_ws()).
+    """
+    if n is None or n < 1:
+        log(f"goto_ws: refusing invalid workspace {n!r}")
+        return False
+    if n <= 10:
+        code = n + 1 if n < 10 else 11
+        ydotool("key", "125:1", f"{code}:1", f"{code}:0", "125:0")
+    else:
+        try:
+            run(["hyprctl", "dispatch", "workspace", str(n)])
+        except Exception as e:
+            log(f"goto_ws: hyprctl dispatch to workspace {n} failed: {e!r}")
+            return False
     time.sleep(0.9)
+    return True
 
 def rustdesk_connected():
     try:
@@ -121,11 +136,30 @@ def grant(picker):
     x, y = picker["at"]; w, h = picker["size"]
     ws = picker.get("workspace", {}).get("id")
     log(f"picker pid={pid} rect=({x},{y},{w}x{h}) ws={ws} - granting")
+    # Never click blind (#2092): the click coordinates only make sense
+    # on the picker's workspace, so both workspaces must be known and
+    # any needed switch must be CONFIRMED before the first click --
+    # calibrate() included, since it too sends a mousemove. Aborting
+    # here sends zero clicks.
+    if ws is None:
+        log("grant ABORT - picker workspace unknown; not clicking")
+        return False
+    cur = active_ws()
+    if cur is None:
+        log("grant ABORT - current workspace unknown; not clicking")
+        return False
+    switched = False
+    if ws != cur:
+        if not goto_ws(ws):
+            log(f"grant ABORT - could not switch to workspace {ws}; not clicking")
+            return False
+        switched = True
+        now = active_ws()
+        if now != ws:
+            log(f"grant ABORT - switch to workspace {ws} not confirmed (active={now}); not clicking")
+            return False
     scale = calibrate()
     log(f"ydotool scale={scale:.3f}")
-    cur = active_ws()
-    if ws and cur and ws != cur:
-        goto_ws(ws)
     # candidate (row_rel_y, share_rel_x_from_right) pairs; first that closes wins
     for row_rel, share_off in ((150, 48), (130, 107), (170, 48)):
         click(x + w // 2, y + row_rel, scale)
@@ -136,7 +170,7 @@ def grant(picker):
             break
     else:
         log("grant FAILED - picker still open after all attempts")
-    if ws and cur and ws != cur:
+    if switched:
         goto_ws(cur)
     return picker_gone(pid)
 

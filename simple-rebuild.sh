@@ -450,7 +450,11 @@ ensure_macfuse() {
 # updated again. A failed upgrade is reported but does not undo the switch.
 brew_upgrade() {
   local brewfile
-  brewfile=$(grep -o '/nix/store/[a-z0-9]*-Brewfile' ./result/activate | head -1)
+  # A missing match is the normal no-Brewfile case, not a failure: under
+  # `set -e` + pipefail the grep pipeline's exit 1 aborted ./s here, before
+  # the skip guard below could return, so a finished switch went unrecorded
+  # (#2031). An unreadable activate file also lands in the skip branch.
+  brewfile=$(grep -o '/nix/store/[a-z0-9]*-Brewfile' ./result/activate | head -1) || true
   if [[ -z "$brewfile" || ! -x /opt/homebrew/bin/brew ]]; then
     echo "skipping brew upgrade: no Brewfile in ./result/activate or no brew" >&2
     return 0

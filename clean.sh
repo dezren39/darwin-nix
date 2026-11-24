@@ -453,6 +453,35 @@ del() {
     rm -rf "$p" 2>/dev/null || warn "could not fully remove $p"
   done
 }
+
+# git_checkout_keep_reason <dir> -- guard for deleting a git checkout
+# wholesale (#2040): prints WHY the checkout must be kept and returns 0
+# when it holds work that exists nowhere else (uncommitted changes, stash
+# entries, or commits no remote has); returns 1 silently when deletion is
+# safe (path absent, not a git work tree, or clean with every commit on
+# some remote). Like dir_has_open_handles (#1803) it fails CLOSED: when
+# git cannot answer, the reason is the failure itself, so an unverifiable
+# checkout is kept, never deleted on a guess.
+git_checkout_keep_reason() {
+  local dir="$1"
+  [ -d "$dir" ] || return 1
+  [ -e "$dir/.git" ] || return 1
+  if ! have git; then echo "git is unavailable, so its state cannot be verified"; return 0; fi
+  local porcelain
+  if ! porcelain="$(git -C "$dir" status --porcelain 2>/dev/null)"; then
+    echo "git status failed, so its state cannot be verified"; return 0
+  fi
+  if [ -n "$porcelain" ]; then echo "it has uncommitted changes"; return 0; fi
+  if [ -n "$(git -C "$dir" stash list 2>/dev/null)" ]; then echo "it has stash entries"; return 0; fi
+  if git -C "$dir" rev-parse --verify -q HEAD >/dev/null 2>&1; then
+    local unpushed
+    if ! unpushed="$(git -C "$dir" rev-list --branches HEAD --not --remotes 2>/dev/null)"; then
+      echo "its pushed state cannot be verified"; return 0
+    fi
+    if [ -n "$unpushed" ]; then echo "it has commits not pushed to any remote"; return 0; fi
+  fi
+  return 1
+}
 # have CMD -- true if runnable. Missing tools are informational, never fatal.
 have() { command -v "$1" >/dev/null 2>&1; }
 
@@ -1285,7 +1314,15 @@ for _ptbase in "$CALLER_USER_HOME/.local/share/opencode/tmp" "${TMPDIR:-/tmp}" /
 done
 [ "$_pt_removed" -gt 0 ] && info "pytest: removed $_pt_removed run dirs older than ${PYTEST_KEEP_HOURS}h"
 
-del "$CALLER_USER_HOME/git/oseries"
+# The oseries checkout is a real working repo, not scratch: delete it
+# only when it holds no work that exists nowhere else (#2040).
+OSERIES_DIR="$CALLER_USER_HOME/git/oseries"
+if _oseries_reason="$(git_checkout_keep_reason "$OSERIES_DIR")"; then
+  warn "keeping ${OSERIES_DIR/#$HOME/\~}: $_oseries_reason"
+else
+  del "$OSERIES_DIR"
+fi
+unset _oseries_reason
 OPS_LOG_DIR="$CALLER_USER_HOME/.cache/operations-portal/logs"
 if [ -d "$OPS_LOG_DIR" ]; then
   # operations-portal rotates daily but never prunes: retention_days is defined

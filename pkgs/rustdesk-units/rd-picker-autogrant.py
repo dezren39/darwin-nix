@@ -98,11 +98,12 @@ def click(x, y, scale):
 
 # evdev codes: SUPER_L=125; digit keys '1'..'9' = 2..10, '0' = 11
 def goto_ws(n):
-    if n is None or n < 1 or n > 10:
-        return
+    if not isinstance(n, int) or isinstance(n, bool) or n < 1 or n > 10:
+        return False
     code = n + 1 if n < 10 else 11
     ydotool("key", "125:1", f"{code}:1", f"{code}:0", "125:0")
     time.sleep(0.9)
+    return True
 
 def rustdesk_connected():
     try:
@@ -121,11 +122,23 @@ def grant(picker):
     x, y = picker["at"]; w, h = picker["size"]
     ws = picker.get("workspace", {}).get("id")
     log(f"picker pid={pid} rect=({x},{y},{w}x{h}) ws={ws} - granting")
+    cur = active_ws()
+    if not isinstance(ws, int) or isinstance(ws, bool) or not 1 <= ws <= 10:
+        log(f"grant refused - picker workspace is unknown or not switchable: {ws}")
+        return False
+    if not isinstance(cur, int) or isinstance(cur, bool) or not 1 <= cur <= 10:
+        log(f"grant refused - current workspace is unknown or not switchable: {cur}")
+        return False
+    if ws != cur:
+        if not goto_ws(ws):
+            log(f"grant refused - could not switch to picker workspace {ws}")
+            return False
+        actual = active_ws()
+        if actual != ws:
+            log(f"grant refused - workspace switch unverified: expected {ws}, got {actual}")
+            return False
     scale = calibrate()
     log(f"ydotool scale={scale:.3f}")
-    cur = active_ws()
-    if ws and cur and ws != cur:
-        goto_ws(ws)
     # candidate (row_rel_y, share_rel_x_from_right) pairs; first that closes wins
     for row_rel, share_off in ((150, 48), (130, 107), (170, 48)):
         click(x + w // 2, y + row_rel, scale)
@@ -136,7 +149,7 @@ def grant(picker):
             break
     else:
         log("grant FAILED - picker still open after all attempts")
-    if ws and cur and ws != cur:
+    if ws != cur:
         goto_ws(cur)
     return picker_gone(pid)
 

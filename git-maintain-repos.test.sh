@@ -595,9 +595,9 @@ unset GIT_STUB_MAINT_START_RC
 # changed twice since the exports. The flake check's second run starts
 # the whole suite with an external read-only XDG_CONFIG_HOME and
 # asserts that config is left untouched.
-case "$XDG_CONFIG_HOME" in
+case "${XDG_CONFIG_HOME:-}" in
   "$TMP_ROOT"/*) echo "ok: harness XDG_CONFIG_HOME is a per-run temp dir (#1999)" ;;
-  *) fail "harness XDG_CONFIG_HOME is not under the temp root (got: $XDG_CONFIG_HOME)" ;;
+  *) fail "harness XDG_CONFIG_HOME is not under the temp root (got: ${XDG_CONFIG_HOME:-unset})" ;;
 esac
 REG_ORIGINS="$("$REAL_GIT" config --global --show-origin --get-all maintenance.repo 2>/dev/null)"
 case "$REG_ORIGINS" in

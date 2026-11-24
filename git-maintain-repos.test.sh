@@ -228,6 +228,15 @@ for pair in \
       *"git-maintain-repos: --system conflicts with repository-scoped flags:"*) echo "ok: --system $pair ($order) judged at parse time" ;;
       *) fail "--system $pair ($order) was not judged on stderr (got: $ERR)" ;;
     esac
+    # #1926: a parse-time refusal must not leak into stdout, and its explanatory
+    # hint must be on stderr and indented under the "git-maintain-repos: " prefix
+    # (20 columns) like the sibling continuation lines, not one short.
+    [ -z "$OUT" ] || fail "--system $pair ($order) wrote to stdout: $OUT"
+    case "$ERR" in
+      *$'\n                    (--system installs the machine-wide scheduler and opens no repository)'*)
+        echo "ok: --system $pair ($order) hint is on stderr, aligned under the prefix" ;;
+      *) fail "--system $pair ($order) hint missing/misaligned on stderr (got: $ERR)" ;;
+    esac
   done
 done
 if [ -s "$STUB_LOG" ]; then

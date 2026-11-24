@@ -1068,6 +1068,64 @@ if grep -Eq '^(purge_pg|purge_large|archive|del )' "$TC_DIR/calls-kept"; then
 else
   echo "ok: kept nested worktree still protects its whole directory"
 fi
+# --- tidy: failed freshness scan skips purge/archive (#1857) ---
+# Exercise the real freshness helper and classifier. A failing find stub
+# must be distinguishable from a successful empty scan, even when the
+# fixture contains a fresh file. Successful controls pin both the fresh
+# protect path and the stale plain-leaf purge/archive path.
+TF_DIR="$TMP_ROOT/tidy-freshness"
+mkdir -p "$TF_DIR/bin" "$TF_DIR/subject/fail" "$TF_DIR/subject/recent" "$TF_DIR/subject/stale"
+touch "$TF_DIR/subject/fail/fresh.txt" "$TF_DIR/subject/recent/fresh.txt"
+touch -t 200001010000 "$TF_DIR/subject/stale/old.txt"
+{ sed -n '/^tidy_dir_has_recent_file() {/,/^}/p' "$SCRIPT"
+  sed -n '/^tidy_classify_and_place() {/,/^}/p' "$SCRIPT"; } > "$TF_DIR/fn.sh"
+[ -s "$TF_DIR/fn.sh" ] || fail "could not extract tidy freshness/classifier functions"
+cat > "$TF_DIR/bin/find" <<'STUB'
+#!/bin/sh
+for arg do
+  if [ "$arg" = "-mtime" ]; then
+    [ "$TF_MODE" != fail ] || exit 1
+    break
+  fi
+done
+exec "$TF_REAL_FIND" "$@"
+STUB
+chmod +x "$TF_DIR/bin/find"
+TF_REAL_FIND="$(command -v find)"
+export TF_REAL_FIND
+tf_run() { # tf_run <mode: fail|recent|stale>
+  (
+    DRY_RUN=0; OPENCODE_WORKTREE_STALE_DAYS=30; OPENCODE_TIDY_PROTECT_DAYS=1
+    CALLER_USER_HOME="$HOME"; TF_MODE="$1"; export TF_MODE; TF_CALLS="$TF_DIR/calls-$1"
+    : > "$TF_CALLS"
+    warn() { echo "warn: $*" >> "$TF_CALLS"; }
+    tidy_purge_postgres_dirs() { echo purge_pg >> "$TF_CALLS"; }
+    tidy_purge_large_entries() { echo purge_large >> "$TF_CALLS"; }
+    tidy_dir_to_bucket() { echo archive >> "$TF_CALLS"; }
+    del() { echo "del $*" >> "$TF_CALLS"; }
+    . "$TF_DIR/fn.sh"
+    PATH="$TF_DIR/bin:$PATH"
+    tidy_classify_and_place "$TF_DIR/subject/$1" "$TF_DIR/bucket"
+  )
+}
+tf_run fail
+grep -q 'freshness scan failed' "$TF_DIR/calls-fail" \
+  || fail "failed freshness scan did not warn (#1857)"
+if grep -Eq '^(purge_pg|purge_large|archive|del )' "$TF_DIR/calls-fail"; then
+  fail "failed freshness scan still purged/archived: $(cat "$TF_DIR/calls-fail")"
+else
+  echo "ok: failed freshness scan skips purge/archive (#1857)"
+fi
+tf_run recent
+if grep -Eq '^(purge_pg|purge_large|archive|del )' "$TF_DIR/calls-recent"; then
+  fail "successful recent-file scan no longer protects its directory: $(cat "$TF_DIR/calls-recent")"
+else
+  echo "ok: successful recent-file scan still protects its directory"
+fi
+tf_run stale
+grep -q '^purge_large$' "$TF_DIR/calls-stale" && grep -q '^archive$' "$TF_DIR/calls-stale" \
+  || fail "successful empty freshness scan no longer purges/archives: $(cat "$TF_DIR/calls-stale")"
+echo "ok: successful empty freshness scan preserves normal tidy behavior"
 # ─── #1861: artifact_is_prunable fails closed on a failed freshness scan ──
 # The freshness find's exit status used to be discarded, so a failed scan
 # read as "no fresh files" and the caller deleted the artifact. Extract

@@ -1954,13 +1954,18 @@ OPENCODE_TIDY_PROTECT_DAYS="${OPENCODE_TIDY_PROTECT_DAYS:-1}"
 OPENCODE_TIDY_LARGE_MB="${OPENCODE_TIDY_LARGE_MB:-200}"
 
 tidy_dir_has_recent_file() {
+  local recent_file
   # .git internals are excluded: `git status` (run by opencode_entry_is_idle,
   # by clean.sh's own repo maintenance, by anything) touches .git/index's
   # mtime on every invocation, read-only or not. Counting that would make any
   # directory holding a repo look "recently modified" indefinitely, on a
   # timer reset by code that has nothing to do with this directory's own
   # content.
-  [ -n "$(find "$1" -mindepth 1 -name .git -prune -o -type f -mtime "-${OPENCODE_TIDY_PROTECT_DAYS}" -print -quit 2>/dev/null)" ]
+  if recent_file="$(find "$1" -mindepth 1 -name .git -prune -o -type f -mtime "-${OPENCODE_TIDY_PROTECT_DAYS}" -print -quit 2>/dev/null)"; then
+    [ -n "$recent_file" ]
+  else
+    return 2
+  fi
 }
 
 # initdb always writes PG_VERSION at a postgres data dir's root, regardless
@@ -2050,8 +2055,16 @@ tidy_dir_to_bucket() {
 }
 
 tidy_classify_and_place() {
-  local dir="$1" bucket_root="$2" g wt kept_worktree="" idle_worktrees=() inventory
-  tidy_dir_has_recent_file "$dir" && return 0   # rule 2, tidy's own protect window
+  local dir="$1" bucket_root="$2" g wt kept_worktree="" idle_worktrees=() inventory freshness_rc
+  if tidy_dir_has_recent_file "$dir"; then
+    return 0   # rule 2, tidy's own protect window
+  else
+    freshness_rc=$?
+  fi
+  if [ "$freshness_rc" -gt 1 ]; then
+    warn "tidy: freshness scan failed for $dir; skipping purge/archive for safety"
+    return 0
+  fi
 
   # The nested-worktree inventory decides whether anything below may be
   # purged or archived, so its failure must be observable (#1863): a find

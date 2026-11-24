@@ -1748,5 +1748,111 @@ esac
 
 
 
+# ─── oseries checkout guard: local work is never deleted (#2040) ───
+# clean.sh used to `del "$CALLER_USER_HOME/git/oseries"` unconditionally,
+# so a checkout holding uncommitted changes or commits no remote has was
+# destroyed by a cleanup run. The guard (git_checkout_keep_reason) must
+# keep such a checkout and say why, in --dry-run too, while a clean,
+# fully pushed checkout -- and a plain non-repo directory -- are still
+# deleted exactly as before. Following the dead-cask precedent above,
+# the real blocks are extracted from clean.sh at test time (never pasted
+# copies) and driven against fixture repos; a full system-half run is
+# not an option here because on a developer machine it would reach real
+# docker/brew/nix tooling. The warn sink is stubbed (logging only, per
+# the dead-cask precedent); del, have and the guard itself are the real
+# extracted code.
+export GIT_AUTHOR_NAME="clean.test" GIT_AUTHOR_EMAIL="clean.test@example.invalid"
+export GIT_COMMITTER_NAME="clean.test" GIT_COMMITTER_EMAIL="clean.test@example.invalid"
+OS_DIR_BASE="$TMP_ROOT/oseries-guard"
+OS_HOME="$OS_DIR_BASE/home"
+OS_DIR="$OS_HOME/git/oseries"
+OS_REMOTE="$OS_DIR_BASE/remote.git"
+mkdir -p "$OS_HOME/git"
+OS_HELPERS="$OS_DIR_BASE/helpers.sh"
+OS_CALL="$OS_DIR_BASE/callsite.sh"
+sed -n '/^del() {/,/^}/p' "$SCRIPT" > "$OS_HELPERS"
+grep '^have() {' "$SCRIPT" >> "$OS_HELPERS"
+sed -n '/^git_checkout_keep_reason() {/,/^}/p' "$SCRIPT" >> "$OS_HELPERS"
+sed -n '/^# The oseries checkout is a real working repo/,/^unset _oseries_reason/p' "$SCRIPT" > "$OS_CALL"
+[ -s "$OS_HELPERS" ] || fail "could not extract the oseries guard helpers from clean.sh"
+[ -s "$OS_CALL" ] || fail "could not extract the oseries call site from clean.sh"
+grep -q 'status --porcelain' "$OS_HELPERS" || fail "extracted guard lacks the dirty check"
+grep -q 'rev-list' "$OS_HELPERS" || fail "extracted guard lacks the unpushed check"
+grep -q 'git_checkout_keep_reason' "$OS_CALL" || fail "extracted call site does not call the guard"
+grep -q 'del "$OSERIES_DIR"' "$OS_CALL" || fail "extracted call site does not delete via del"
+oseries_run() { # <dry-run 0|1> — sets OUT
+  OUT="$(
+    HOME="$OS_HOME"
+    CALLER_USER_HOME="$OS_HOME"
+    DRY_RUN="$1"
+    warn() { printf 'WARN: %s\n' "$*"; }
+    . "$OS_HELPERS"
+    . "$OS_CALL"
+    exit 0
+  )"
+}
+oseries_fresh_repo() { # one commit, pushed to the bare remote; tree clean
+  rm -rf "$OS_DIR" "$OS_REMOTE"
+  mkdir -p "$OS_DIR"
+  git init -q --bare -b main "$OS_REMOTE" || fail "oseries fixture: bare init failed"
+  git init -q -b main "$OS_DIR" || fail "oseries fixture: init failed"
+  echo base > "$OS_DIR/file.txt"
+  git -C "$OS_DIR" add file.txt || fail "oseries fixture: add failed"
+  git -C "$OS_DIR" commit -qm base || fail "oseries fixture: commit failed"
+  git -C "$OS_DIR" remote add origin "$OS_REMOTE" || fail "oseries fixture: remote add failed"
+  git -C "$OS_DIR" push -q -u origin main || fail "oseries fixture: push failed"
+}
+# Dirty checkout (modified tracked file + untracked file): kept, reason named.
+oseries_fresh_repo
+echo dirty >> "$OS_DIR/file.txt"
+echo scratch > "$OS_DIR/untracked.txt"
+oseries_run 0
+[ -d "$OS_DIR" ] && echo "ok: dirty oseries checkout is kept" || fail "dirty oseries checkout was deleted"
+case "$OUT" in
+  *"keeping"*"uncommitted changes"*) echo "ok: dirty keep names the reason" ;;
+  *) fail "dirty keep did not name the reason (got: $OUT)" ;;
+esac
+# Same checkout under --dry-run: kept, and no "would delete" for it.
+oseries_run 1
+[ -d "$OS_DIR" ] && echo "ok: dry-run leaves the dirty checkout in place" || fail "dry-run removed the dirty checkout"
+case "$OUT" in
+  *"would delete"*) fail "dry-run offered to delete the dirty checkout (got: $OUT)" ;;
+  *"keeping"*) echo "ok: dry-run reports the keep instead of a delete" ;;
+  *) fail "dry-run neither kept nor deleted the dirty checkout (got: $OUT)" ;;
+esac
+# Clean tree but one commit no remote has: kept, reason named.
+oseries_fresh_repo
+echo more >> "$OS_DIR/file.txt"
+git -C "$OS_DIR" commit -qam second || fail "oseries fixture: second commit failed"
+oseries_run 0
+[ -d "$OS_DIR" ] && echo "ok: unpushed oseries checkout is kept" || fail "unpushed oseries checkout was deleted"
+case "$OUT" in
+  *"keeping"*"not pushed to any remote"*) echo "ok: unpushed keep names the reason" ;;
+  *) fail "unpushed keep did not name the reason (got: $OUT)" ;;
+esac
+# Clean and fully pushed: deleted exactly as before.
+oseries_fresh_repo
+oseries_run 0
+[ ! -e "$OS_DIR" ] && echo "ok: clean pushed oseries checkout is deleted as before" || fail "clean pushed oseries checkout was kept"
+case "$OUT" in
+  *"keeping"*) fail "clean pushed checkout printed a keep warning (got: $OUT)" ;;
+  *) echo "ok: clean pushed checkout printed no keep warning" ;;
+esac
+# Clean and fully pushed under --dry-run: reported, not deleted.
+oseries_fresh_repo
+oseries_run 1
+[ -d "$OS_DIR" ] && echo "ok: dry-run leaves the clean checkout in place" || fail "dry-run removed the clean checkout"
+case "$OUT" in
+  *"would delete:"*"oseries"*) echo "ok: dry-run still reports the clean checkout as would-delete" ;;
+  *) fail "dry-run did not report would-delete for the clean checkout (got: $OUT)" ;;
+esac
+# A plain directory (not a git work tree): deleted as before.
+rm -rf "$OS_DIR"
+mkdir -p "$OS_DIR"
+echo junk > "$OS_DIR/junk.txt"
+oseries_run 0
+[ ! -e "$OS_DIR" ] && echo "ok: non-repo oseries directory is deleted as before" || fail "non-repo oseries directory was kept"
+
+
 [ "$failures" -eq 0 ] || { echo "$failures failure(s)" >&2; exit 1; }
 echo "all clean.sh flag-shaped-value checks passed"

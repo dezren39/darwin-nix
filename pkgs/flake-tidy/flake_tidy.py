@@ -3735,6 +3735,29 @@ def run_nix_flake_lock_robust(
 # ---------------------------------------------------------------------------
 
 
+# Explicit source types must outrank the generic indirect type when lock
+# hashes match (#526, #539). Keep the comparison shared by root selection
+# and transitive filtering so the two decisions cannot drift apart.
+_DEDUP_TYPE_PREFERENCE = {
+    "github": 0,
+    "gitlab": 1,
+    "sourcehut": 2,
+    "git": 3,
+    "hg": 4,
+    "tarball": 5,
+    "file": 6,
+    "path": 7,
+    "indirect": 8,
+}
+
+
+def _dedup_type_preferred(candidate_type: str, current_type: str) -> bool:
+    """Whether candidate_type is a better hash-match root than current_type."""
+    return _DEDUP_TYPE_PREFERENCE.get(candidate_type, 99) < _DEDUP_TYPE_PREFERENCE.get(
+        current_type, 99
+    )
+
+
 def analyze_dedup(
     lock: dict,
     content: str,
@@ -3986,18 +4009,6 @@ def analyze_dedup(
     # an explicit git URL below indirect — git roots were never chosen and
     # git transitive inputs were wrongly proposed as follows to indirect.
     # hg must be listed for the same reason (#539).
-    _TYPE_PREF = {
-        "github": 0,
-        "gitlab": 1,
-        "sourcehut": 2,
-        "git": 3,
-        "hg": 4,
-        "tarball": 5,
-        "file": 6,
-        "path": 7,
-        "indirect": 8,
-    }
-
     grouped_nodes: set[str] = set()
     for _gk, gmembers in groups.items():
         if len(gmembers) >= 2:
@@ -4019,7 +4030,7 @@ def analyze_dedup(
             existing_type = (
                 nodes[root_by_hash[h][0]].get("original", {}).get("type", "")
             )
-            if _TYPE_PREF.get(cur_type, 99) < _TYPE_PREF.get(existing_type, 99):
+            if _dedup_type_preferred(cur_type, existing_type):
                 root_by_hash[h] = (nname, iname)
         else:
             root_by_hash[h] = (nname, iname)
@@ -4047,7 +4058,7 @@ def analyze_dedup(
         # Prefer explicit type at root; skip if transitive is MORE explicit
         trans_type = node_data.get("original", {}).get("type", "")
         canon_type = nodes[canon_node].get("original", {}).get("type", "")
-        if _TYPE_PREF.get(trans_type, 99) < _TYPE_PREF.get(canon_type, 99):
+        if _dedup_type_preferred(trans_type, canon_type):
             continue
 
         # Never pair a rev-pinned node with an unpinned one, even when

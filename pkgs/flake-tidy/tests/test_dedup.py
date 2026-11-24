@@ -10,6 +10,14 @@ import flake_tidy
 
 
 class TestAnalyzeDedup:
+    @pytest.mark.parametrize(
+        ("candidate", "current", "expected"),
+        [("git", "indirect", True), ("hg", "indirect", True), ("indirect", "git", False)],
+    )
+    def test_cross_type_preference(self, candidate, current, expected):
+        """#526/#539 explicit git and hg inputs outrank indirect inputs."""
+        assert flake_tidy._dedup_type_preferred(candidate, current) is expected
+
     def test_analyze_dedup_finds_root_duplicates(
         self, sample_lock, sample_flake_nix, default_config
     ):

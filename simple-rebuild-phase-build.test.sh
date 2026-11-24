@@ -36,7 +36,6 @@ run_phase() {
   local probe="$TMP_ROOT/probe.sh" markers="$TMP_ROOT/markers"
   : >"$markers"
   cat >"$probe" <<EOF
-#!/usr/bin/env bash
 source "$FUNC"
 hostname() { echo testhost; }
 print_error() { echo "\$*" >&2; }

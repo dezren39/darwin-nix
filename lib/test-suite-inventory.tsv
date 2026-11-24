@@ -29,6 +29,7 @@ opencode-db-vacuum.test.sh	harness	bash suite sources the shared test harness
 opencode-prune-report.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
 opencode-tmp-guard.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
 patch-vscode-insiders.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+pkgs/alt-tab-debug.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
 pkgs/adopt/adopt.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
 pkgs/brew-repair/brew-repair.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
 pkgs/buffer-backup/check-lock-sync.test.py	interpreter-named	suite is run through python

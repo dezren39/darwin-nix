@@ -1027,7 +1027,7 @@ for _d in "${VSCODE_EXT_DIRS[@]}"; do prune_vscode_extensions "$_d"; done
 # out that was never uninstalled because homebrew.onActivation.cleanup="none".
 # Reported, never auto-removed: deleting an app is not a cache operation.
 brew_cask_drift_check() {
-  local _b _brew_err _cask_list _orphans _dead _c _app
+  local _b _brew_err _cask_list _orphans _dead _c _app _brew_info_err _brew_info_out
   _b="$(real_brew)"
   [ -n "$_b" ] || return 0
   [ -f "$SELF_DIR/casks.nix" ] || return 0
@@ -1076,7 +1076,22 @@ brew_cask_drift_check() {
   # extracted empty and were silently skipped by the MISSING check (#1902).
   _apps_dir="${CLEAN_APPS_DIR:-/Applications}"
   for _c in $_cask_list; do
-    _app=$(as_user "$_b" info --cask "$_c" 2>/dev/null | grep -oE "$_apps_dir/.*\.app" | head -1 || true)
+    # Per-cask enumeration fails closed (#2066): a failing `brew info
+    # --cask` used to produce an empty app path through a 2>/dev/null
+    # pipeline (whose status is head's, not brew's), so the [ -n "$_app" ]
+    # guard skipped the cask and the run claimed "no dead casks" at exit
+    # 0. Name the cask and the step, surface brew's stderr, and record
+    # the failure in BREW_DRIFT_FAILURES like the list-level check (#1918).
+    _brew_info_err=$(mktemp)
+    if ! _brew_info_out=$(as_user "$_b" info --cask "$_c" 2>"$_brew_info_err"); then
+      warn "brew info --cask $_c failed -- dead-cask check cannot verify $_c; a broken brew query is not 'no dead casks'"
+      [ -s "$_brew_info_err" ] && sed 's/^/     /' "$_brew_info_err" >&2
+      rm -f "$_brew_info_err"
+      BREW_DRIFT_FAILURES=$((BREW_DRIFT_FAILURES + 1))
+      continue
+    fi
+    rm -f "$_brew_info_err"
+    _app=$(printf '%s\n' "$_brew_info_out" | grep -oE "$_apps_dir/.*\.app" | head -1 || true)
     [ -n "$_app" ] && [ ! -d "$_app" ] && _dead="$_dead $_c"
   done
   [ -n "$_dead" ] && { warn "casks installed but the app is MISSING from disk:"; printf '     %s\n' $_dead; }

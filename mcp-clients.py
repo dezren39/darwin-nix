@@ -575,6 +575,14 @@ def codex(path):
                         gml, rest = _ml_string_scan(lines[idx], gml)
                         depth += _value_bracket_depth(rest)
                         idx += 1
+                    if depth > 0:
+                        # #2028: the gather ran out of lines with the root
+                        # inline table still open. Fail closed like the
+                        # other malformed paths instead of dropping every
+                        # gathered line (and harvesting phantom server
+                        # names from the swallowed text) at exit 0.
+                        raise ValueError(
+                            "root mcp_servers inline table never closes; not changed")
                     for server in _inline_table_keys("\n".join(gathered)):
                         removed.add(server)
                     continue

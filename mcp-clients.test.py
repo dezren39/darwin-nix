@@ -64,6 +64,13 @@ Covers the two PR #904 fallout bugs:
   symlink, the pre-change backup is kept, and the target's mode is
   preserved.
 
+- #2028: a Codex config whose root mcp_servers = { ... } inline table is
+  unterminated at EOF is a #906 per-client failure -- named on stderr,
+  file byte-for-byte unchanged, no phantom removed: name harvested from
+  the swallowed lines, other clients still enforced, exit 1; previously
+  the gather loop consumed to EOF and silently deleted every line after
+  the opening brace (including unrelated [profiles.*] sections) at exit 0.
+
 Run: python3 mcp-clients.test.py  (exit 0 = all probes passed)
 """
 
@@ -643,6 +650,37 @@ check("956 root inline-table keeps model", 'model = "gpt-5"' in out, out)
 r2 = run(home)
 check("956 root inline-table second run no-op",
       r2.returncode == 0 and read(codex_path) == out and r2.stdout == "", f"stdout={r2.stdout!r}")
+shutil.rmtree(home)
+
+# #2028: an unterminated root mcp_servers inline table (the issue's exact
+# reproduction) -- the gather loop reaches EOF with depth still positive.
+# A #906 failure for Codex only: exit 1, Codex and its file named on
+# stderr, the bad file byte-for-byte unchanged, no phantom removed: name
+# from the swallowed [profiles.a] key, and the other clients still
+# enforced. Previously every line after the opening brace was silently
+# deleted and the run exited 0 reporting "removed: k".
+home = fresh_home()
+seed(home, ".copilot/mcp-config.json", '{"mcpServers": {"other": {"command": "x"}}}')
+seed(home, ".claude.json", '{"mcpServers": {"other": {"command": "x"}}}')
+codex_path = seed(home, ".codex/config.toml",
+                  'model = "o4-mini"\n'
+                  'mcp_servers = {\n'
+                  '[profiles.a]\n'
+                  'k = 1\n')
+seeded = read(codex_path)
+seed(home, ".config/zed/settings.json", '{\n  "theme": "Dark"\n}\n')
+r = run(home)
+check("2028 exit 1 on unterminated root inline table", r.returncode == 1,
+      f"exit={r.returncode} stderr={r.stderr}")
+check("2028 stderr names Codex and its file",
+      "Codex" in r.stderr and ".codex/config.toml" in r.stderr, r.stderr)
+check("2028 codex file unchanged", read(codex_path) == seeded, read(codex_path))
+check("2028 no phantom removed name in any report",
+      "removed: k" not in r.stdout and "removed: k" not in r.stderr,
+      f"stdout={r.stdout!r} stderr={r.stderr!r}")
+check("2028 Copilot still enforced", '"mcpx"' in read(os.path.join(home, ".copilot/mcp-config.json")))
+check("2028 Claude still enforced", '"mcpx"' in read(os.path.join(home, ".claude.json")))
+check("2028 Zed still enforced", '"context_servers"' in read(os.path.join(home, ".config/zed/settings.json")))
 shutil.rmtree(home)
 
 # #1005: the same root inline table with quoted server names -- the only

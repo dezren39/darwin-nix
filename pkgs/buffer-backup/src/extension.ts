@@ -308,6 +308,26 @@ function listBackups(dir: string): BackupEntry[] {
   return results.sort((a, b) => a.mtimeMs - b.mtimeMs);
 }
 
+/** Revalidate the containing day directory at the destructive boundary.
+ * listBackups is a snapshot: an attacker can replace a checked directory
+ * with a symlink before traversal, so never let that snapshot authorize an
+ * unlink without checking the path again. */
+function unlinkBackup(dir: string, entry: BackupEntry): boolean {
+  const day = path.dirname(entry.full);
+  const relativeDay = path.relative(dir, day);
+  if (!relativeDay || relativeDay.startsWith(`..${path.sep}`) || path.isAbsolute(relativeDay)) return false;
+  try {
+    const dayStat = fs.lstatSync(day);
+    if (!dayStat.isDirectory() || dayStat.isSymbolicLink()) return false;
+    const fileStat = fs.lstatSync(entry.full);
+    if (!fileStat.isFile() || fileStat.isSymbolicLink()) return false;
+    fs.unlinkSync(entry.full);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function rmEmpty(dir: string): void {
   try {
     if (
@@ -338,7 +358,7 @@ function cleanupAge(cfg: Config): void {
   for (const e of entries.slice(0, -1)) {
     if (e.mtimeMs < cutoff) {
       try {
-        fs.unlinkSync(e.full);
+        if (!unlinkBackup(cfg.backupDir, e)) continue;
       } catch {
         // skip
       }
@@ -387,8 +407,7 @@ function cleanupSize(cfg: Config): void {
       break;
     }
     try {
-      fs.unlinkSync(e.full);
-      total -= e.size;
+      if (unlinkBackup(cfg.backupDir, e)) total -= e.size;
     } catch {
       // skip: a failed unlink is not a deletion (#1014) — do not
       // deduct its size, or the budget believes a file that still
@@ -433,8 +452,7 @@ function cleanupCount(cfg: Config): void {
       break;
     }
     try {
-      fs.unlinkSync(e.full);
-      remaining--;
+      if (unlinkBackup(cfg.backupDir, e)) remaining--;
     } catch {
       // skip: a failed unlink is not a deletion (#1014) — do not
       // decrement the count for a file that still exists on disk.

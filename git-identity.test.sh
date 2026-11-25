@@ -51,11 +51,24 @@ else
   ok "the #2096 TODO is resolved in gitSettings.nix"
 fi
 if grep -Fq 'condition = "gitdir:~/workspace/github-work/";' "$SELF_DIR/gitIncludes.nix" \
-  && grep -Fq 'condition = "hasconfig:remote.*.url:*vertexinc*";' "$SELF_DIR/gitIncludes.nix" \
   && grep -Fq "user.email = \"$WORK_EMAIL\";" "$SELF_DIR/gitIncludes.nix"; then
-  ok "gitIncludes.nix scopes the work identity behind gitdir + hasconfig conditions"
+  ok "gitIncludes.nix scopes the work identity behind the gitdir condition"
 else
   fail "gitIncludes.nix does not declare the expected conditional work identity"
+fi
+# A hasconfig remote-URL condition can never fire from the global config
+# file (git reads it before the repository's own config) — proven by run
+# 45681917622, where exactly that case failed. Pin its absence so the dead
+# condition is not re-added.
+if grep -q 'hasconfig' "$SELF_DIR/gitIncludes.nix"; then
+  # The word appears in the explanatory comment; a condition must not.
+  if grep -Fq 'condition = "hasconfig:' "$SELF_DIR/gitIncludes.nix"; then
+    fail "gitIncludes.nix re-added a hasconfig condition, which cannot fire from a global config"
+  else
+    ok "gitIncludes.nix carries no hasconfig condition (documented dead end only)"
+  fi
+else
+  ok "gitIncludes.nix carries no hasconfig condition"
 fi
 if grep -Fq 'includes = import ./gitIncludes.nix;' "$SELF_DIR/homePrograms.nix"; then
   ok "homePrograms.nix wires gitIncludes.nix as programs.git.includes"
@@ -91,10 +104,10 @@ else
 fi
 include_targets="$(git config --file "$HM_GITCONFIG" --get-regexp 'includeif\..*\.path' | awk '{print $2}' | sort -u)"
 include_count="$(git config --file "$HM_GITCONFIG" --get-regexp 'includeif\..*\.path' | wc -l | tr -d ' ')"
-if [ "$include_count" -eq 2 ]; then
-  ok "home-manager gitconfig carries both includeIf blocks"
+if [ "$include_count" -eq 1 ]; then
+  ok "home-manager gitconfig carries the includeIf block"
 else
-  fail "home-manager gitconfig has $include_count includeIf blocks, want 2"
+  fail "home-manager gitconfig has $include_count includeIf blocks, want 1"
 fi
 for target in $include_targets; do
   if [ -f "$target" ] && [ "$(git config --file "$target" --get user.email || true)" = "$WORK_EMAIL" ]; then
@@ -136,7 +149,7 @@ mkdir -p "$HOME/workspace/github-work/proj/deep/deeper"
 expect_email "$HOME/workspace/github-work/proj/deep/deeper" "$WORK_EMAIL" "subdirectory of a work-tree repository"
 git init -q -b main "$HOME/git/work-remote"
 git -C "$HOME/git/work-remote" remote add origin "git@github.com:vertexinc/cai-claude-apim-proxy.git"
-expect_email "$HOME/git/work-remote" "$WORK_EMAIL" "repository with a work remote"
+expect_email "$HOME/git/work-remote" "$PERSONAL_EMAIL" "work remote outside the work tree (location is the scope)"
 work_name="$(cd "$HOME/workspace/github-work/proj" && git config --get user.name || true)"
 if [ "$work_name" = "Drewry Pope" ]; then
   ok "work checkouts keep the same user name"

@@ -4,10 +4,18 @@
 # homePrograms.nix as `programs.git.includes`.
 #
 # The default identity in gitSettings.nix is the personal one. The work
-# identity below is applied ONLY where a condition matches — a checkout
-# under ~/workspace/github-work (the work tree root already listed in
-# gitSettings.nix's safe.directory), or any checkout whose remote URL
-# names the work org — and nowhere else (dezren39/darwin-nix#2096).
+# identity below is applied ONLY inside work checkouts — a gitdir under
+# ~/workspace/github-work (the work tree root already listed in
+# gitSettings.nix's safe.directory) — and nowhere else
+# (dezren39/darwin-nix#2096).
+#
+# A remote-URL condition (includeIf hasconfig:remote.*.url:*vertexinc*)
+# cannot do this job from the global config file: git evaluates includeIf
+# conditions while reading that file, before the repository's own config
+# (where remote.origin.url lives) is read, so the condition never matches.
+# Proven by the git-identity flake check on git 2.51.1 (fleet-command run
+# 45681917622): 17 of 18 checks passed and exactly the hasconfig case
+# failed. Location is the scope; do not re-add a hasconfig entry here.
 #
 # This has to live behind home-manager's `includes` option, not inside
 # gitSettings.nix: home-manager appends these includeIf blocks AFTER the
@@ -20,18 +28,9 @@
 # check renders that file and fails if its default identity is this
 # address, and `just git-config-check` fails on a deployed config whose
 # default is a work address.
-let
-  workIdentity = {
-    user.email = "drewry.pope@vertexinc.com";
-  };
-in
 [
   {
     condition = "gitdir:~/workspace/github-work/";
-    contents = workIdentity;
-  }
-  {
-    condition = "hasconfig:remote.*.url:*vertexinc*";
-    contents = workIdentity;
+    contents.user.email = "drewry.pope@vertexinc.com";
   }
 ]

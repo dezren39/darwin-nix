@@ -24,7 +24,7 @@
     # personal account unless a conditional include says otherwise. The work
     # identity is NOT the default (dezren39/darwin-nix#2096): it lives in
     # gitIncludes.nix and home-manager applies it only inside work checkouts
-    # (a gitdir under ~/workspace/github-work, or a vertexinc remote). Do not
+    # (a gitdir under ~/workspace/github-work). Do not
     # put a work address back here — the git-identity flake check fails if
     # the default rendered from this file is one, and so does
     # `just git-config-check` on a deployed config.

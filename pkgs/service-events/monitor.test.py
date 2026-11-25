@@ -324,5 +324,54 @@ def _pid_reuse_probes():
 _rotate_probes()
 _pid_reuse_probes()
 
+
+def _concurrent_append_probes():
+    # #2015: concurrent append_event writers crossing rotations must
+    # not drop an accepted event. Small LOG_BYTES forces constant
+    # rotation while 8 threads append unique seq numbers; afterwards
+    # every seq must be present in the active log or a retained
+    # rotated file, and every append must have reported success.
+    import json as _json
+    import threading as _threading
+
+    with tempfile.TemporaryDirectory() as d:
+        saved = (_event.LOG_DIR, _event.LOG, _event.LOG_BYTES, _event.LOG_KEEP)
+        _event.LOG_DIR = d
+        _event.LOG = os.path.join(d, "events.jsonl")
+        _event.LOG_BYTES = 400
+        _event.LOG_KEEP = 1000
+        try:
+            n_threads, per_thread = 8, 25
+            results = []
+
+            def worker(tid):
+                for seq in range(per_thread):
+                    results.append(_event.append_event("probe", "probe.event", seq=tid * 1000 + seq))
+
+            threads = [_threading.Thread(target=worker, args=(t,)) for t in range(n_threads)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            check("2015 concurrent appends: all accepted", len(results) == n_threads * per_thread and all(results), f"{len(results)} results")
+            seen = set()
+            for name in os.listdir(d):
+                if name.startswith("events.jsonl."):
+                    suffix = name[len("events.jsonl."):]
+                    if not suffix.isdigit():
+                        continue
+                elif name != "events.jsonl":
+                    continue
+                with open(os.path.join(d, name)) as fh:
+                    for line in fh:
+                        seen.add(_json.loads(line)["seq"])
+            expected = {t * 1000 + s for t in range(n_threads) for s in range(per_thread)}
+            check("2015 concurrent appends: no event dropped", seen == expected, f"missing {sorted(expected - seen)[:5]} extra {sorted(seen - expected)[:5]}")
+        finally:
+            _event.LOG_DIR, _event.LOG, _event.LOG_BYTES, _event.LOG_KEEP = saved
+
+
+_concurrent_append_probes()
+
 print(f"\n{'ALL PASS' if not FAILURES else 'FAILURES: ' + ', '.join(FAILURES)}")
 sys.exit(1 if FAILURES else 0)

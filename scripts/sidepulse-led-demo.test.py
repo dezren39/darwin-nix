@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Focused tests for scripts/sidepulse-led-demo.py launchctl handling (#2026).
+"""Focused tests for scripts/sidepulse-led-demo.py launchctl and signal handling (#2081).
 
 The demo script imports sidepulse.compose, which lives in the external
 sidepulse source, so this harness stubs that module before loading the
@@ -162,13 +162,13 @@ def test_double_restore_runs_one_bootstrap():
              mock.patch.object(demo, "device_path", return_value=Path("/unused")), \
              mock.patch.object(demo, "write_program"), \
              mock.patch.object(demo, "run_palette", side_effect=KeyboardInterrupt), \
-             mock.patch.object(demo.signal, "signal", side_effect=lambda sig, h: handlers.__setitem__("sigint", h)):
+             mock.patch.object(demo.signal, "signal", side_effect=lambda sig, h: handlers.__setitem__(sig, h)):
             try:
                 demo.main()
             except KeyboardInterrupt:
                 pass
             try:
-                handlers["sigint"](None, None)
+                handlers[demo.signal.SIGINT](demo.signal.SIGINT, None)
                 exited = None
             except SystemExit as exc:
                 exited = exc
@@ -181,12 +181,66 @@ def test_double_restore_runs_one_bootstrap():
     check("double restore: no false restart failure", "restart FAILED" not in err.getvalue(), err.getvalue())
 
 
+def test_sigterm_and_sighup_restore_once_and_exit_conventionally():
+    for signum in (demo.signal.SIGTERM, demo.signal.SIGHUP):
+        fake = FakeRun(0)
+        handlers = {}
+        argv, sys.argv = sys.argv, ["sidepulse-led-demo.py", "--device", "/unused", "--palette"]
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with mocked_run(fake), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                 mock.patch.object(demo, "device_path", return_value=Path("/unused")), \
+                 mock.patch.object(demo, "write_program"), \
+                 mock.patch.object(
+                     demo,
+                     "run_palette",
+                     side_effect=lambda *_args, **_kwargs: handlers[signum](signum, None),
+                 ), \
+                 mock.patch.object(
+                     demo.signal,
+                     "signal",
+                     side_effect=lambda got, handler: handlers.__setitem__(got, handler),
+                 ):
+                try:
+                    demo.main()
+                    exited = None
+                except SystemExit as exc:
+                    exited = exc
+        finally:
+            sys.argv = argv
+        bootstraps = [command for command in fake.commands if "bootstrap" in command]
+        label = demo.signal.Signals(signum).name
+        check(f"{label}: exits with 128 + signal", exited is not None and exited.code == 128 + signum,
+              str(getattr(exited, "code", None)))
+        check(f"{label}: exactly one bootstrap", len(bootstraps) == 1, str(fake.commands))
+        check(f"{label}: no false restart failure", "restart FAILED" not in err.getvalue(), err.getvalue())
+
+
+def test_normal_palette_completion_restores_once():
+    fake = FakeRun(0)
+    argv, sys.argv = sys.argv, ["sidepulse-led-demo.py", "--device", "/unused", "--palette"]
+    try:
+        with mocked_run(fake), contextlib.redirect_stdout(io.StringIO()), \
+             mock.patch.object(demo, "device_path", return_value=Path("/unused")), \
+             mock.patch.object(demo, "write_program"), \
+             mock.patch.object(demo, "run_palette"), \
+             mock.patch.object(demo.signal, "signal"):
+            result = demo.main()
+    finally:
+        sys.argv = argv
+    bootstraps = [command for command in fake.commands if "bootstrap" in command]
+    check("normal completion: returns success", result == 0, str(result))
+    check("normal completion: exactly one bootstrap", len(bootstraps) == 1, str(fake.commands))
+
+
 test_stop_failure_is_surfaced()
 test_successful_stop_and_start()
 test_restart_failure_is_reported_accurately()
 test_restart_success()
 test_main_does_not_start_demo_when_stop_fails()
 test_double_restore_runs_one_bootstrap()
+test_sigterm_and_sighup_restore_once_and_exit_conventionally()
+test_normal_palette_completion_restores_once()
 
 if FAILURES:
     print(f"\n{len(FAILURES)} check(s) failed")

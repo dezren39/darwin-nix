@@ -1056,6 +1056,72 @@ fi
 echo "ok: flake GC-root sweep preserves both paths on failed freshness scan; stale released and active preserved on success"
 rm -rf "$GC_DIR"
 
+# ─── #2167: failed eval-cache freshness probe keeps the cache ──────
+# Drive the extracted Tier-3 sweep with a find stub that fails only
+# for the eval-cache-broken entry: that entry must be kept (its only
+# file is old, so the pre-fix predicate read the failed probe's empty
+# output as "stale" and deleted it), the failure must warn naming the
+# probe, surface find's stderr, and be counted in EVAL_CACHE_FAILURES.
+# Controls through the real find in the same run: a stale entry is
+# still deleted, a fresh entry is still kept.
+EC_DIR="$TMP_ROOT/eval-cache"
+mkdir -p "$EC_DIR/home/.cache/nix/eval-cache-broken" "$EC_DIR/home/.cache/nix/eval-cache-stale" "$EC_DIR/home/.cache/nix/eval-cache-fresh" "$EC_DIR/bin"
+printf 'old\n' > "$EC_DIR/home/.cache/nix/eval-cache-broken/blob"
+printf 'old\n' > "$EC_DIR/home/.cache/nix/eval-cache-stale/blob"
+printf 'new\n' > "$EC_DIR/home/.cache/nix/eval-cache-fresh/blob"
+touch -t 200001010000 "$EC_DIR/home/.cache/nix/eval-cache-broken/blob" "$EC_DIR/home/.cache/nix/eval-cache-stale/blob"
+sed -n '/^sweep_eval_caches() {/,/^}/p' "$SCRIPT" > "$EC_DIR/sweep.sh"
+[ -s "$EC_DIR/sweep.sh" ] || fail "could not extract sweep_eval_caches"
+REAL_FIND="$(command -v find)"
+export REAL_FIND
+cat > "$EC_DIR/bin/find" <<'STUB'
+#!/bin/sh
+case " $* " in
+  *"eval-cache-broken"*) echo "find: eval-cache-broken: Permission denied" >&2; exit 1 ;;
+  *) exec "$REAL_FIND" "$@" ;;
+esac
+STUB
+chmod +x "$EC_DIR/bin/find"
+CACHE_STALE_DAYS=3
+EVAL_CACHE_FAILURES=0
+del() { for _a in "$@"; do printf '%s\n' "$_a" >> "$EC_DIR/deleted"; done; }
+warn() { printf '%s\n' "$*" >&2; }
+# shellcheck disable=SC1091
+. "$EC_DIR/sweep.sh"
+EC_OLD_PATH="$PATH"
+PATH="$EC_DIR/bin:$PATH"
+export PATH
+# Section-local TMPDIR (the #1918 precedent below): an earlier section
+# exports a TMPDIR it later removes, and the sweep's mktemp would fail
+# against the removed dir -- every probe would then read as failed,
+# which is the defect under test wearing a disguise. Point TMPDIR at
+# this section's live dir for the call and restore it after.
+EC_TMPDIR_SAVE="${TMPDIR:-}"
+TMPDIR="$EC_DIR"
+export TMPDIR
+EC_RC=0
+sweep_eval_caches "$EC_DIR/home" 2> "$EC_DIR/failure.err" || EC_RC=$?
+if [ -n "$EC_TMPDIR_SAVE" ]; then TMPDIR="$EC_TMPDIR_SAVE"; else unset TMPDIR; fi
+export TMPDIR
+PATH="$EC_OLD_PATH"
+export PATH
+[ "$EC_RC" -eq 0 ] || fail "eval-cache sweep returned $EC_RC on a failed probe"
+[ "$EVAL_CACHE_FAILURES" -eq 1 ] || fail "failed eval-cache probe not counted (EVAL_CACHE_FAILURES=$EVAL_CACHE_FAILURES)"
+grep -q 'eval-cache freshness probe failed' "$EC_DIR/failure.err" \
+  || fail "failed eval-cache probe did not warn"
+grep -q 'Permission denied' "$EC_DIR/failure.err" \
+  || fail "failed eval-cache probe did not surface find's stderr"
+if grep -Fxq "$EC_DIR/home/.cache/nix/eval-cache-broken" "$EC_DIR/deleted"; then
+  fail "failed freshness probe offered eval-cache-broken to del"
+fi
+grep -Fxq "$EC_DIR/home/.cache/nix/eval-cache-stale" "$EC_DIR/deleted" \
+  || fail "successful probe did not offer stale eval-cache to del"
+if grep -Fxq "$EC_DIR/home/.cache/nix/eval-cache-fresh" "$EC_DIR/deleted"; then
+  fail "successful probe offered fresh eval-cache to del"
+fi
+echo "ok: Tier-3 eval-cache sweep keeps the cache and counts the failure on a failed freshness probe; stale deleted and fresh kept on success"
+rm -rf "$EC_DIR"
+
 # ─── Bash 3.2 compatibility: no associative-array cache (#1829) ─────
 # clean.sh's supported entrypoints (./clean.sh via its env-bash shebang,
 # just clean) can resolve to the Bash 3.2 macOS ships at /bin/bash, and

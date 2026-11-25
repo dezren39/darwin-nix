@@ -23,6 +23,7 @@ from pathlib import Path
 
 INSTALLER_URL = "https://teamwork-graph.atlassian.com/cli/install"
 CODEDB_REPO = "justrach/codedb"
+GH_TIMEOUT_S = 30
 PINS = {
     "twg-cli": Path("pkgs/twg-cli/hashes.json"),
     "codedb": Path("pkgs/codedb/hashes.json"),
@@ -63,13 +64,22 @@ def twg_upstream() -> str:
     return match.group(1)
 
 
-def codedb_upstream() -> str:
-    proc = subprocess.run(
-        ["gh", "release", "view", "--repo", CODEDB_REPO, "--json", "tagName",
-         "--jq", ".tagName"],
-        capture_output=True,
-        text=True,
-    )
+def codedb_upstream(timeout=GH_TIMEOUT_S) -> str:
+    try:
+        proc = subprocess.run(
+            ["gh", "release", "view", "--repo", CODEDB_REPO, "--json", "tagName",
+             "--jq", ".tagName"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        raise InvocationError(
+            f"cannot read latest codedb release: gh release view --repo "
+            f"{CODEDB_REPO} timed out after {timeout}s"
+        )
+    except OSError as exc:
+        raise InvocationError(f"cannot read latest codedb release: {exc}")
     tag = proc.stdout.strip()
     if proc.returncode != 0 or not tag:
         raise InvocationError(f"cannot read latest codedb release: {proc.stderr.strip()}")

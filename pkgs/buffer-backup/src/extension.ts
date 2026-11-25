@@ -317,10 +317,13 @@ function unlinkBackup(dir: string, entry: BackupEntry): boolean {
   const relativeDay = path.relative(dir, day);
   if (!relativeDay || relativeDay.startsWith(`..${path.sep}`) || path.isAbsolute(relativeDay)) return false;
   try {
-    const dayStat = fs.lstatSync(day);
-    if (!dayStat.isDirectory() || dayStat.isSymbolicLink()) return false;
     const fileStat = fs.lstatSync(entry.full);
     if (!fileStat.isFile() || fileStat.isSymbolicLink()) return false;
+    // Keep this directory revalidation adjacent to unlink: a path-based
+    // file lstat can itself cross a day-directory symlink swapped in after
+    // listBackups built its snapshot.
+    const dayStat = fs.lstatSync(day);
+    if (!dayStat.isDirectory() || dayStat.isSymbolicLink()) return false;
     fs.unlinkSync(entry.full);
     return true;
   } catch {

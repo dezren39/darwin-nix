@@ -378,7 +378,7 @@ function fixtureSymlinkedDay() {
   console.log("pass: cleanupCount never follows a symlinked day-directory (#1524)");
 }
 
-// 17. TOCTOU regression (#2088): replace a checked real day directory
+// TOCTOU regression (#2088): replace a checked real day directory
 //     with a symlink exactly when listBackups starts traversing it. Even
 //     though the snapshot sees outside files, cleanup must revalidate the
 //     day directory at unlink time and leave every target untouched.
@@ -418,6 +418,50 @@ function fixtureSymlinkedDay() {
   assert.ok(fs.lstatSync(day).isSymbolicLink(), "the race symlink remains in place");
   fs.rmSync(root, { recursive: true, force: true });
   console.log("pass: cleanup revalidates day directory after lstat/readdir symlink swap (#2088)");
+}
+
+// TOCTOU regression (#2088): a day directory can also be swapped after
+// the candidate file lstat. The final directory revalidation must fail
+// closed before the path-based unlink.
+{
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "buffer-backup-unlink-race-"));
+  const dir = path.join(root, "backups");
+  const day = path.join(dir, "2020-01-01");
+  const movedDay = path.join(dir, "2020-01-01-original");
+  const outside = path.join(root, "outside");
+  fs.mkdirSync(day, { recursive: true });
+  fs.mkdirSync(outside);
+  const file = path.join(day, "old.txt");
+  fs.writeFileSync(file, "backup");
+  const target = path.join(outside, "victim.txt");
+  fs.writeFileSync(target, "outside victim");
+  const entry = listBackups(dir)[0];
+  assert.ok(entry && entry.full === file, "fixture backup must be listed before the swap");
+
+  const originalLstatSync = testFs.lstatSync;
+  let swapped = false;
+  testFs.lstatSync = function (candidate, ...args) {
+    const stat = originalLstatSync.call(this, candidate, ...args);
+    if (!swapped && path.resolve(String(candidate)) === path.resolve(entry.full)) {
+      swapped = true;
+      fs.renameSync(day, movedDay);
+      fs.symlinkSync(outside, day, "dir");
+    }
+    return stat;
+  };
+  let removed;
+  try {
+    removed = unlinkBackup(dir, entry);
+  } finally {
+    testFs.lstatSync = originalLstatSync;
+  }
+
+  assert.ok(swapped, "fixture must swap after the candidate file is inspected");
+  assert.strictEqual(removed, false, "cleanup must fail closed after the day directory changes");
+  assert.ok(fs.existsSync(target), "cleanup deleted a symlink target after the final file lstat");
+  assert.ok(fs.lstatSync(day).isSymbolicLink(), "the race symlink remains in place");
+  fs.rmSync(root, { recursive: true, force: true });
+  console.log("pass: cleanup revalidates the day directory after the candidate file lstat (#2088)");
 }
 
 // 17. Symlinked file inside a real day directory (#1524): the link is

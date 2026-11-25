@@ -76,11 +76,13 @@ make_fixture() { # $1 = fixture dir
   cat >> "$fx/bin/nix" <<'EOF'
 # Stub for `nix build`: prove with the real nix that the flake can
 # see and read BOTH new inputs at build time (an unregistered file
-# makes the eval fail), then fake the build result.
+# makes the eval fail), then fake the build result. Each eval uses a
+# private store so this fixture also works inside a Nix build sandbox.
 set -euo pipefail
-got="$(NIX_REMOTE=daemon "$SR_TEST_REAL_NIX" eval --json --extra-experimental-features 'nix-command flakes' .#inp)"
+store_uri="local?root=$SR_TEST_NIX_ROOT"
+got="$("$SR_TEST_REAL_NIX" --store "$store_uri" eval --json --extra-experimental-features 'nix-command flakes' .#inp)"
 [ "$got" = '"brand new input\n"' ] || { echo "stub nix: flake did not see new-input.txt (got: $got)" >&2; exit 1; }
-got2="$(NIX_REMOTE=daemon "$SR_TEST_REAL_NIX" eval --json --extra-experimental-features 'nix-command flakes' .#inp2)"
+got2="$("$SR_TEST_REAL_NIX" --store "$store_uri" eval --json --extra-experimental-features 'nix-command flakes' .#inp2)"
 [ "$got2" = '"pkg input\n"' ] || { echo "stub nix: flake did not see vendor/newpkg/default.nix (got: $got2)" >&2; exit 1; }
 printf '#!/bin/sh\nexit 0\n' > "$SR_TEST_FAKE_SYSTEM/sw/bin/darwin-rebuild"
 chmod +x "$SR_TEST_FAKE_SYSTEM/sw/bin/darwin-rebuild"
@@ -144,6 +146,7 @@ run_scenario() { # $1 = name, $2 = fixture dir, $3... = script args
   before="$(git -C "$fx" rev-list --count HEAD)"
   ( cd "$fx" && HOME="$fx/home" PATH="$fx/bin:$PATH" USER="${USER:-$(id -un)}" \
       SR_TEST_REAL_NIX="$REAL_NIX" SR_TEST_FAKE_SYSTEM="$fx/fake-system" \
+      SR_TEST_NIX_ROOT="$work/nix-store-$name" \
       SR_TEST_MARKER="$fx/stub-marker" \
       zsh "$fx/simple-rebuild.sh" "$@" > "$fx/run.log" 2>&1 )
   local rc=$?

@@ -1123,7 +1123,7 @@ mas_app_drift_check() {
   _masorph=$(comm -23 \
     <(printf '%s\n' "$_mas_list" | awk '{$1=""; sub(/ *\([^)]*\)$/,""); sub(/^ /,""); print}' | sort) \
     <(grep -oE '"[^"]+" = [0-9]+' "$SELF_DIR/masApps.nix" | sed -E 's/" = .*//; s/^"//' | sort) 2>/dev/null)
-  [ -n "$_masorph" ] && { warn "App Store apps not in masApps.nix:"; printf '     %s\n' $_masorph; }
+  [ -n "$_masorph" ] && { warn "App Store apps not in masApps.nix:"; printf '%s\n' "$_masorph" | sed 's/^/     /'; }
   return 0
 }
 mas_app_drift_check

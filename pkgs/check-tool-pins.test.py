@@ -19,6 +19,12 @@ spec = importlib.util.spec_from_file_location("check_tool_pins", HERE / "check-t
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 
+# Captured before any probe stubs the module attributes: run() replaces
+# mod.codedb_upstream with a zero-argument lambda, so a later probe that
+# reads the attribute back would get the stub, not the real function.
+REAL_TWG_UPSTREAM = mod.twg_upstream
+REAL_CODEDB_UPSTREAM = mod.codedb_upstream
+
 FAILURES = []
 
 
@@ -89,7 +95,7 @@ def fake_gh(script):
 
 
 def timeout_probes():
-    real_upstream = mod.codedb_upstream
+    real_upstream = REAL_CODEDB_UPSTREAM
     old_path = os.environ["PATH"]
     try:
         # A gh that sleeps 10s must be cut off by the lookup's own bound:
@@ -131,7 +137,8 @@ def timeout_probes():
         )
     finally:
         os.environ["PATH"] = old_path
-        mod.codedb_upstream = real_upstream
+        mod.twg_upstream = REAL_TWG_UPSTREAM
+        mod.codedb_upstream = REAL_CODEDB_UPSTREAM
 
 
 if __name__ == "__main__":

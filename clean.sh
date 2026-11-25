@@ -51,6 +51,7 @@ VAR_FOLDERS_ROOT="${VAR_FOLDERS_ROOT:-/private/var/folders}" # var-folders root 
 TIDY_MOVE_FAILURES=0   # incremented by tidy_file_to_bucket/tidy_dir_to_bucket when an archive move fails (#1337)
 BREW_DRIFT_FAILURES=0  # incremented by brew_cask_drift_check when `brew list --cask` fails (#1918)
 MAS_DRIFT_FAILURES=0   # incremented by mas_app_drift_check when `mas list` fails (#2018)
+EVAL_CACHE_FAILURES=0  # incremented by sweep_eval_caches when the Tier-3 freshness `find` fails (#2167)
 EXPIRE_REFLOG="${EXPIRE_REFLOG:-0}" # opt-in: force reflog expiry during maintenance
 DOCKER_AGE_DAYS="${DOCKER_AGE_DAYS:-}"  # set = age-scoped docker prune, VM preserved
 PRUNE_UNKNOWN_SCRATCH="${PRUNE_UNKNOWN_SCRATCH:-0}" # opt-in: delete, not just flag, the name-blind catch-all
@@ -1170,12 +1171,35 @@ done
 # nix-collect-garbage manages /nix/store only; it never touches ~/.cache/nix,
 # so this grows without bound.
 echo "🧽 Tier 3 caches (older than ${CACHE_STALE_DAYS}d)"
-for _c in "$CALLER_USER_HOME"/.cache/nix/eval-cache-*; do
-  [ -d "$_c" ] || continue
-  if [ -z "$(find "$_c" -type f -mtime "-${CACHE_STALE_DAYS}" -print -quit 2>/dev/null)" ]; then
-    del "$_c"
-  fi
-done
+sweep_eval_caches() {
+  local home_dir="${1:-$CALLER_USER_HOME}"
+  local _c _fresh _fresh_status _find_err
+  for _c in "$home_dir"/.cache/nix/eval-cache-*; do
+    [ -d "$_c" ] || continue
+    # Check the find status separately from its output (#2167): a failed
+    # probe (permission denied, I/O error, missing helper) also yields
+    # empty output, and treating that as staleness would delete a cache
+    # on no evidence -- the fail-open shape fixed for the brew checks in
+    # #1918/#2066. Fail closed instead: name the entry and the step,
+    # surface find's stderr, record the failure in EVAL_CACHE_FAILURES
+    # so the run exits non-zero at the end, and keep the entry. A
+    # genuinely stale cache (find succeeds, no recent files) is still
+    # deleted; a fresh one is still kept.
+    _find_err=$(mktemp)
+    _fresh="$(find "$_c" -type f -mtime "-${CACHE_STALE_DAYS}" -print -quit 2>"$_find_err")"
+    _fresh_status=$?
+    if [ "$_fresh_status" -ne 0 ]; then
+      warn "eval-cache freshness probe failed for $_c -- staleness unverifiable; keeping the cache"
+      [ -s "$_find_err" ] && sed 's/^/     /' "$_find_err" >&2
+      rm -f "$_find_err"
+      EVAL_CACHE_FAILURES=$((EVAL_CACHE_FAILURES + 1))
+      continue
+    fi
+    rm -f "$_find_err"
+    [ -z "$_fresh" ] && del "$_c"
+  done
+}
+sweep_eval_caches
 
 # tarball-cache is a BARE GIT REPO of fetched flake inputs. `gc --prune` alone
 # reclaims almost nothing, because nix writes a ref per input and refs keep
@@ -2469,6 +2493,14 @@ fi
 # A failed App Store enumeration fails the run (#2018), same convention.
 if [ "$MAS_DRIFT_FAILURES" -gt 0 ]; then
   warn "App Store drift check: $MAS_DRIFT_FAILURES enumeration failure(s) -- clean.sh exiting non-zero"
+  exit 1
+fi
+
+# A failed eval-cache freshness probe fails the run (#2167), same
+# convention: the sweep kept the unverifiable cache and recorded the
+# failure in EVAL_CACHE_FAILURES at the probe site above.
+if [ "$EVAL_CACHE_FAILURES" -gt 0 ]; then
+  warn "Tier 3 eval-cache sweep: $EVAL_CACHE_FAILURES freshness probe failure(s) -- clean.sh exiting non-zero"
   exit 1
 fi
 outcome_finish

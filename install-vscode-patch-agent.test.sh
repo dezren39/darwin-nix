@@ -20,6 +20,15 @@
 #   --help:       exit 0, usage printed, no plist written (#1177)
 #   unknown arg:  exit 2 naming it, usage in output, no plist written,
 #                 no success banner (#1177)
+#   failed prep:  existing plist + injected mkdir failure -> the old
+#                 agent is never unloaded, its plist is untouched, no
+#                 success banner (#2151)
+#   failed load:  existing plist + load fails for the new plist only
+#                 -> the previous plist is restored and reloaded, both
+#                 failures are reported, no success banner (#2151)
+#   failed swap:  existing plist + injected mv failure -> the previous
+#                 plist stays in place and the old agent is reloaded
+#                 (#2151)
 #
 # Run: bash install-vscode-patch-agent.test.sh (exit 0 = all passed)
 set -u
@@ -132,6 +141,99 @@ grep -q -- "--bogus" "$work/err6"; check "1177 unknown argument named on stderr"
 grep -q "Usage: bash ~/nix/install-vscode-patch-agent.sh" "$work/err6"; check "1177 unknown argument prints usage on stderr" $?
 [ ! -e "$home6/$PLIST_REL" ]; check "1177 unknown argument writes no plist" $?
 grep -q "Installed and loaded" "$work/out6"; [ $? -ne 0 ]; check "1177 unknown argument prints no success banner" $?
+
+# --- #2151: a failed update must preserve the loaded agent -----------
+#
+# Recording launchctl stub: appends "verb path" to $STUB_CALLS_LOG.
+# A load fails (42) when the plist it is asked to load contains
+# $STUB_LOAD_FAIL_MARKER (when set); any other load exits
+# ${STUB_LOAD_RC:-0}. Unload always succeeds.
+make_recording_stub() { # $1 = stub bin dir
+  mkdir -p "$1"
+  cat > "$1/launchctl" <<'STUB'
+#!/bin/sh
+if [ -n "${STUB_CALLS_LOG:-}" ]; then
+  echo "$1 $2" >> "$STUB_CALLS_LOG"
+fi
+if [ "$1" = "load" ]; then
+  if [ -n "${STUB_LOAD_FAIL_MARKER:-}" ] && grep -q "$STUB_LOAD_FAIL_MARKER" "$2" 2>/dev/null; then
+    exit 42
+  fi
+  exit "${STUB_LOAD_RC:-0}"
+fi
+exit 0
+STUB
+  chmod +x "$1/launchctl"
+}
+
+# An "old" plist whose content is distinguishable from anything the
+# installer writes (in particular it lacks the new plist's WatchPaths
+# entries, which the load-failure scenario keys on).
+write_old_plist() { # $1 = home dir
+  mkdir -p "$1/Library/LaunchAgents"
+  printf 'PREVIOUS-GOOD-PLIST for %s\n' "$1" > "$1/$PLIST_REL"
+}
+
+# failed prep: existing plist, mkdir stubbed to fail. The installer
+# must exit non-zero before any unload: the old agent keeps running,
+# its plist is untouched, and no success banner is printed.
+stub7="$work/bin7"
+make_recording_stub "$stub7"
+printf '#!/bin/sh\nexit 1\n' > "$stub7/mkdir"
+chmod +x "$stub7/mkdir"
+home7="$work/home7"
+make_home "$home7"
+write_old_plist "$home7"
+cp "$home7/$PLIST_REL" "$work/old7.plist"
+HOME="$home7" PATH="$stub7:$PATH" STUB_CALLS_LOG="$work/calls7" bash "$INSTALLER" > "$work/out7" 2>&1
+rc=$?
+[ "$rc" -ne 0 ]; check "2151 failed prep exits non-zero" $?
+grep -q "ERROR" "$work/out7"; check "2151 failed prep reports an error" $?
+grep -q "Installed and loaded" "$work/out7"; [ $? -ne 0 ]; check "2151 failed prep prints no success banner" $?
+grep -q "^unload " "$work/calls7" 2>/dev/null; [ $? -ne 0 ]; check "2151 failed prep never unloads the old agent" $?
+grep -q "^load " "$work/calls7" 2>/dev/null; [ $? -ne 0 ]; check "2151 failed prep never loads" $?
+cmp -s "$home7/$PLIST_REL" "$work/old7.plist"; check "2151 failed prep leaves the old plist untouched" $?
+
+# failed load: existing plist; the stub load fails only for a plist
+# containing the new plist's WatchPaths marker, so the rollback load
+# of the restored previous plist succeeds. Assert the restore: exit
+# non-zero, both failures named, previous plist back on disk, and the
+# call log shows unload + two loads (new, then restored).
+stub8="$work/bin8"
+make_recording_stub "$stub8"
+home8="$work/home8"
+make_home "$home8"
+write_old_plist "$home8"
+cp "$home8/$PLIST_REL" "$work/old8.plist"
+HOME="$home8" PATH="$stub8:$PATH" STUB_CALLS_LOG="$work/calls8" STUB_LOAD_FAIL_MARKER="workbench.desktop.main.js" bash "$INSTALLER" > "$work/out8" 2>&1
+rc=$?
+[ "$rc" -ne 0 ]; check "2151 failed load exits non-zero" $?
+grep -q "launchctl load failed" "$work/out8"; check "2151 failed load names the primary failure" $?
+grep -q "Restored and reloaded the previous agent" "$work/out8"; check "2151 failed load reports the rollback" $?
+grep -q "Installed and loaded" "$work/out8"; [ $? -ne 0 ]; check "2151 failed load prints no success banner" $?
+cmp -s "$home8/$PLIST_REL" "$work/old8.plist"; check "2151 failed load restores the previous plist" $?
+[ "$(grep -c '^load ' "$work/calls8")" -eq 2 ]; check "2151 failed load loads new then restored plist" $?
+grep -q "^unload " "$work/calls8"; check "2151 failed load unloaded only after staging" $?
+
+# failed swap: existing plist, mv stubbed to fail. The staged plist
+# never lands, so the previous plist stays in place and the installer
+# reloads the agent it unloaded.
+stub9="$work/bin9"
+make_recording_stub "$stub9"
+printf '#!/bin/sh\nexit 1\n' > "$stub9/mv"
+chmod +x "$stub9/mv"
+home9="$work/home9"
+make_home "$home9"
+write_old_plist "$home9"
+cp "$home9/$PLIST_REL" "$work/old9.plist"
+HOME="$home9" PATH="$stub9:$PATH" STUB_CALLS_LOG="$work/calls9" bash "$INSTALLER" > "$work/out9" 2>&1
+rc=$?
+[ "$rc" -ne 0 ]; check "2151 failed swap exits non-zero" $?
+grep -q "Could not install the staged plist" "$work/out9"; check "2151 failed swap names the swap failure" $?
+grep -q "Previous agent reloaded" "$work/out9"; check "2151 failed swap reports the reload" $?
+grep -q "Installed and loaded" "$work/out9"; [ $? -ne 0 ]; check "2151 failed swap prints no success banner" $?
+cmp -s "$home9/$PLIST_REL" "$work/old9.plist"; check "2151 failed swap leaves the previous plist in place" $?
+grep -q "^load " "$work/calls9"; check "2151 failed swap reloads the old agent" $?
 
 if [ "$failures" -gt 0 ]; then
   echo "FAILURES: $failures"

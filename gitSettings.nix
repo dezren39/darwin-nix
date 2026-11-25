@@ -19,7 +19,16 @@
 {
   user = {
     name = "Drewry Pope";
-    email = "drewry.pope@vertexinc.com"; # TODO: move work email out of default
+    # Personal identity by default: the GitHub noreply address for dezren39,
+    # so a commit from any checkout on this machine attributes to the
+    # personal account unless a conditional include says otherwise. The work
+    # identity is NOT the default (dezren39/darwin-nix#2096): it lives in
+    # gitIncludes.nix and home-manager applies it only inside work checkouts
+    # (a gitdir under ~/workspace/github-work, or a vertexinc remote). Do not
+    # put a work address back here — the git-identity flake check fails if
+    # the default rendered from this file is one, and so does
+    # `just git-config-check` on a deployed config.
+    email = "11225574+dezren39@users.noreply.github.com";
   };
 
   init.defaultBranch = "main";

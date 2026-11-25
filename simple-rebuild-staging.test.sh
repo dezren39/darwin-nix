@@ -170,6 +170,37 @@ run_scenario() { # $1 = name, $2 = fixture dir, $3... = script args
 run_scenario normal "$work/fx-normal" --build-only
 run_scenario no-commit "$work/fx-nocommit" --build-only --no-commit
 
+run_activate_only_registration_scenario() {
+  local fx="$work/fx-activate-only"
+  make_fixture "$fx"
+
+  # Run the real startup staging helper followed by the real
+  # record_activation/commit_marker path used by --activate-only. The
+  # system-specific activation side effects are stubbed after sourcing the
+  # functions; the Git registration and cleanup functions are unmodified.
+  awk '/^typeset -a flake_registered$/,/^trap unstage_flake_inputs EXIT$/' "$SCRIPT" > "$fx/activation-functions.zsh"
+  awk '/^commit_marker\(\) \{/,/^\}/' "$SCRIPT" >> "$fx/activation-functions.zsh"
+  awk '/^record_activation\(\) \{/,/^\}/' "$SCRIPT" >> "$fx/activation-functions.zsh"
+
+  ( cd "$fx" && zsh -c '
+    set -e
+    no_commit=1
+    git_ok=1
+    source "$1"
+    service_event() { :; }
+    reclaim_root_owned() { :; }
+    stage_flake_inputs
+    record_activation switch
+  ' zsh "$fx/activation-functions.zsh" )
+  local rc=$?
+  check "activate-only-shaped sequence exits 0" "$rc"
+  assert_unstaged "$fx" "activate-only-shaped sequence"
+  printf '%s\n' "$(git -C "$fx" ls-files --others --exclude-standard)" | grep -q '^new-input.txt$'
+  check "activate-only-shaped sequence lists the new input as untracked" $?
+}
+
+run_activate_only_registration_scenario
+
 if [ "$failures" -gt 0 ]; then
   echo "FAILURES: $failures"
   exit 1

@@ -223,7 +223,8 @@ flake_registered=()
 stage_flake_inputs() {
   local f dir cand
   local -a cands
-  flake_registered=()
+  # Keep registrations from earlier passes: intent-to-add entries disappear
+  # from `git ls-files --others`, but still need cleanup before commit and exit.
   while IFS= read -r f; do
     [[ -n "$f" ]] || continue
     cands=("$f")

@@ -59,9 +59,20 @@ make_db() {
     "INSERT INTO session VALUES('s2');" \
     "INSERT INTO session VALUES('s3');" \
     "INSERT INTO migration VALUES('m2');" >&9
-  local i
+  # Poll a real read, not the WAL bytes (#2211): a byte grep can see
+  # m2's data frame before the transaction's commit frame lands, and
+  # the kill below then discards m2 on recovery — the fixture would
+  # promise rows the database never committed, and the backup (which
+  # verifies against the live committed counts) publishes a correct
+  # copy that fails the content assertions. A sqlite read only counts
+  # committed frames, so once it reports the full fixture the kill
+  # cannot uncommit anything.
+  local i seen
   for i in $(seq 1 50); do
-    grep -a -q 'm2' "$dir/opencode.db-wal" 2>/dev/null && break
+    seen="$("$SQLITE3" "$dir/opencode.db" \
+      "select count(*) from session; select count(*) || '|' || max(id) from migration;" 2>/dev/null)"
+    [ "$seen" = "3
+2|m2" ] && break
     sleep 0.1
   done
   kill -9 "$holder" 2>/dev/null

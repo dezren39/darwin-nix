@@ -473,7 +473,24 @@ git_checkout_keep_reason() {
     echo "git status failed, so its state cannot be verified"; return 0
   fi
   if [ -n "$porcelain" ]; then echo "it has uncommitted changes"; return 0; fi
-  if [ -n "$(git -C "$dir" stash list 2>/dev/null)" ]; then echo "it has stash entries"; return 0; fi
+  local stash_entries
+  if ! stash_entries="$(git -C "$dir" stash list 2>/dev/null)"; then
+    echo "git stash list failed, so its stash state cannot be verified"; return 0
+  fi
+  if [ -n "$stash_entries" ]; then echo "it has stash entries"; return 0; fi
+  # The rev-list probe below can never see stash commits (it starts from
+  # branches/HEAD, and refs/stash is neither), so this probe is the only
+  # protection stashed work has. A surviving stash ref with an empty list,
+  # or a damaged ref whose reflog remains (#2110), still means stashed
+  # work may exist nowhere else -- keep on either trace.
+  if git -C "$dir" rev-parse --verify -q refs/stash >/dev/null 2>&1; then
+    echo "it has a stash ref"; return 0
+  fi
+  local git_dir=""
+  if git_dir="$(git -C "$dir" rev-parse --absolute-git-dir 2>/dev/null)" \
+    && [ -s "$git_dir/logs/refs/stash" ]; then
+    echo "it has a stash reflog"; return 0
+  fi
   if git -C "$dir" rev-parse --verify -q HEAD >/dev/null 2>&1; then
     local unpushed
     if ! unpushed="$(git -C "$dir" rev-list --branches HEAD --not --remotes 2>/dev/null)"; then

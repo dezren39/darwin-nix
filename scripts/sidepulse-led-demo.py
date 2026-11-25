@@ -44,6 +44,10 @@ from sidepulse.compose import (
 )
 
 STATUS_BAR_JOB = "io.sidepulse.agentstatus"
+# launchctl normally answers in well under a second. The bound exists so a
+# hung status-bar handoff cannot stall the demo forever (#2185): generous
+# enough never to fire on a healthy call, finite enough to hand control back.
+LAUNCHCTL_TIMEOUT_SECONDS = 10.0
 BLURBS = {
     "round-robin": "each signal's own gesture, in turn, whole device",
     "split": "front and back alternate, each carrying one colour",
@@ -159,7 +163,10 @@ def launchctl(action: str) -> bool:
 
     Returns True on success. On failure, prints the exit status and any
     captured stderr to stderr and returns False, so callers can stop
-    instead of racing the status-bar app for the device.
+    instead of racing the status-bar app for the device. The call is
+    bounded by LAUNCHCTL_TIMEOUT_SECONDS (#2185): a timeout is reported
+    distinctly and also returns False, so a hung launchctl can neither
+    stall the demo nor be mistaken for a successful handoff.
     """
     uid = os.getuid()
     plist = Path.home() / "Library/LaunchAgents" / f"{STATUS_BAR_JOB}.plist"
@@ -167,7 +174,21 @@ def launchctl(action: str) -> bool:
         command = ["launchctl", "bootout", f"gui/{uid}/{STATUS_BAR_JOB}"]
     else:
         command = ["launchctl", "bootstrap", f"gui/{uid}", str(plist)]
-    result = subprocess.run(command, capture_output=True, text=True)
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=LAUNCHCTL_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        print(
+            f"launchctl timed out after {LAUNCHCTL_TIMEOUT_SECONDS:g}s "
+            f"trying to {action} the status bar; treating the handoff as "
+            "failed",
+            file=sys.stderr,
+        )
+        return False
     if result.returncode != 0:
         detail = (result.stderr or "").strip()
         print(

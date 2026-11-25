@@ -69,12 +69,27 @@ class FakeRun:
         self.returncode = returncode
         self.stderr = stderr
         self.commands = []
+        self.timeouts = []
 
     def __call__(self, command, **kwargs):
         self.commands.append(list(command))
+        self.timeouts.append(kwargs.get("timeout"))
         return subprocess.CompletedProcess(
             command, self.returncode, stdout="", stderr=self.stderr
         )
+
+
+class TimeoutRun:
+    """subprocess.run stand-in that hangs past its timeout (#2185)."""
+
+    def __init__(self):
+        self.commands = []
+        self.timeouts = []
+
+    def __call__(self, command, **kwargs):
+        self.commands.append(list(command))
+        self.timeouts.append(kwargs.get("timeout"))
+        raise subprocess.TimeoutExpired(command, kwargs.get("timeout"))
 
 
 @contextlib.contextmanager
@@ -106,6 +121,66 @@ def test_successful_stop_and_start():
     check("success: stop returns True", stopped is True)
     check("success: start returns True", started is True)
     check("success: bootstrap attempted", len(fake.commands) == 2 and "bootstrap" in fake.commands[1], str(fake.commands))
+    check("success: both calls bounded by the timeout",
+          fake.timeouts == [demo.LAUNCHCTL_TIMEOUT_SECONDS] * 2, str(fake.timeouts))
+
+
+def test_stop_timeout_is_surfaced():
+    fake = TimeoutRun()
+    err = io.StringIO()
+    with mocked_run(fake), contextlib.redirect_stderr(err):
+        result = demo.launchctl("stop")
+    check("stop timeout: launchctl returns False", result is False)
+    check("stop timeout: bootout attempted", fake.commands and "bootout" in fake.commands[0], str(fake.commands))
+    check("stop timeout: finite timeout passed",
+          fake.timeouts == [demo.LAUNCHCTL_TIMEOUT_SECONDS], str(fake.timeouts))
+    check("stop timeout: timeout reported distinctly", "timed out" in err.getvalue(), err.getvalue())
+    check("stop timeout: no fake exit status", "exit " not in err.getvalue(), err.getvalue())
+
+
+def test_start_timeout_is_surfaced():
+    fake = TimeoutRun()
+    err = io.StringIO()
+    with mocked_run(fake), contextlib.redirect_stderr(err):
+        result = demo.launchctl("start")
+    check("start timeout: launchctl returns False", result is False)
+    check("start timeout: bootstrap attempted", fake.commands and "bootstrap" in fake.commands[0], str(fake.commands))
+    check("start timeout: finite timeout passed",
+          fake.timeouts == [demo.LAUNCHCTL_TIMEOUT_SECONDS], str(fake.timeouts))
+    check("start timeout: timeout reported distinctly", "timed out" in err.getvalue(), err.getvalue())
+
+
+def test_restart_timeout_is_reported_accurately():
+    with tempfile.TemporaryDirectory() as d:
+        target = Path(d)
+        fake = TimeoutRun()
+        out, err = io.StringIO(), io.StringIO()
+        with mocked_run(fake), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            result = demo.restart_status_bar(target)
+        check("restart timeout: returns False", result is False)
+        check("restart timeout: does not claim restarted", "status bar restarted" not in out.getvalue(), out.getvalue())
+        check("restart timeout: failure reported", "restart FAILED" in err.getvalue(), err.getvalue())
+        check("restart timeout: timeout reported", "timed out" in err.getvalue(), err.getvalue())
+
+
+def test_main_does_not_start_demo_when_stop_times_out():
+    with tempfile.TemporaryDirectory() as d:
+        target = Path(d)
+        fake = TimeoutRun()
+        argv, sys.argv = sys.argv, ["sidepulse-led-demo.py", "--device", str(target)]
+        err = io.StringIO()
+        try:
+            with mocked_run(fake), contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+                try:
+                    demo.main()
+                    raised = None
+                except SystemExit as exc:
+                    raised = exc
+        finally:
+            sys.argv = argv
+        check("main stop timeout: exits", raised is not None)
+        check("main stop timeout: nothing written to LEDS.LED", not (target / "LEDS.LED").exists())
+        check("main stop timeout: timeout surfaced", "timed out" in err.getvalue(), err.getvalue())
 
 
 def test_restart_failure_is_reported_accurately():
@@ -235,6 +310,10 @@ def test_normal_palette_completion_restores_once():
 
 test_stop_failure_is_surfaced()
 test_successful_stop_and_start()
+test_stop_timeout_is_surfaced()
+test_start_timeout_is_surfaced()
+test_restart_timeout_is_reported_accurately()
+test_main_does_not_start_demo_when_stop_times_out()
 test_restart_failure_is_reported_accurately()
 test_restart_success()
 test_main_does_not_start_demo_when_stop_fails()

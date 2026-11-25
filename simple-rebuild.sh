@@ -582,7 +582,38 @@ agent_pid() {
 agent_answers() {
   case "$1" in
     -) return 0 ;;
-    cmd:*) (eval "${1#cmd:}") >/dev/null 2>&1 ;;
+    cmd:*)
+      # Bound the command check the way the HTTP branch is bounded by
+      # curl -m 5 (#2101): this branch used to run a bare (eval ...) with
+      # no timeout, and check_services only tests its HEALTH_TIMEOUT
+      # deadline after agent_answers returns, so one hung command (a
+      # wedged mcpx ls is the production case) pinned the whole health
+      # gate forever, after the switch had already been recorded. Run
+      # the eval in the background and poll for it; the bound is the
+      # smaller of 5 s and HEALTH_TIMEOUT, so a single check can never
+      # overrun the gate's own deadline either. A timeout is a failed
+      # answer, named on stderr; the exit-status contract (0 = healthy)
+      # is unchanged. No GNU timeout: stock macOS does not ship one.
+      local cmd="${1#cmd:}" pid bound=5 limit
+      if (( ${HEALTH_TIMEOUT:-60} < bound )); then
+        bound=${HEALTH_TIMEOUT:-60}
+      fi
+      limit=$(( SECONDS + bound ))
+      (eval "$cmd") >/dev/null 2>&1 &
+      pid=$!
+      while kill -0 "$pid" 2>/dev/null; do
+        if (( SECONDS >= limit )); then
+          kill "$pid" 2>/dev/null
+          sleep 1
+          kill -9 "$pid" 2>/dev/null
+          wait "$pid" 2>/dev/null
+          echo "health check timed out after ${bound}s: $cmd" >&2
+          return 1
+        fi
+        sleep 1
+      done
+      wait "$pid"
+      ;;
     *) [[ "$(curl -s -m 5 -o /dev/null -w '%{http_code}' "$1" || true)" != "000" ]] ;;
   esac
 }

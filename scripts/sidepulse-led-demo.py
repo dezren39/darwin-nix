@@ -466,14 +466,18 @@ def main() -> int:
     restored = False
 
     def restore(*_args):
-        # Idempotent (#2141): signal handlers and playback finally blocks
-        # all call restore(); without the guard the second call re-bootstraps
-        # an already-loaded service and reports a false handoff failure.
+        # Idempotent once it succeeds (#2141): signal handlers and playback
+        # finally blocks all call restore(); without the guard the second
+        # call re-bootstraps an already-loaded service and reports a false
+        # handoff failure. A failed restart must not latch, though (#2179):
+        # restart_status_bar() reports the failure itself, and only its
+        # success marks restoration complete, so the next caller (e.g. the
+        # finally block after a signal handler's failed attempt) retries.
         nonlocal restored
         if restored:
             return
-        restored = True
-        restart_status_bar(target)
+        if restart_status_bar(target):
+            restored = True
 
     def restore_on_signal(signum, _frame):
         restore()

@@ -41,9 +41,18 @@ check() {
 }
 
 # --- stubs ---------------------------------------------------------------
+#
+# Stub shebangs name bash by the absolute path resolved HERE, not
+# /usr/bin/env: the nix build sandbox has no /usr/bin, so an env
+# shebang fails to exec at all there (the mcpx-agent-restart.test.sh
+# stubs do the same). The deploy script's `command -v` validation
+# still finds the stubs — it is the exec that would die.
 
-cat >"$tmp/bin/systemctl" <<'STUB'
-#!/usr/bin/env bash
+bash_path=$(command -v bash)
+
+{
+  printf '#!%s\n' "$bash_path"
+  cat <<'STUB'
 echo "systemctl $*" >>"$STUB_LOG"
 case "$*" in
   *is-active*)
@@ -66,13 +75,16 @@ case "$*" in
 esac
 exit 0
 STUB
+} >"$tmp/bin/systemctl"
 
-cat >"$tmp/bin/curl" <<'STUB'
-#!/usr/bin/env bash
+{
+  printf '#!%s\n' "$bash_path"
+  cat <<'STUB'
 echo "curl $*" >>"$STUB_LOG"
 [ -f "$STUB_DIR/curl-fail" ] && exit 22
 exit 0
 STUB
+} >"$tmp/bin/curl"
 chmod +x "$tmp/bin/systemctl" "$tmp/bin/curl"
 
 # --- fixtures --------------------------------------------------------------
@@ -80,10 +92,12 @@ chmod +x "$tmp/bin/systemctl" "$tmp/bin/curl"
 make_target() {
   # make_target <name>: an executable fixture "service build" that
   # logs its invocations and fails while $STUB_DIR/fail-<name> exists.
+  # Absolute bash shebang, like the stubs: no /usr/bin/env in the
+  # nix build sandbox.
   local dir="$tmp/targets/$1"
   mkdir -p "$dir"
   cat >"$dir/bin" <<EOF
-#!/usr/bin/env bash
+#!$bash_path
 echo "target-$1 \$*" >>"\$STUB_LOG"
 [ -f "\$STUB_DIR/fail-$1" ] && exit 1
 exit 0

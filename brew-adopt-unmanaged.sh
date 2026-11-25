@@ -90,6 +90,11 @@ if [ $# -ne 1 ]; then
   usage >&2
   exit 2
 fi
+if [ -z "$1" ]; then
+  echo "brew-adopt-unmanaged.sh: PRIMARY_USER must not be empty" >&2
+  usage >&2
+  exit 2
+fi
 PRIMARY_USER=$1
 BREW=${BREW_ADOPT_BREW:-/opt/homebrew/bin/brew}
 SUDO=${BREW_ADOPT_SUDO:-/usr/bin/sudo}

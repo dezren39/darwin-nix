@@ -92,6 +92,28 @@ class TimeoutRun:
         raise subprocess.TimeoutExpired(command, kwargs.get("timeout"))
 
 
+class FlakyBootstrapRun:
+    """subprocess.run stand-in: bootout succeeds; the first `failures`
+    bootstrap attempts exit 5, later ones succeed (#2179)."""
+
+    def __init__(self, failures=1):
+        self.failures = failures
+        self.commands = []
+        self.timeouts = []
+        self.bootstraps = 0
+
+    def __call__(self, command, **kwargs):
+        self.commands.append(list(command))
+        self.timeouts.append(kwargs.get("timeout"))
+        if "bootstrap" in command:
+            self.bootstraps += 1
+            if self.bootstraps <= self.failures:
+                return subprocess.CompletedProcess(
+                    command, 5, stdout="", stderr="launchctl: bootstrap failed"
+                )
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+
 @contextlib.contextmanager
 def mocked_run(fake):
     original = subprocess.run
@@ -291,6 +313,64 @@ def test_sigterm_and_sighup_restore_once_and_exit_conventionally():
         check(f"{label}: no false restart failure", "restart FAILED" not in err.getvalue(), err.getvalue())
 
 
+def _run_palette_until_sigint(fake):
+    """Drive main() in palette mode, delivering SIGINT during playback.
+
+    Returns (exit, handlers, out, err): the signal handler's restore() is
+    attempt one; the palette finally block's restore() is attempt two.
+    """
+    handlers = {}
+    argv, sys.argv = sys.argv, ["sidepulse-led-demo.py", "--device", "/unused", "--palette"]
+    out, err = io.StringIO(), io.StringIO()
+    try:
+        with mocked_run(fake), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+             mock.patch.object(demo, "device_path", return_value=Path("/unused")), \
+             mock.patch.object(demo, "write_program"), \
+             mock.patch.object(
+                 demo,
+                 "run_palette",
+                 side_effect=lambda *_a, **_k: handlers[demo.signal.SIGINT](demo.signal.SIGINT, None),
+             ), \
+             mock.patch.object(demo.signal, "signal", side_effect=lambda sig, h: handlers.__setitem__(sig, h)):
+            try:
+                demo.main()
+                exited = None
+            except SystemExit as exc:
+                exited = exc
+    finally:
+        sys.argv = argv
+    return exited, handlers, out, err
+
+
+def test_restore_retries_after_failed_bootstrap():
+    """First bootstrap fails in the signal handler; the finally retry succeeds (#2179)."""
+    fake = FlakyBootstrapRun(failures=1)
+    exited, handlers, out, err = _run_palette_until_sigint(fake)
+    check("retry after failure: SIGINT exits 130", exited is not None and exited.code == 130,
+          str(getattr(exited, "code", None)))
+    check("retry after failure: bootstrap attempted twice", fake.bootstraps == 2, str(fake.commands))
+    check("retry after failure: failed attempt reported", "restart FAILED" in err.getvalue(), err.getvalue())
+    check("retry after failure: retry reports restarted", "status bar restarted" in out.getvalue(), out.getvalue())
+    # Once a restore has succeeded, later calls latch again (#2141).
+    with mocked_run(fake), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        try:
+            handlers[demo.signal.SIGINT](demo.signal.SIGINT, None)
+        except SystemExit:
+            pass
+    check("retry after failure: no third bootstrap after success", fake.bootstraps == 2, str(fake.commands))
+
+
+def test_restore_reports_every_failed_attempt():
+    """When every bootstrap fails, each restore attempt is tried and reported (#2179)."""
+    fake = FlakyBootstrapRun(failures=99)
+    exited, _handlers, out, err = _run_palette_until_sigint(fake)
+    check("all attempts fail: SIGINT exits 130", exited is not None and exited.code == 130,
+          str(getattr(exited, "code", None)))
+    check("all attempts fail: bootstrap attempted twice", fake.bootstraps == 2, str(fake.commands))
+    check("all attempts fail: both failures reported", err.getvalue().count("restart FAILED") == 2, err.getvalue())
+    check("all attempts fail: never claims restarted", "status bar restarted" not in out.getvalue(), out.getvalue())
+
+
 def test_normal_palette_completion_restores_once():
     fake = FakeRun(0)
     argv, sys.argv = sys.argv, ["sidepulse-led-demo.py", "--device", "/unused", "--palette"]
@@ -319,6 +399,8 @@ test_restart_success()
 test_main_does_not_start_demo_when_stop_fails()
 test_double_restore_runs_one_bootstrap()
 test_sigterm_and_sighup_restore_once_and_exit_conventionally()
+test_restore_retries_after_failed_bootstrap()
+test_restore_reports_every_failed_attempt()
 test_normal_palette_completion_restores_once()
 
 if FAILURES:

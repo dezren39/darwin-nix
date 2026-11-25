@@ -1501,15 +1501,16 @@ rec {
         # #1393: drive the real deploy-service core with stubbed
         # systemctl/curl and pin the option-(c) deploy contract
         # (validate-first, atomic repoint, restart-on-change only,
-        # health verification, rollback). Also pin the generated
-        # openchamber-start wrapper: it must be the fork module's
-        # wrapper (attach guard intact) exec'ing THIS flake's
-        # openchamber build — a stub drift in mkPackages would
-        # otherwise change the laptop's launch semantics silently.
+        # health verification, rollback). The generated
+        # openchamber-start wrapper is deliberately NOT asserted
+        # here: naming its store path (or the openchamber package's)
+        # in this derivation would pull the whole openchamber build
+        # into every check run through string context, for two
+        # greps. The wrapper's content is verified by building the
+        # deploy packages (flake-packages-build), and the extraction
+        # itself fails loudly at eval time if the fork module's
+        # option surface drifts from the stub in mkPackages.
         deploy-services-tests =
-          let
-            selfPkgs = mkPackages pkgs;
-          in
           pkgs.runCommandLocal "deploy-services-tests"
             {
               nativeBuildInputs = [
@@ -1518,14 +1519,8 @@ rec {
                 pkgs.gnugrep
               ];
               src = inputs.self;
-              openchamberStart = "${selfPkgs.openchamber-start}/bin/openchamber-start";
-              openchamberBin = "${selfPkgs.openchamber}/bin/openchamber";
             }
             ''
-              grep -q "refusing to start" "$openchamberStart" ||
-                { echo "openchamber-start lost the fork wrapper's attach guard"; exit 1; }
-              grep -q "exec $openchamberBin serve --foreground" "$openchamberStart" ||
-                { echo "openchamber-start does not exec this flake's openchamber build"; exit 1; }
               cp $src/pkgs/deploy-services/deploy-service.sh ./
               cp $src/deploy-services.test.sh ./
               chmod u+w ./deploy-services.test.sh

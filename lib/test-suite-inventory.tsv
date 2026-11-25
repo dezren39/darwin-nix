@@ -8,6 +8,7 @@ chromium-family-cdp.test.sh	interpreter-named	suite is run through bash; by-name
 clean.test.sh	harness	bash suite sources the shared test harness
 code-install-extensions.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
 context7-login.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+deploy-services.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
 full-clean.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
 gc-root-activation.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
 git-discover-repos.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
@@ -36,6 +37,7 @@ pkgs/brew-repair/brew-repair.test.sh	interpreter-named	suite is run through bash
 pkgs/buffer-backup/check-lock-sync.test.py	interpreter-named	suite is run through python
 pkgs/buffer-backup/cleanup-count.test.mjs	interpreter-named	suite is run through node
 pkgs/bun-bin/check-pin-sync.test.py	interpreter-named	suite is run through python
+pkgs/check-tool-pins.test.py	interpreter-named	suite is run through python
 pkgs/flake-tidy/tests/test_cli.py	interpreter-named	suite is run through python
 pkgs/flake-tidy/tests/test_config.py	interpreter-named	suite is run through python
 pkgs/flake-tidy/tests/test_dedup.py	interpreter-named	suite is run through python

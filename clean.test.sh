@@ -2017,6 +2017,60 @@ case "$DC_OUT" in
   *) fail "single-word dead cask was not flagged (got: $DC_OUT)" ;;
 esac
 
+# ─── #2190: dead-cask extraction stops at the first .app ────────────────
+# PR #1978's multi-word fix (#1902) made the extraction greedy: .* extends
+# to the LAST .app on the brew info line, so a line naming a second bundle
+# after the path (source and target artifacts, e.g.
+# "/Applications/Present Multi.app (Present Multi.app)") extracted a
+# non-path and a present cask was falsely flagged MISSING. Same extracted-
+# block harness as the #1902 section; pin: with that line shape a present
+# multi-word cask is NOT flagged, and a dead one still is.
+DT_DIR="$TMP_ROOT/dead-cask-second-app"
+mkdir -p "$DT_DIR/apps/Present Multi.app"
+cat > "$DT_DIR/brew" <<'STUBEOF'
+#!/bin/sh
+if [ "$1" = list ]; then printf '%s\n' dead-multi present-multi; exit 0; fi
+if [ "$1" = info ]; then
+  case "$3" in
+    dead-multi)    printf '%s (%s)\n' "$CLEAN_APPS_DIR/Dead Multi.app" "Dead Multi.app" ;;
+    present-multi) printf '%s (%s)\n' "$CLEAN_APPS_DIR/Present Multi.app" "Present Multi.app" ;;
+  esac
+  exit 0
+fi
+exit 0
+STUBEOF
+chmod +x "$DT_DIR/brew"
+sed -n '/^  _dead=""/,/MISSING from disk/p' "$SCRIPT" > "$DT_DIR/block.sh"
+[ -s "$DT_DIR/block.sh" ] || fail "could not extract the dead-cask block from clean.sh (#2190)"
+grep -q 'info --cask' "$DT_DIR/block.sh" || fail "extracted dead-cask block lacks the brew info extraction (#2190)"
+# Same set -e / section-local TMPDIR handling as the #1902 section above.
+DT_TMPDIR_SAVE="${TMPDIR:-}"
+TMPDIR="$DT_DIR"
+export TMPDIR
+DT_OUT="$(
+  as_user() { "$@"; }
+  warn() { printf 'WARN: %s\n' "$*"; }
+  _b="$DT_DIR/brew"
+  _cask_list="dead-multi present-multi"
+  export CLEAN_APPS_DIR="$DT_DIR/apps"
+  . "$DT_DIR/block.sh"
+  exit 0
+)"
+if [ -n "$DT_TMPDIR_SAVE" ]; then TMPDIR="$DT_TMPDIR_SAVE"; else unset TMPDIR; fi
+export TMPDIR
+case "$DT_OUT" in
+  *"MISSING from disk"*) echo "ok: second-.app block warns on missing apps" ;;
+  *) fail "second-.app block produced no MISSING warning (got: $DT_OUT)" ;;
+esac
+case "$DT_OUT" in
+  *dead-multi*) echo "ok: multi-word dead cask with a second .app token is flagged" ;;
+  *) fail "multi-word dead cask with a second .app token was not flagged (got: $DT_OUT)" ;;
+esac
+case "$DT_OUT" in
+  *present-multi*) fail "present multi-word cask with a second .app token was flagged (got: $DT_OUT)" ;;
+  *) echo "ok: present multi-word cask with a second .app token is not flagged" ;;
+esac
+
 # ─── #2066: dead-cask per-cask `brew info --cask` failure fails closed ──
 # The dead-cask half enumerated each cask's app path with `brew info
 # --cask` inside a 2>/dev/null pipeline whose status is head's, not

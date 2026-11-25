@@ -242,6 +242,98 @@ EOF
   esac
 fi
 
+# --- agent_answers cmd branch is time-bounded (#2101) ---------------
+# The cmd:* branch ran a bare (eval ...) with no timeout, so one hung
+# command check pinned check_services past HEALTH_TIMEOUT -- the
+# deadline there is only tested after agent_answers returns. The real
+# function is extracted from simple-rebuild.sh and run under zsh, the
+# script's interpreter. curl is stubbed so the HTTP branch is exercised
+# without a network.
+AGENT_FN="$TMP_ROOT/agent-answers.zsh"
+awk '/^agent_answers\(\) \{$/ { capture=1 } capture { print } capture && /^}$/ { exit }' "$SCRIPT" >"$AGENT_FN"
+if [ ! -s "$AGENT_FN" ]; then
+  fail "could not extract agent_answers from simple-rebuild.sh"
+else
+  AGENT_RUN="$TMP_ROOT/agent-answers-run"
+  mkdir -p "$AGENT_RUN/bin"
+  cat >"$AGENT_RUN/bin/curl" <<'EOF'
+#!/bin/sh
+printf '%s' "${FAKE_HTTP_CODE:-000}"
+EOF
+  chmod +x "$AGENT_RUN/bin/curl"
+  cat >"$AGENT_RUN/driver.zsh" <<EOF
+source "$AGENT_FN"
+agent_answers "\$1"
+EOF
+  # agent_case <check> <HEALTH_TIMEOUT or "">: sets AGENT_STATUS,
+  # AGENT_ELAPSED (whole seconds) and AGENT_ERR for the run.
+  agent_case() {
+    local check="$1" ht="$2" start
+    start=$(date +%s)
+    if [ -n "$ht" ]; then
+      PATH="$AGENT_RUN/bin:$PATH" HEALTH_TIMEOUT="$ht" zsh "$AGENT_RUN/driver.zsh" "$check" 2>"$TMP_ROOT/agent.err"
+    else
+      PATH="$AGENT_RUN/bin:$PATH" zsh "$AGENT_RUN/driver.zsh" "$check" 2>"$TMP_ROOT/agent.err"
+    fi
+    AGENT_STATUS=$?
+    AGENT_ELAPSED=$(( $(date +%s) - start ))
+    AGENT_ERR="$(cat "$TMP_ROOT/agent.err")"
+  }
+
+  agent_case "cmd:true" ""
+  if [ "$AGENT_STATUS" -eq 0 ] && [ "$AGENT_ELAPSED" -lt 10 ]; then
+    ok "agent_answers cmd:true answers 0 promptly (#2101)"
+  else
+    fail "agent_answers cmd:true gave status $AGENT_STATUS after ${AGENT_ELAPSED}s (want 0, fast)"
+  fi
+
+  agent_case "cmd:false" ""
+  if [ "$AGENT_STATUS" -eq 1 ] && [ "$AGENT_ELAPSED" -lt 10 ]; then
+    ok "agent_answers cmd:false answers 1 promptly (#2101)"
+  else
+    fail "agent_answers cmd:false gave status $AGENT_STATUS after ${AGENT_ELAPSED}s (want 1, fast)"
+  fi
+
+  agent_case "-" ""
+  if [ "$AGENT_STATUS" -eq 0 ]; then
+    ok "agent_answers - still answers 0 (#2101)"
+  else
+    fail "agent_answers - gave status $AGENT_STATUS (want 0)"
+  fi
+
+  agent_case "cmd:sleep 30" ""
+  if [ "$AGENT_STATUS" -eq 1 ] && [ "$AGENT_ELAPSED" -lt 20 ]; then
+    ok "agent_answers hung cmd:sleep 30 fails within the bound, not after 30s (#2101)"
+  else
+    fail "agent_answers cmd:sleep 30 gave status $AGENT_STATUS after ${AGENT_ELAPSED}s (want 1, well under 30)"
+  fi
+  case "$AGENT_ERR" in
+    *"timed out"*"sleep 30"*) ok "agent_answers timeout diagnostic names the hung check (#2101)" ;;
+    *) fail "agent_answers timeout diagnostic did not name the hung check (got: $AGENT_ERR)" ;;
+  esac
+
+  agent_case "cmd:sleep 30" "3"
+  if [ "$AGENT_STATUS" -eq 1 ] && [ "$AGENT_ELAPSED" -lt 15 ]; then
+    ok "agent_answers hung check is bounded by HEALTH_TIMEOUT=3 when that is smaller (#2101)"
+  else
+    fail "agent_answers cmd:sleep 30 with HEALTH_TIMEOUT=3 gave status $AGENT_STATUS after ${AGENT_ELAPSED}s (want 1, well under 30)"
+  fi
+
+  FAKE_HTTP_CODE=200 agent_case "http://127.0.0.1:9/" ""
+  if [ "$AGENT_STATUS" -eq 0 ]; then
+    ok "agent_answers HTTP branch still answers 0 on a 200 (#2101)"
+  else
+    fail "agent_answers HTTP branch gave status $AGENT_STATUS on a stubbed 200 (want 0)"
+  fi
+
+  FAKE_HTTP_CODE=000 agent_case "http://127.0.0.1:9/" ""
+  if [ "$AGENT_STATUS" -eq 1 ]; then
+    ok "agent_answers HTTP branch still answers 1 on a 000 (#2101)"
+  else
+    fail "agent_answers HTTP branch gave status $AGENT_STATUS on a stubbed 000 (want 1)"
+  fi
+fi
+
 if [ "$failures" -gt 0 ]; then
   echo "$failures simple-rebuild parser check(s) failed" >&2
   exit 1

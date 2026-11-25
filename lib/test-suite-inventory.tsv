@@ -54,8 +54,11 @@ plugins/tool-definitions.test.mjs	interpreter-named	suite is run through node
 plugins/warp-import.test.mjs	interpreter-named	suite is run through node
 rebuild-backup-zed.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
 rebuild-staging.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+scripts/sidepulse-led-demo.test.py	interpreter-named	suite is run through python
 search.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+simple-rebuild-phase-build.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
 simple-rebuild-staging.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+simple-rebuild-token-race.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
 simple-rebuild.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
 spotlight-exclude-artifacts.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
 symlink-scripts.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below

@@ -73,6 +73,15 @@ STATE_DIR = Path(os.environ.get(
     "LAPTOP_AGENT_STATE", Path.home() / ".local/state/laptop-agent"))
 MAX_OUT = 1 << 20            # per-stream capture cap for /exec (tail kept)
 MAX_BODY = 1 << 20           # request body cap for /exec and /jobs
+# Spool meta.json read cap (#2094): load_persisted_jobs() reads each
+# persisted job's meta.json at startup. The daemon's own metas are a
+# few hundred bytes; an uncapped read_text() let one oversized spool
+# file spike daemon memory before any validation could run. Reads
+# are capped at this many bytes (plus one, to detect overflow) and
+# anything larger is skipped with a logged reason.
+MAX_META = 1 << 20
+_META_WRITE_ATTEMPTS = 3     # bounded retries for a meta.json write (#2037)
+_META_WRITE_RETRY_DELAY_S = 0.1  # pause between meta.json write attempts
 EXEC_TIMEOUT_DEFAULT = 120
 EXEC_TIMEOUT_MAX = 600
 # Batch bounds (#1842): MAX_EXEC_COMMANDS caps how many commands one
@@ -97,6 +106,24 @@ SEMA = threading.Semaphore(_parse_startup_int(
     "LAPTOP_AGENT_SLOTS", os.environ.get("LAPTOP_AGENT_SLOTS", "32"),
     "must be an integer >= 1", 1))
 STARTED = time.time()
+# Header-read deadline (#2067): ThreadingHTTPServer hands each
+# accepted connection to a handler thread, and BaseHTTPRequestHandler
+# reads the request line and headers before any Handler route code
+# runs -- with a blocking socket, a client that sends a partial
+# request line or header and then goes silent pins that thread
+# forever, before auth, the slot semaphore, or the MAX_BODY cap can
+# apply. The socket therefore carries this read deadline from the
+# start of each request until its headers are parsed (armed in
+# Handler.handle_one_request, cleared in Handler.parse_request); on
+# expiry the read raises, the connection closes, and the thread is
+# released. Body reads after the headers keep the previous blocking
+# behaviour -- their size is already capped (#1521). 30s is generous
+# for the real clients, which send headers immediately, and short
+# enough that stalled connections cannot accumulate threads.
+HEADER_TIMEOUT_S = _parse_startup_int(
+    "LAPTOP_AGENT_HEADER_TIMEOUT_S",
+    os.environ.get("LAPTOP_AGENT_HEADER_TIMEOUT_S", "30"),
+    "must be an integer >= 1", 1)
 
 JOBS = {}                    # job_id -> dict
 JOBS_LOCK = threading.Lock()
@@ -314,13 +341,30 @@ def _write_meta(job):
         print(f"laptop-agent: cannot write meta for job "
               f"{job['id']}: {e}", file=sys.stderr, flush=True)
         return
-    try:
-        d.mkdir(parents=True, exist_ok=True)
-        tmp = d / "meta.json.tmp"
-        tmp.write_text(json.dumps(meta))
-        os.replace(tmp, d / "meta.json")
-    except OSError:
-        pass
+    # Issue #2037: the meta.json write used to swallow every OSError
+    # silently, so a failed final (done) write left the last
+    # successful state -- "running" -- on disk, and the job restored
+    # after restart as interrupted with exit null. Retry a bounded
+    # number of times (a transient ENOSPC/permission blip must not
+    # lose the final state), then report the failure with one stderr
+    # line naming the job, exactly like the job_dir branch above.
+    # The restore contract (#1578) is unchanged: a persisted
+    # "running" entry still restores as interrupted, so the retry is
+    # what keeps a finished job from being presented that way.
+    last_error = None
+    for _attempt in range(_META_WRITE_ATTEMPTS):
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            tmp = d / "meta.json.tmp"
+            tmp.write_text(json.dumps(meta))
+            os.replace(tmp, d / "meta.json")
+            return
+        except OSError as e:
+            last_error = e
+            if _attempt + 1 < _META_WRITE_ATTEMPTS:
+                time.sleep(_META_WRITE_RETRY_DELAY_S)
+    print(f"laptop-agent: cannot write meta for job "
+          f"{job['id']}: {last_error}", file=sys.stderr, flush=True)
 
 
 # Restore contract (design #1578, phase 1 -- issue #1579): the
@@ -521,7 +565,14 @@ def load_persisted_jobs():
         if not d.is_dir():
             continue
         try:
-            meta = json.loads((d / "meta.json").read_text())
+            with open(d / "meta.json", "rb") as f:
+                raw = f.read(MAX_META + 1)
+            if len(raw) > MAX_META:
+                print(f"laptop-agent: skipping persisted job {d}: "
+                      f"meta.json exceeds {MAX_META} bytes",
+                      file=sys.stderr, flush=True)
+                continue
+            meta = json.loads(raw)
         except ValueError as e:
             print(f"laptop-agent: skipping persisted job {d}: "
                   f"invalid JSON in meta.json ({e})",
@@ -664,11 +715,62 @@ class FramingError(ValueError):
     so the connection must be closed after the 400 response."""
 
 
+def _check_body_framing(headers):
+    """Reject request framing this daemon cannot parse (#1986).
+
+    A chunked body reads as empty from a Content-Length-only read, and a
+    request carrying both Content-Length and Transfer-Encoding makes the
+    declared length the body while the trailing bytes are parsed as a
+    second request (request smuggling). RFC 9112 section 6.3 requires a
+    server that sees both to reject the message and close the
+    connection. `headers` is the message object http.server parsed the
+    request headers into.
+    """
+    transfer_encodings = headers.get_all("Transfer-Encoding", [])
+    content_lengths = headers.get_all("Content-Length", [])
+    if transfer_encodings and content_lengths:
+        raise FramingError(
+            "Content-Length and Transfer-Encoding are mutually exclusive")
+    if transfer_encodings:
+        codings = [c.strip().lower()
+                   for value in transfer_encodings
+                   for c in value.split(",") if c.strip()]
+        if codings != ["identity"]:
+            values = ", ".join(transfer_encodings)
+            raise FramingError(f"unsupported Transfer-Encoding: {values}")
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt, *args):  # quiet; journal gets tracebacks only
         pass
+
+    def handle_one_request(self):
+        # Arm the header-read deadline for every request (#2067): on a
+        # keep-alive connection a handler serves many requests, so each
+        # one re-arms before its request line is read. parse_request()
+        # clears the deadline once the headers are in.
+        self.connection.settimeout(HEADER_TIMEOUT_S)
+        super().handle_one_request()
+
+    def parse_request(self):
+        ok = super().parse_request()
+        # The request line and headers have been read: the stall window
+        # is closed. Restore the blocking socket so body reads and
+        # long-running /exec responses are not cut by the deadline.
+        self.connection.settimeout(None)
+        return ok
+
+    def handle(self):
+        try:
+            super().handle()
+        except TimeoutError:
+            # Header-read deadline expired (#2067): the client stalled
+            # mid-request. Drop the connection quietly -- one journal
+            # traceback per stalled client would bury real errors; the
+            # server machinery closes the socket either way.
+            self.close_connection = True
 
     def _send(self, code, obj, close=False):
         body = json.dumps(obj).encode()
@@ -702,6 +804,7 @@ class Handler(BaseHTTPRequestHandler):
         return any(hmac.compare_digest(c, expected) for c in candidates)
 
     def _body(self):
+        _check_body_framing(self.headers)
         try:
             n = int(self.headers.get("Content-Length") or 0)
         except (TypeError, ValueError):
@@ -726,6 +829,7 @@ class Handler(BaseHTTPRequestHandler):
         be established from the headers or the wire; the caller's
         error path then answers with Connection: close, the same
         contract as an unreadable body in _body()."""
+        _check_body_framing(self.headers)
         try:
             n = int(self.headers.get("Content-Length") or 0)
         except (TypeError, ValueError):
@@ -760,6 +864,7 @@ class Handler(BaseHTTPRequestHandler):
     def _do_GET(self):
         if not self._authed():
             return self._send(401, {"error": "bad token"}, close=True)
+        self._drain_body()
         path = urlparse(self.path)
         if path.path == "/health":
             with JOBS_LOCK:

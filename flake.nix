@@ -158,7 +158,9 @@ rec {
       # mcpx-src) carry every fix this flake used to pin forward
       # (opencode #1547 route overrides, the #1791 node_modules hash,
       # code #11443/#11453/#11476 for mcpx on aarch64-darwin), as of
-      # openchamber 88ca37a / opencode dfa989e / code 2dc8cb8 (2026-11-23).
+      # openchamber 1f22216 / opencode cd2ce27 / code 2dc8cb8 (2026-11-24).
+      # The opencode bump moves past the #2712 restamp: dfa989e was the
+      # stale pre-restamp pin behind the #1991 flake-build failures.
       # If the chain regresses, pin here again with
       # inputs.opencode.url / inputs.opencode.inputs.mcpx-src.url.
     };
@@ -386,7 +388,17 @@ rec {
         # OpenChamber's server, running the wrapped opencode above:
         # the override swaps in the wrapper so the database and
         # scratch pins hold for the OpenCode it starts too.
-        openchamber = inputs.openchamber.packages.${system}.openchamber.override { inherit opencode; };
+        # OpenChamber's bundled aarch64-darwin node_modules hash is stale
+        # under this locked Fleet Bun: flake-packages-build run 45431339199
+        # reported xYgTN... as specified and 6ch57... as the actual FOD.
+        # Keep the platform-specific correction scoped to this pin.
+        openchamber =
+          let
+            platformHashOverride = pkgs.lib.optionalAttrs (system == "aarch64-darwin") {
+              nodeModulesHash = "sha256-6ch57alCpe+WVcekFAgWPjSbD+nzLWp/Su0jKRqVVcU=";
+            };
+          in
+          inputs.openchamber.packages.${system}.openchamber.override ({ inherit opencode; } // platformHashOverride);
 
         brew-repair = import ./pkgs/brew-repair {
           inherit pkgs;
@@ -558,6 +570,56 @@ rec {
               export HOME="$TMPDIR/home"
               mkdir -p "$HOME"
               bash ./simple-rebuild.test.sh
+              touch $out
+            '';
+        # #2030: simple-rebuild-phase-build.test.sh pins phase_build's
+        # staleness guard -- a zero-exit build that leaves an old ./result
+        # is rejected, and only a link this build wrote is recorded. It
+        # extracts the real phase_build and stubs nix, so it needs no build.
+        simple-rebuild-phase-build-tests =
+          pkgs.runCommandLocal "simple-rebuild-phase-build-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.coreutils
+                pkgs.gnugrep
+                pkgs.gawk
+              ];
+            }
+            ''
+              cp ${./simple-rebuild.sh} simple-rebuild.sh
+              cp ${./simple-rebuild-phase-build.test.sh} simple-rebuild-phase-build.test.sh
+              chmod u+w simple-rebuild.sh simple-rebuild-phase-build.test.sh
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./simple-rebuild-phase-build.test.sh
+              touch $out
+            '';
+        # #2052: simple-rebuild-token-race.test.sh pins
+        # refresh_nix_access_token()'s per-invocation temp file -- overlapping
+        # refreshes each exit 0 with an atomic single-line result and no temp
+        # debris, where the old shared temp path aborted colliding rebuilds
+        # under set -e. The suite extracts the real function from the script
+        # and runs it under zsh (the script's interpreter), so it needs zsh
+        # but no build/activation.
+        simple-rebuild-token-race-tests =
+          pkgs.runCommandLocal "simple-rebuild-token-race-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.zsh
+                pkgs.coreutils
+                pkgs.gnugrep
+                pkgs.gawk
+              ];
+            }
+            ''
+              cp ${./simple-rebuild.sh} simple-rebuild.sh
+              cp ${./simple-rebuild-token-race.test.sh} simple-rebuild-token-race.test.sh
+              chmod u+w simple-rebuild.sh simple-rebuild-token-race.test.sh
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./simple-rebuild-token-race.test.sh
               touch $out
             '';
         # #1864: simple-rebuild-staging.test.sh pins simple-rebuild.sh's

@@ -301,13 +301,29 @@ in
           # New OpenChamber (or start script, or UI password): restart.
           # SIGTERM leaves the managed OpenCode running and the new process
           # adopts it.
+          # Only record the deploy (event + marker) after the start
+          # succeeds: writing $state/deployed on a failed start made the
+          # next activation take the deploy.unchanged branch and never
+          # retry the start until the key changed (#2000).
+          if [ "$running" = 1 ]; then
+            start_cmd="/bin/launchctl kickstart -k $job"
+            if ! run /bin/launchctl kickstart -k "$job"; then
+              event deploy.start-failed cause="$why" running="$running" \
+                previous_script="''${deployed%%:*}" script="$script"
+              echo "openchamberDeploy: failed to restart OpenChamber ($start_cmd); deployed marker not updated, will retry on next activation" >&2
+              exit 1
+            fi
+          else
+            start_cmd="/bin/launchctl kickstart $job"
+            if ! run /bin/launchctl kickstart "$job"; then
+              event deploy.start-failed cause="$why" running="$running" \
+                previous_script="''${deployed%%:*}" script="$script"
+              echo "openchamberDeploy: failed to start OpenChamber ($start_cmd); deployed marker not updated, will retry on next activation" >&2
+              exit 1
+            fi
+          fi
           event deploy.restart cause="$why" running="$running" \
             previous_script="''${deployed%%:*}" script="$script"
-          if [ "$running" = 1 ]; then
-            run /bin/launchctl kickstart -k "$job"
-          else
-            run /bin/launchctl kickstart "$job" || true
-          fi
           run /bin/sh -c 'printf "%s\n" "$1" > "$2"' _ "$key" "$state/deployed"
         elif [ "$running" = 1 ] && [ "$previous" != "$target" ]; then
           # Same OpenChamber, new OpenCode: hand over in place.

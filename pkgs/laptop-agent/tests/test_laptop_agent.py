@@ -462,6 +462,83 @@ class AuthedUnreadBodyConnectionTest(unittest.TestCase):
                 self.assertIn(b"Connection: close", head)
                 self.assertIn(b"unsupported Transfer-Encoding", body)
 
+    def test_duplicate_content_length_exec_is_rejected(self):
+        # Issue #2174: two differing Content-Length fields used to pass
+        # the guard; the reader took the first value and the trailing
+        # bytes were parsed as a second request on the same connection.
+        smuggled = b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        head, body = self._raw_response(self._framing_request(
+            "POST", "/exec", [("Content-Length", "2"),
+                              ("Content-Length", "100")],
+            b"{}" + smuggled))
+        self.assertIn(b" 400 ", head)
+        self.assertIn(b"Connection: close", head)
+        self.assertIn(b"duplicate Content-Length", body)
+        self.assertEqual(body.count(b"ok"), 0)
+
+    def test_duplicate_content_length_jobs_is_rejected(self):
+        head, body = self._raw_response(self._framing_request(
+            "POST", "/jobs", [("Content-Length", "2"),
+                              ("Content-Length", "22")],
+            b"{}"))
+        self.assertIn(b" 400 ", head)
+        self.assertIn(b"Connection: close", head)
+        self.assertIn(b"duplicate Content-Length", body)
+
+    def test_identical_duplicate_content_length_is_rejected(self):
+        # Pinned fail-closed (#2174): identical duplicates are rejected
+        # too, never silently coalesced to the first value -- no
+        # intermediary normalizes requests for this daemon.
+        head, body = self._raw_response(self._framing_request(
+            "POST", "/exec", [("Content-Length", "2"),
+                              ("Content-Length", "2")],
+            b"{}"))
+        self.assertIn(b" 400 ", head)
+        self.assertIn(b"Connection: close", head)
+        self.assertIn(b"duplicate Content-Length", body)
+
+    def test_duplicate_content_length_unread_post_paths_are_rejected(self):
+        for path in ("/jobs/deadbeef/kill", "/no-such-route"):
+            with self.subTest(path=path):
+                head, body = self._raw_response(self._framing_request(
+                    "POST", path, [("Content-Length", "2"),
+                                   ("Content-Length", "100")],
+                    b"{}"))
+                self.assertIn(b" 400 ", head)
+                self.assertIn(b"Connection: close", head)
+                self.assertIn(b"duplicate Content-Length", body)
+
+    def test_identity_transfer_encoding_exec_is_rejected(self):
+        # Issue #2170: Transfer-Encoding: identity with no
+        # Content-Length declares no body length; the reader consumed
+        # zero bytes and the real body was parsed as the next request.
+        smuggled = b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        head, body = self._raw_response(self._framing_request(
+            "POST", "/exec", [("Transfer-Encoding", "identity")],
+            b"{}" + smuggled))
+        self.assertIn(b" 400 ", head)
+        self.assertIn(b"Connection: close", head)
+        self.assertIn(b"identity Transfer-Encoding", body)
+        self.assertEqual(body.count(b"ok"), 0)
+
+    def test_identity_transfer_encoding_jobs_is_rejected(self):
+        head, body = self._raw_response(self._framing_request(
+            "POST", "/jobs", [("Transfer-Encoding", "identity")],
+            b"{}"))
+        self.assertIn(b" 400 ", head)
+        self.assertIn(b"Connection: close", head)
+        self.assertIn(b"identity Transfer-Encoding", body)
+
+    def test_identity_transfer_encoding_unread_post_paths_are_rejected(self):
+        for path in ("/jobs/deadbeef/kill", "/no-such-route"):
+            with self.subTest(path=path):
+                head, body = self._raw_response(self._framing_request(
+                    "POST", path, [("Transfer-Encoding", "identity")],
+                    b"{}"))
+                self.assertIn(b" 400 ", head)
+                self.assertIn(b"Connection: close", head)
+                self.assertIn(b"identity Transfer-Encoding", body)
+
     def test_kill_unknown_job_with_body_then_health_same_connection(self):
         conn = self._conn()
         status, connection, parsed = self._call(

@@ -726,11 +726,23 @@ def _check_body_framing(headers):
     declared length the body while the trailing bytes are parsed as a
     second request (request smuggling). RFC 9112 section 6.3 requires a
     server that sees both to reject the message and close the
-    connection. `headers` is the message object http.server parsed the
-    request headers into.
+    connection. The same section covers the two gaps closed later:
+    duplicate Content-Length fields (#2174) leave the body length
+    ambiguous -- the readers below would take the first value and leave
+    the rest on the socket -- and a Transfer-Encoding that does not end
+    in chunked (identity alone, #2170) declares no body length at all.
+    `headers` is the message object http.server parsed the request
+    headers into.
     """
     transfer_encodings = headers.get_all("Transfer-Encoding", [])
     content_lengths = headers.get_all("Content-Length", [])
+    if len(content_lengths) > 1:
+        # Fail closed on every duplicate (#2174): RFC 9112 section 6.3
+        # permits rejecting differing values or coalescing identical
+        # ones, but no intermediary normalizes requests for this
+        # daemon, so first-wins is never a safe reading.
+        values = ", ".join(content_lengths)
+        raise FramingError(f"duplicate Content-Length: {values}")
     if transfer_encodings and content_lengths:
         raise FramingError(
             "Content-Length and Transfer-Encoding are mutually exclusive")
@@ -741,6 +753,12 @@ def _check_body_framing(headers):
         if codings != ["identity"]:
             values = ", ".join(transfer_encodings)
             raise FramingError(f"unsupported Transfer-Encoding: {values}")
+        # Identity alone reaches here only with no Content-Length (the
+        # both-headers case raised above), so the body length is
+        # unreliable: the readers below would consume zero bytes and
+        # leave the real body on the socket as the next request (#2170).
+        raise FramingError(
+            "identity Transfer-Encoding requires Content-Length")
 
 
 class Handler(BaseHTTPRequestHandler):

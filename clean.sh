@@ -50,6 +50,7 @@ CLEAN_TMPDIR="${CLEAN_TMPDIR:-0}"   # opt-in: wipe /private/var/folders
 VAR_FOLDERS_ROOT="${VAR_FOLDERS_ROOT:-/private/var/folders}" # var-folders root for the --tmpdir sweep AND the opencode scratch tidy/discovery roots below (env seam so tests can point it at a fixture, #1346)
 TIDY_MOVE_FAILURES=0   # incremented by tidy_file_to_bucket/tidy_dir_to_bucket when an archive move fails (#1337)
 BREW_DRIFT_FAILURES=0  # incremented by brew_cask_drift_check when `brew list --cask` fails (#1918)
+MAS_DRIFT_FAILURES=0   # incremented by mas_app_drift_check when `mas list` fails (#2018)
 EXPIRE_REFLOG="${EXPIRE_REFLOG:-0}" # opt-in: force reflog expiry during maintenance
 DOCKER_AGE_DAYS="${DOCKER_AGE_DAYS:-}"  # set = age-scoped docker prune, VM preserved
 PRUNE_UNKNOWN_SCRATCH="${PRUNE_UNKNOWN_SCRATCH:-0}" # opt-in: delete, not just flag, the name-blind catch-all
@@ -1098,12 +1099,34 @@ brew_cask_drift_check() {
   return 0
 }
 brew_cask_drift_check
-if have mas && [ -f "$SELF_DIR/masApps.nix" ]; then
+mas_app_drift_check() {
+  local _mas_err _mas_list _masorph
+  have mas || return 0
+  [ -f "$SELF_DIR/masApps.nix" ] || return 0
+  # Enumerate the installed App Store apps ONCE, with the exit status and
+  # stderr preserved (#2018): this check used to run `as_user mas list`
+  # inside a process substitution with 2>/dev/null, so a present-but-
+  # failing mas (signed out, StoreKit/network failure) silently produced
+  # an empty stream indistinguishable from a successful empty listing and
+  # the run claimed "no orphans". Fail closed like brew_cask_drift_check
+  # (#1918): name the step, surface mas's own stderr, and record the
+  # failure in MAS_DRIFT_FAILURES so the run exits non-zero at the end.
+  _mas_err=$(mktemp)
+  if ! _mas_list=$(as_user mas list 2>"$_mas_err"); then
+    warn "mas list failed -- App Store drift check cannot run; a broken mas is not 'no orphans'"
+    [ -s "$_mas_err" ] && sed 's/^/     /' "$_mas_err" >&2
+    rm -f "$_mas_err"
+    MAS_DRIFT_FAILURES=$((MAS_DRIFT_FAILURES + 1))
+    return 0
+  fi
+  rm -f "$_mas_err"
   _masorph=$(comm -23 \
-    <(as_user mas list 2>/dev/null | awk '{$1=""; sub(/ *\([^)]*\)$/,""); sub(/^ /,""); print}' | sort) \
+    <(printf '%s\n' "$_mas_list" | awk '{$1=""; sub(/ *\([^)]*\)$/,""); sub(/^ /,""); print}' | sort) \
     <(grep -oE '"[^"]+" = [0-9]+' "$SELF_DIR/masApps.nix" | sed -E 's/" = .*//; s/^"//' | sort) 2>/dev/null)
-  [ -n "$_masorph" ] && { warn "App Store apps not in masApps.nix:"; printf '     %s\n' $_masorph; }
-fi
+  [ -n "$_masorph" ] && { warn "App Store apps not in masApps.nix:"; printf '%s\n' "$_masorph" | sed 's/^/     /'; }
+  return 0
+}
+mas_app_drift_check
 
 # --- Other language/tool caches, user + system ------------------------------
 # Present-but-unlisted tools get cleaned; absent ones are informational only.
@@ -2388,6 +2411,12 @@ fi
 # brew no longer ends at exit 0 looking exactly like "no drift".
 if [ "$BREW_DRIFT_FAILURES" -gt 0 ]; then
   warn "brew cask drift checks: $BREW_DRIFT_FAILURES enumeration failure(s) -- clean.sh exiting non-zero"
+  exit 1
+fi
+
+# A failed App Store enumeration fails the run (#2018), same convention.
+if [ "$MAS_DRIFT_FAILURES" -gt 0 ]; then
+  warn "App Store drift check: $MAS_DRIFT_FAILURES enumeration failure(s) -- clean.sh exiting non-zero"
   exit 1
 fi
 outcome_finish

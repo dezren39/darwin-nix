@@ -1735,6 +1735,103 @@ case "$DRIFT_OUT_OK" in
   *) fail "drift check control did not report orphan-cask (got: $DRIFT_OUT_OK / $DRIFT_ERR_OK) (#1918)" ;;
 esac
 
+# ─── mas_app_drift_check fails closed when mas list fails (#2018) ───
+# Same fail-open shape as #1918, adjacent code: the App Store drift check
+# ran `as_user mas list 2>/dev/null` in a process substitution, so a
+# present-but-failing mas looked exactly like a successful empty listing.
+# Pin the fail-closed contract with a stub mas, extracting the real
+# mas_app_drift_check from clean.sh at test time (the #1918 extraction
+# pattern, sourced and driven in this shell): a failing enumeration warns
+# naming the step, surfaces mas's stderr, and records MAS_DRIFT_FAILURES;
+# successful-with-orphan reports the orphan with no failure recorded;
+# successful-empty records no failure and reports no orphans.
+MAS_DIR="$TMP_ROOT/mas-drift"
+mkdir -p "$MAS_DIR/bin"
+cat > "$MAS_DIR/masApps.nix" <<'NIX'
+_: {
+  masApps = {
+    "Known App" = 111;
+  };
+}
+NIX
+printf '#!%s\n' "$(command -v bash)" > "$MAS_DIR/bin/mas"
+cat >> "$MAS_DIR/bin/mas" <<'STUB'
+if [ "$1" = "list" ]; then
+  case "${MAS_STUB_MODE:-empty}" in
+    fail)
+      echo "Error: mas exploded" >&2
+      exit 1
+      ;;
+    orphan)
+      printf '111 Known App (1.0)\n222 Orphan App (2.0)\n'
+      exit 0
+      ;;
+    *)
+      printf '111 Known App (1.0)\n'
+      exit 0
+      ;;
+  esac
+fi
+exit 0
+STUB
+chmod +x "$MAS_DIR/bin/mas"
+sed -n '/^mas_app_drift_check() {/,/^}/p' "$SCRIPT" > "$MAS_DIR/drift.sh"
+[ -s "$MAS_DIR/drift.sh" ] || fail "could not extract mas_app_drift_check from clean.sh (#2018)"
+MAS_SELF_DIR_SAVE="$SELF_DIR"
+SELF_DIR="$MAS_DIR"
+MAS_DRIFT_FAILURES=0
+warn() { printf '%s\n' "$*" >&2; }
+have() { command -v "$1" >/dev/null 2>&1; }
+as_user() { "$@"; }
+. "$MAS_DIR/drift.sh"
+MAS_TMPDIR_SAVE="${TMPDIR:-}"
+TMPDIR="$MAS_DIR"
+export TMPDIR
+MAS_PATH_SAVE="$PATH"
+PATH="$MAS_DIR/bin:$PATH"
+MAS_STUB_MODE=fail mas_app_drift_check >"$MAS_DIR/out-fail" 2>"$MAS_DIR/err-fail"
+MAS_FAILURES_FAIL=$MAS_DRIFT_FAILURES
+MAS_ERR_FAIL="$(cat "$MAS_DIR/err-fail")"
+MAS_DRIFT_FAILURES=0
+MAS_STUB_MODE=orphan mas_app_drift_check >"$MAS_DIR/out-orphan" 2>"$MAS_DIR/err-orphan"
+MAS_FAILURES_ORPHAN=$MAS_DRIFT_FAILURES
+MAS_OUT_ORPHAN="$(cat "$MAS_DIR/out-orphan")"
+MAS_ERR_ORPHAN="$(cat "$MAS_DIR/err-orphan")"
+MAS_DRIFT_FAILURES=0
+MAS_STUB_MODE=empty mas_app_drift_check >"$MAS_DIR/out-empty" 2>"$MAS_DIR/err-empty"
+MAS_FAILURES_EMPTY=$MAS_DRIFT_FAILURES
+MAS_ERR_EMPTY="$(cat "$MAS_DIR/err-empty")"
+PATH="$MAS_PATH_SAVE"
+SELF_DIR="$MAS_SELF_DIR_SAVE"
+if [ -n "$MAS_TMPDIR_SAVE" ]; then TMPDIR="$MAS_TMPDIR_SAVE"; else unset TMPDIR; fi
+export TMPDIR
+[ "$MAS_FAILURES_FAIL" -eq 1 ] \
+  || fail "failing mas list recorded $MAS_FAILURES_FAIL drift failure(s) (want 1) (#2018)"
+case "$MAS_ERR_FAIL" in
+  *"mas list failed"*) echo "ok: mas drift check names the failed step on enumeration failure" ;;
+  *) fail "mas drift check did not name the failed step (got: $MAS_ERR_FAIL) (#2018)" ;;
+esac
+case "$MAS_ERR_FAIL" in
+  *"mas exploded"*) echo "ok: mas drift check surfaces mas's own stderr" ;;
+  *) fail "mas drift check swallowed mas's stderr (got: $MAS_ERR_FAIL) (#2018)" ;;
+esac
+case "$MAS_ERR_FAIL" in
+  *"not in masApps.nix"*) fail "mas drift check reported orphans from a failed enumeration (#2018)" ;;
+  *) echo "ok: mas drift check reports no orphans from a failed enumeration" ;;
+esac
+[ "$MAS_FAILURES_ORPHAN" -eq 0 ] \
+  || fail "successful mas list recorded a drift failure (#2018)"
+case "$MAS_OUT_ORPHAN" in
+  *"Orphan App"*) echo "ok: mas drift check control reports the orphan app" ;;
+  *) fail "mas drift check control did not report Orphan App (got: $MAS_OUT_ORPHAN / $MAS_ERR_ORPHAN) (#2018)" ;;
+esac
+[ "$MAS_FAILURES_EMPTY" -eq 0 ] \
+  || fail "successful empty mas list recorded a drift failure (#2018)"
+case "$MAS_ERR_EMPTY" in
+  *"not in masApps.nix"*) fail "mas drift check reported orphans from a successful empty listing (#2018)" ;;
+  *) echo "ok: mas drift check reports no orphans from a successful empty listing" ;;
+esac
+
 # --- Colima recreation requires two complete Docker listings (#1831) --------
 # Run the real cleanup script in dry-run mode with a fake Colima profile and
 # Docker CLI. The daemon probe succeeds; each listing can independently fail,

@@ -1561,6 +1561,35 @@ rec {
               bash ./opencode-prune-report.test.sh
               touch $out
             '';
+        # #2143 (follow-up to #2060): opencode-notifier-deploy.test.sh
+        # pins the notifier deployment PR #2168 landed -- the repo copy
+        # of opencode-notifier.json names sounds by bare file name (no
+        # /Users/drewry.pope acceptance grep), every named sound exists
+        # in sounds/, homeUser.nix deploys both the config and the
+        # sounds dir and completes the deployed paths from
+        # config.home.homeDirectory, and a simulated generation
+        # resolves every sound under the target home.
+        opencode-notifier-deploy-tests =
+          pkgs.runCommandLocal "opencode-notifier-deploy-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.coreutils
+                pkgs.gawk
+                pkgs.gnugrep
+                pkgs.python3
+              ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/opencode-notifier.json $src/homeUser.nix $src/opencode-notifier-deploy.test.sh ./
+              cp -r $src/sounds ./sounds
+              chmod u+w ./opencode-notifier-deploy.test.sh
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./opencode-notifier-deploy.test.sh
+              touch $out
+            '';
         # #945: install-vscode-patch-agent.test.sh drives the real
         # installer with a scratch HOME and a stub launchctl -- a missing
         # LaunchAgents dir, a failing launchctl load, and a blocked dir

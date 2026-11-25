@@ -78,9 +78,9 @@ make_fixture() { # $1 = fixture dir
 # see and read BOTH new inputs at build time (an unregistered file
 # makes the eval fail), then fake the build result.
 set -euo pipefail
-got="$("$SR_TEST_REAL_NIX" eval --json --extra-experimental-features 'nix-command flakes' .#inp)"
+got="$(NIX_REMOTE=daemon "$SR_TEST_REAL_NIX" eval --json --extra-experimental-features 'nix-command flakes' .#inp)"
 [ "$got" = '"brand new input\n"' ] || { echo "stub nix: flake did not see new-input.txt (got: $got)" >&2; exit 1; }
-got2="$("$SR_TEST_REAL_NIX" eval --json --extra-experimental-features 'nix-command flakes' .#inp2)"
+got2="$(NIX_REMOTE=daemon "$SR_TEST_REAL_NIX" eval --json --extra-experimental-features 'nix-command flakes' .#inp2)"
 [ "$got2" = '"pkg input\n"' ] || { echo "stub nix: flake did not see vendor/newpkg/default.nix (got: $got2)" >&2; exit 1; }
 printf '#!/bin/sh\nexit 0\n' > "$SR_TEST_FAKE_SYSTEM/sw/bin/darwin-rebuild"
 chmod +x "$SR_TEST_FAKE_SYSTEM/sw/bin/darwin-rebuild"
@@ -189,6 +189,7 @@ run_activate_only_registration_scenario() {
     source "$1"
     service_event() { :; }
     reclaim_root_owned() { :; }
+    hostname() { print -r -- testhost; }
     stage_flake_inputs
     record_activation switch
   ' zsh "$fx/activation-functions.zsh" )

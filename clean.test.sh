@@ -1091,8 +1091,18 @@ warn() { printf '%s\n' "$*" >&2; }
 EC_OLD_PATH="$PATH"
 PATH="$EC_DIR/bin:$PATH"
 export PATH
+# Section-local TMPDIR (the #1918 precedent below): an earlier section
+# exports a TMPDIR it later removes, and the sweep's mktemp would fail
+# against the removed dir -- every probe would then read as failed,
+# which is the defect under test wearing a disguise. Point TMPDIR at
+# this section's live dir for the call and restore it after.
+EC_TMPDIR_SAVE="${TMPDIR:-}"
+TMPDIR="$EC_DIR"
+export TMPDIR
 EC_RC=0
 sweep_eval_caches "$EC_DIR/home" 2> "$EC_DIR/failure.err" || EC_RC=$?
+if [ -n "$EC_TMPDIR_SAVE" ]; then TMPDIR="$EC_TMPDIR_SAVE"; else unset TMPDIR; fi
+export TMPDIR
 PATH="$EC_OLD_PATH"
 export PATH
 [ "$EC_RC" -eq 0 ] || fail "eval-cache sweep returned $EC_RC on a failed probe"

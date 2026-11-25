@@ -1314,6 +1314,62 @@ rec {
               bash ./git-safe-directory.test.sh
               touch $out
             '';
+        # #2096: the default git identity rendered from gitSettings.nix is
+        # the personal noreply address, and the work identity declared in
+        # gitIncludes.nix applies only inside work checkouts. Evaluates the
+        # real gitIncludes.nix through home-manager's git module (mirroring
+        # homePrograms.nix's block, including its include.path merge),
+        # renders the /etc/gitconfig twin exactly as configuration.nix does,
+        # and drives real Git against both artifacts.
+        git-identity-tests =
+          let
+            hmEval = inputs.home-manager.lib.homeManagerConfiguration {
+              inherit pkgs;
+              modules = [
+                {
+                  programs.git = {
+                    enable = true;
+                    settings = (import ./gitSettings.nix) // {
+                      include.path = "~/.config/git/maintenance.config";
+                    };
+                    includes = import ./gitIncludes.nix;
+                  };
+                  home = {
+                    username = "git-identity-test";
+                    homeDirectory = "/home/git-identity-test";
+                    stateVersion = "25.11";
+                  };
+                }
+              ];
+            };
+            hmGitconfig = hmEval.config.xdg.configFile."git/config".source;
+            systemGitconfig = pkgs.writeText "gitconfig" (
+              pkgs.lib.generators.toGitINI (
+                pkgs.lib.recursiveUpdate (import ./gitSettings.nix) {
+                  core.excludesFile = "/etc/gitignore";
+                  core.fsmonitor = false;
+                }
+              )
+            );
+          in
+          pkgs.runCommandLocal "git-identity-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.git
+              ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/gitSettings.nix $src/gitIncludes.nix $src/homePrograms.nix $src/git-identity.test.sh ./
+              chmod u+w ./git-identity.test.sh
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              export RENDERED_GITCONFIG=${systemGitconfig}
+              export HM_GITCONFIG=${hmGitconfig}
+              bash ./git-identity.test.sh
+              touch $out
+            '';
         # #1475 phase 2: keep the suite inventory complete, check source
         # spellings that can make stubs fail in a Nix sandbox, and exercise
         # the shared stat double's BSD forms and GNU -c rejection.

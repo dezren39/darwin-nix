@@ -2187,6 +2187,7 @@ sed -n '/^# The oseries checkout is a real working repo/,/^unset _oseries_reason
 [ -s "$OS_HELPERS" ] || fail "could not extract the oseries guard helpers from clean.sh"
 [ -s "$OS_CALL" ] || fail "could not extract the oseries call site from clean.sh"
 grep -q 'status --porcelain' "$OS_HELPERS" || fail "extracted guard lacks the dirty check"
+grep -q 'stash list' "$OS_HELPERS" || fail "extracted guard lacks the stash check"
 grep -q 'rev-list' "$OS_HELPERS" || fail "extracted guard lacks the unpushed check"
 grep -q 'git_checkout_keep_reason' "$OS_CALL" || fail "extracted call site does not call the guard"
 grep -q 'del "$OSERIES_DIR"' "$OS_CALL" || fail "extracted call site does not delete via del"
@@ -2262,6 +2263,64 @@ mkdir -p "$OS_DIR"
 echo junk > "$OS_DIR/junk.txt"
 oseries_run 0
 [ ! -e "$OS_DIR" ] && echo "ok: non-repo oseries directory is deleted as before" || fail "non-repo oseries directory was kept"
+# ─── #2110: the stash probe fails closed like its sibling probes ───
+# The rev-list probe can never see stash commits (refs/stash is neither a
+# branch nor HEAD), so the stash probe is the only thing protecting
+# stashed work; it used to read any empty `git stash list` output as
+# "no stash" with no exit-status check, so a damaged stash ref turned
+# the guard into a deletion.
+oseries_run_stash_fails() { # <dry-run 0|1> — like oseries_run, but git stash list exits nonzero
+  OUT="$(
+    HOME="$OS_HOME"
+    CALLER_USER_HOME="$OS_HOME"
+    DRY_RUN="$1"
+    warn() { printf 'WARN: %s\n' "$*"; }
+    git() {
+      _os_prev=""
+      for _os_a in "$@"; do
+        if [ "$_os_prev" = "stash" ] && [ "$_os_a" = "list" ]; then return 1; fi
+        _os_prev="$_os_a"
+      done
+      command git "$@"
+    }
+    . "$OS_HELPERS"
+    . "$OS_CALL"
+    exit 0
+  )"
+}
+# Clean tree, everything pushed, one stash entry: kept, stash reason named.
+oseries_fresh_repo
+echo stashed > "$OS_DIR/stash.txt"
+git -C "$OS_DIR" stash push -q -u -m test-stash || fail "oseries fixture: stash push failed"
+oseries_run 0
+[ -d "$OS_DIR" ] && echo "ok: stashed oseries checkout is kept (#2110)" || fail "stashed oseries checkout was deleted (#2110)"
+case "$OUT" in
+  *"keeping"*"stash"*) echo "ok: stash keep names the reason (#2110)" ;;
+  *) fail "stash keep did not name the reason (got: $OUT) (#2110)" ;;
+esac
+# Same, but refs/stash removed with the objects and reflog left behind
+# (an interrupted drop, a partial restore): every other probe reads
+# empty, yet the checkout must still be kept, not deleted.
+oseries_fresh_repo
+echo stashed > "$OS_DIR/stash.txt"
+git -C "$OS_DIR" stash push -q -u -m test-stash || fail "oseries fixture: stash push failed"
+OS_GIT_DIR="$(git -C "$OS_DIR" rev-parse --absolute-git-dir)" || fail "oseries fixture: rev-parse --absolute-git-dir failed"
+rm "$OS_GIT_DIR/refs/stash" || fail "oseries fixture: could not remove refs/stash"
+[ -z "$(git -C "$OS_DIR" stash list 2>/dev/null)" ] || fail "oseries fixture: stash list not empty after refs/stash removal (#2110)"
+oseries_run 0
+[ -d "$OS_DIR" ] && echo "ok: damaged-stash-ref oseries checkout is kept (#2110)" || fail "damaged-stash-ref oseries checkout was deleted (#2110)"
+case "$OUT" in
+  *"keeping"*"stash"*) echo "ok: damaged-stash-ref keep names the stash reason (#2110)" ;;
+  *) fail "damaged-stash-ref keep did not name the stash reason (got: $OUT) (#2110)" ;;
+esac
+# git stash list forced to fail (nonzero): kept as unverifiable.
+oseries_fresh_repo
+oseries_run_stash_fails 0
+[ -d "$OS_DIR" ] && echo "ok: unverifiable-stash oseries checkout is kept (#2110)" || fail "unverifiable-stash oseries checkout was deleted (#2110)"
+case "$OUT" in
+  *"keeping"*"cannot be verified"*) echo "ok: unverifiable-stash keep names the reason (#2110)" ;;
+  *) fail "unverifiable-stash keep did not name the reason (got: $OUT) (#2110)" ;;
+esac
 
 
 [ "$failures" -eq 0 ] || { echo "$failures failure(s)" >&2; exit 1; }

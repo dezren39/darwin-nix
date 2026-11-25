@@ -2537,6 +2537,46 @@ class FileRoutesTest(unittest.TestCase):
             "path": str(aborted), "sha256": abort_sha}), (200, {"ok": True}))
         self.assertFalse(abort_temp.exists())
 
+    def test_restrictive_mode_is_deferred_until_commit(self):
+        # A read-only destination mode must not break the transfer: the
+        # temp stays writable during write and readable for the commit
+        # hash check, and the mode lands on the destination at commit.
+        for mode in (0o444, 0o000):
+            target = self.root / f"restricted-{mode:o}"
+            data = b"secret payload"
+            digest = hashlib.sha256(data).hexdigest()
+            self.assertEqual(self._call("/files/begin", {
+                "path": str(target), "size": len(data), "sha256": digest,
+                "mode": mode}), (200, {"ok": True}))
+            self.assertEqual(self._call("/files/write", {
+                "path": str(target), "sha256": digest, "offset": 0,
+                "data_b64": base64.b64encode(data).decode("ascii")}),
+                (200, {"size": len(data)}))
+            status, body = self._call("/files/commit", {
+                "path": str(target), "sha256": digest})
+            self.assertEqual(status, 200, body)
+            self.assertEqual(body, {"size": len(data), "sha256": digest})
+            self.assertEqual(target.stat().st_mode & 0o7777, mode)
+            target.chmod(0o644)
+            self.assertEqual(target.read_bytes(), data)
+
+    def test_commit_mode_overrides_begin_mode(self):
+        target = self.root / "commit-mode"
+        data = b"mode at commit"
+        digest = hashlib.sha256(data).hexdigest()
+        self.assertEqual(self._call("/files/begin", {
+            "path": str(target), "size": len(data), "sha256": digest,
+            "mode": 0o644}), (200, {"ok": True}))
+        self.assertEqual(self._call("/files/write", {
+            "path": str(target), "sha256": digest, "offset": 0,
+            "data_b64": base64.b64encode(data).decode("ascii")}),
+            (200, {"size": len(data)}))
+        status, body = self._call("/files/commit", {
+            "path": str(target), "sha256": digest, "mode": 0o400})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(target.stat().st_mode & 0o7777, 0o400)
+        target.chmod(0o644)
+
     def test_full_two_mib_chunk_fits_request_limit(self):
         target = self.root / "large.bin"
         data = b"x" * (2 * 1024 * 1024)

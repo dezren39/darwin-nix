@@ -106,6 +106,14 @@ STARTED = time.time()
 JOBS = {}                    # job_id -> dict
 JOBS_LOCK = threading.Lock()
 FILES_LOCK = threading.Lock()
+# temp path -> requested destination mode, recorded at /files/begin and
+# applied only at /files/commit after the hash verifies. The client sends
+# the mode at begin (a resumed transfer re-issues begin, which refreshes
+# the entry); commit may also carry the mode directly, which wins. The
+# temp itself stays owner-readable/writable for the whole transfer so a
+# restrictive destination mode (e.g. 0444) cannot make /files/write or
+# the commit hash check fail with PermissionError.
+FILE_MODES = {}
 
 
 def file_temp_path(path, sha256):
@@ -119,6 +127,15 @@ def file_temp_path(path, sha256):
     if not target.name:
         raise ValueError("path must name a file")
     return target.with_name(f".{target.name}.fleet-part-{sha256[:12]}")
+
+
+def file_mode(body):
+    mode = body.get("mode")
+    if mode is not None and (isinstance(mode, bool)
+                             or not isinstance(mode, int)
+                             or mode < 0 or mode > 0o7777):
+        raise ValueError("mode must be an integer from 0 to 4095")
+    return mode
 
 
 def file_int(body, name, maximum=None):
@@ -999,8 +1016,13 @@ class Handler(BaseHTTPRequestHandler):
             result = {"exists": True, "type": kind,
                       "size": info.st_size, "mtime": int(info.st_mtime)}
             if want_sha and kind == "file":
+                # Metadata and hash must describe the same file: read
+                # both from the opened descriptor, not stat-then-open.
                 digest = hashlib.sha256()
                 with target.open("rb") as f:
+                    info = os.fstat(f.fileno())
+                    result["size"] = info.st_size
+                    result["mtime"] = int(info.st_mtime)
                     for chunk in iter(lambda: f.read(1024 * 1024), b""):
                         digest.update(chunk)
                 result["sha256"] = digest.hexdigest()
@@ -1010,11 +1032,7 @@ class Handler(BaseHTTPRequestHandler):
             file_int(body, "size")
             sha = body.get("sha256")
             temp = file_temp_path(path, sha)
-            mode = body.get("mode")
-            if mode is not None and (isinstance(mode, bool)
-                                     or not isinstance(mode, int)
-                                     or mode < 0 or mode > 0o7777):
-                raise ValueError("mode must be an integer from 0 to 4095")
+            mode = file_mode(body)
             with FILES_LOCK:
                 if temp.is_symlink():
                     raise ValueError("transfer temp must not be a symlink")
@@ -1027,8 +1045,14 @@ class Handler(BaseHTTPRequestHandler):
                     # retry can recover instead of conflicting forever.
                     with temp.open("r+b") as f:
                         f.truncate(0)
+                # Defer the requested destination mode until commit:
+                # chmod'ing the temp now would make a read-only mode
+                # unwritable for /files/write and unreadable for the
+                # commit hash check. Keep the temp owner-only during the
+                # transfer and remember the mode for commit.
+                temp.chmod(0o600)
                 if mode is not None:
-                    temp.chmod(mode)
+                    FILE_MODES[str(temp)] = mode
             return self._send(200, {"ok": True})
 
         if route == "/files/write":
@@ -1066,18 +1090,27 @@ class Handler(BaseHTTPRequestHandler):
         if route == "/files/commit":
             sha = body.get("sha256")
             temp = file_temp_path(path, sha)
+            commit_mode = file_mode(body)
             with FILES_LOCK:
                 if temp.is_symlink() or not temp.is_file():
                     raise ValueError("transfer temp does not exist")
                 digest = hashlib.sha256()
                 with temp.open("rb") as f:
+                    size = os.fstat(f.fileno()).st_size
                     for chunk in iter(lambda: f.read(1024 * 1024), b""):
                         digest.update(chunk)
                 actual = digest.hexdigest()
                 if actual != sha:
                     return self._send(200, {"error": "sha256 mismatch",
                                             "actual": actual})
-                size = temp.stat().st_size
+                # Hash verified: now apply the requested mode (sent at
+                # commit, or recorded at begin) before the atomic rename.
+                mode = commit_mode if commit_mode is not None \
+                    else FILE_MODES.pop(str(temp), None)
+                if commit_mode is not None:
+                    FILE_MODES.pop(str(temp), None)
+                if mode is not None:
+                    temp.chmod(mode)
                 os.replace(temp, target)
                 try:
                     directory_fd = os.open(target.parent or Path("."),
@@ -1094,6 +1127,7 @@ class Handler(BaseHTTPRequestHandler):
             sha = body.get("sha256")
             temp = file_temp_path(path, sha)
             with FILES_LOCK:
+                FILE_MODES.pop(str(temp), None)
                 if temp.is_symlink():
                     temp.unlink()
                 else:
@@ -1105,8 +1139,11 @@ class Handler(BaseHTTPRequestHandler):
             length = file_int(body, "length", maximum=MAX_FILE_CHUNK)
             if target.is_symlink() or not target.is_file():
                 return self._send(200, {"error": "no such file"})
-            info = target.stat()
+            # Open first, then take size/mtime from that descriptor: a
+            # stat-then-open pair can mix one file's metadata with a
+            # concurrently replaced file's bytes.
             with target.open("rb") as f:
+                info = os.fstat(f.fileno())
                 f.seek(offset)
                 data = f.read(length)
             return self._send(200, {"data_b64": base64.b64encode(data).decode("ascii"),

@@ -43,7 +43,7 @@ sounds/                Star Trek notification sounds (opencode-notifier); deploy
                        ~/.config/opencode/sounds by homeUser.nix (#2060)
 themes/ vibrant-ink.json   Active TUI theme
 justfile               Task runner (rebuild, tidy, share, link-git, mcp logins)
-rebuild.sh r / simple-rebuild.sh s / clean(.sh) / path.sh   Rebuild + cleanup scripts
+rebuild.sh r / simple-rebuild.sh s / clean(.sh)   Rebuild + cleanup scripts (each sets its nix PATH inline)
 symlinker.sh           Large bash symlink manager (source for pkgs/symlinker)
 .aerospace.toml        AeroSpace tiling WM config
 mcpx.config.nix        Every MCP server, and how mcpx pools it

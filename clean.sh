@@ -1075,6 +1075,10 @@ brew_cask_drift_check() {
   # default. The extraction must span spaces -- the old [^ ]* class could not
   # match a multi-word bundle name (Visual Studio Code.app), so those casks
   # extracted empty and were silently skipped by the MISSING check (#1902).
+  # The grep is greedy -- .* extends to the LAST .app on the line -- so the
+  # sed below truncates the match at the FIRST .app: a brew info line naming
+  # a second bundle after the path (source and target artifacts) otherwise
+  # extracts a non-path and falsely flags a present cask MISSING (#2190).
   _apps_dir="${CLEAN_APPS_DIR:-/Applications}"
   for _c in $_cask_list; do
     # Per-cask enumeration fails closed (#2066): a failing `brew info
@@ -1092,7 +1096,7 @@ brew_cask_drift_check() {
       continue
     fi
     rm -f "$_brew_info_err"
-    _app=$(printf '%s\n' "$_brew_info_out" | grep -oE "$_apps_dir/.*\.app" | head -1 || true)
+    _app=$(printf '%s\n' "$_brew_info_out" | grep -oE "$_apps_dir/.*\.app" | head -1 | sed 's/\(\.app\).*/\1/' || true)
     [ -n "$_app" ] && [ ! -d "$_app" ] && _dead="$_dead $_c"
   done
   [ -n "$_dead" ] && { warn "casks installed but the app is MISSING from disk:"; printf '     %s\n' $_dead; }

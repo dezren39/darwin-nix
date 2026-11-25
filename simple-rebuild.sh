@@ -223,7 +223,8 @@ flake_registered=()
 stage_flake_inputs() {
   local f dir cand
   local -a cands
-  flake_registered=()
+  # Keep registrations from earlier passes: intent-to-add entries disappear
+  # from `git ls-files --others`, but still need cleanup before commit and exit.
   while IFS= read -r f; do
     [[ -n "$f" ]] || continue
     cands=("$f")
@@ -308,16 +309,24 @@ fi
 # worse than the anonymous 60/hour it replaces). If gh is missing or logged
 # out, the old file is left alone.
 refresh_nix_access_token() {
-  local dir="$HOME/.local/share/nix" tok
+  local dir="$HOME/.local/share/nix" tok tmp
   tok=$(command -v gh >/dev/null && gh auth token 2>/dev/null) || tok=""
   if [[ -z "$tok" ]]; then
     echo "gh token unavailable; leaving Nix access token as is" >&2
     return 0
   fi
   mkdir -p "$dir" && chmod 700 "$dir"
-  ( umask 077
-    print -r -- "access-tokens = github.com=$tok" >"$dir/access-tokens.conf.tmp" &&
-      mv "$dir/access-tokens.conf.tmp" "$dir/access-tokens.conf" )
+  # Per-invocation temp name (#2052): concurrent refreshes must never
+  # share one temp path -- a peer's rename made our mv fail and, under
+  # set -e, aborted the rebuild before building. mktemp owns mode 600,
+  # so the umask 077 effect below is unchanged.
+  tmp="$(mktemp "$dir/.access-tokens.conf.XXXXXX")" || return 1
+  if ! ( umask 077
+    print -r -- "access-tokens = github.com=$tok" >"$tmp" ); then
+    rm -f "$tmp"
+    return 1
+  fi
+  mv "$tmp" "$dir/access-tokens.conf" || { rm -f "$tmp"; return 1; }
   echo "refreshed Nix GitHub access token"
 }
 # Not traced: the token must not reach the `set -x` log.
@@ -372,6 +381,13 @@ phase_build() {
   # script on a nonzero one before the stale-./result message below can
   # tell it apart from this case), then require the same executable
   # phase_activate checks for, before anything is read from ./result.
+  # Clear any ./result from an earlier build first. A zero-exit build that
+  # leaves an old out-link in place (nothing rebuilt, or the link not written)
+  # would otherwise pass the shape check below as a fresh build of that prior
+  # system, and phase_activate could then activate it (#2030). With the link
+  # removed, whatever ./result exists after a zero-exit build was created by
+  # this invocation.
+  rm -f ./result
   local build_status=0
   nix --extra-experimental-features 'nix-command flakes' \
     build ".#darwinConfigurations.$(hostname -s).system" --keep-going --out-link ./result \
@@ -435,7 +451,11 @@ ensure_macfuse() {
 # updated again. A failed upgrade is reported but does not undo the switch.
 brew_upgrade() {
   local brewfile
-  brewfile=$(grep -o '/nix/store/[a-z0-9]*-Brewfile' ./result/activate | head -1)
+  # A missing match is the normal no-Brewfile case, not a failure: under
+  # `set -e` + pipefail the grep pipeline's exit 1 aborted ./s here, before
+  # the skip guard below could return, so a finished switch went unrecorded
+  # (#2031). An unreadable activate file also lands in the skip branch.
+  brewfile=$(grep -o '/nix/store/[a-z0-9]*-Brewfile' ./result/activate | head -1) || true
   if [[ -z "$brewfile" || ! -x /opt/homebrew/bin/brew ]]; then
     echo "skipping brew upgrade: no Brewfile in ./result/activate or no brew" >&2
     return 0

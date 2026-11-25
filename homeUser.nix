@@ -45,6 +45,25 @@ lib.recursiveUpdate {
       '';
       # npm: set global install prefix to a writable user directory
       ".npmrc".text = "prefix=~/.npm-global\n";
+      # opencode-notifier (#2060): the plugin reads
+      # ~/.config/opencode/opencode-notifier.json and plays the sound
+      # paths in it verbatim (no tilde or relative resolution), so the
+      # sounds are deployed beside the config and the deployed file is
+      # generated with this user's home directory completing the
+      # paths. The repo copy (./opencode-notifier.json) names each
+      # event's sound by file name only.
+      ".config/opencode/sounds".source = ./sounds;
+      ".config/opencode/opencode-notifier.json".text =
+        let
+          notifier = builtins.fromJSON (builtins.readFile ./opencode-notifier.json);
+          soundsDir = "${config.home.homeDirectory}/.config/opencode/sounds";
+        in
+        builtins.toJSON (
+          notifier
+          // {
+            sounds = lib.mapAttrs (_event: file: "${soundsDir}/${file}") notifier.sounds;
+          }
+        );
       # Toggle menu bar visibility (bind to skhd shortcut)
       ".local/bin/toggle-menubar".executable = true;
       ".local/bin/toggle-menubar".text = ''

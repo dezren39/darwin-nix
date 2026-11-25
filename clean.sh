@@ -50,6 +50,7 @@ CLEAN_TMPDIR="${CLEAN_TMPDIR:-0}"   # opt-in: wipe /private/var/folders
 VAR_FOLDERS_ROOT="${VAR_FOLDERS_ROOT:-/private/var/folders}" # var-folders root for the --tmpdir sweep AND the opencode scratch tidy/discovery roots below (env seam so tests can point it at a fixture, #1346)
 TIDY_MOVE_FAILURES=0   # incremented by tidy_file_to_bucket/tidy_dir_to_bucket when an archive move fails (#1337)
 BREW_DRIFT_FAILURES=0  # incremented by brew_cask_drift_check when `brew list --cask` fails (#1918)
+MAS_DRIFT_FAILURES=0   # incremented by mas_app_drift_check when `mas list` fails (#2018)
 EXPIRE_REFLOG="${EXPIRE_REFLOG:-0}" # opt-in: force reflog expiry during maintenance
 DOCKER_AGE_DAYS="${DOCKER_AGE_DAYS:-}"  # set = age-scoped docker prune, VM preserved
 PRUNE_UNKNOWN_SCRATCH="${PRUNE_UNKNOWN_SCRATCH:-0}" # opt-in: delete, not just flag, the name-blind catch-all
@@ -1098,12 +1099,34 @@ brew_cask_drift_check() {
   return 0
 }
 brew_cask_drift_check
-if have mas && [ -f "$SELF_DIR/masApps.nix" ]; then
+mas_app_drift_check() {
+  local _mas_err _mas_list _masorph
+  have mas || return 0
+  [ -f "$SELF_DIR/masApps.nix" ] || return 0
+  # Enumerate the installed App Store apps ONCE, with the exit status and
+  # stderr preserved (#2018): this check used to run `as_user mas list`
+  # inside a process substitution with 2>/dev/null, so a present-but-
+  # failing mas (signed out, StoreKit/network failure) silently produced
+  # an empty stream indistinguishable from a successful empty listing and
+  # the run claimed "no orphans". Fail closed like brew_cask_drift_check
+  # (#1918): name the step, surface mas's own stderr, and record the
+  # failure in MAS_DRIFT_FAILURES so the run exits non-zero at the end.
+  _mas_err=$(mktemp)
+  if ! _mas_list=$(as_user mas list 2>"$_mas_err"); then
+    warn "mas list failed -- App Store drift check cannot run; a broken mas is not 'no orphans'"
+    [ -s "$_mas_err" ] && sed 's/^/     /' "$_mas_err" >&2
+    rm -f "$_mas_err"
+    MAS_DRIFT_FAILURES=$((MAS_DRIFT_FAILURES + 1))
+    return 0
+  fi
+  rm -f "$_mas_err"
   _masorph=$(comm -23 \
-    <(as_user mas list 2>/dev/null | awk '{$1=""; sub(/ *\([^)]*\)$/,""); sub(/^ /,""); print}' | sort) \
+    <(printf '%s\n' "$_mas_list" | awk '{$1=""; sub(/ *\([^)]*\)$/,""); sub(/^ /,""); print}' | sort) \
     <(grep -oE '"[^"]+" = [0-9]+' "$SELF_DIR/masApps.nix" | sed -E 's/" = .*//; s/^"//' | sort) 2>/dev/null)
-  [ -n "$_masorph" ] && { warn "App Store apps not in masApps.nix:"; printf '     %s\n' $_masorph; }
-fi
+  [ -n "$_masorph" ] && { warn "App Store apps not in masApps.nix:"; printf '%s\n' "$_masorph" | sed 's/^/     /'; }
+  return 0
+}
+mas_app_drift_check
 
 # --- Other language/tool caches, user + system ------------------------------
 # Present-but-unlisted tools get cleaned; absent ones are informational only.
@@ -1301,7 +1324,7 @@ echo "🧻 logs"
 # is additionally always kept, so `pytest-current` never dangles.
 PYTEST_KEEP_HOURS="${PYTEST_KEEP_HOURS:-4}"
 _pt_removed=0
-for _ptbase in "$CALLER_USER_HOME/.local/share/opencode/tmp" "${TMPDIR:-/tmp}" /tmp /private/var/folders/*/*/T; do
+for _ptbase in "$CALLER_USER_HOME/.local/share/opencode/tmp" "${TMPDIR:-/tmp}" /tmp "$VAR_FOLDERS_ROOT"/*/*/T; do
   [ -d "$_ptbase" ] || continue
   for _ptdir in "$_ptbase"/pytest-of-*; do
     [ -d "$_ptdir" ] || continue
@@ -1391,12 +1414,16 @@ SHORT_SCRATCH_STALE_HOURS="${SHORT_SCRATCH_STALE_HOURS:-8}"
 # adding/removing/renaming entries inside it) is sufficient evidence here.
 # The postgres-cluster sweep below needs the stronger contents-aware check
 # instead, because postgres rewrites existing files without renaming them.
+#
+# Staleness only nominates an entry: before any del, the #1803 open-handle
+# guard must clear it -- a held entry, or one whose handles cannot be
+# verified, is kept (#2035), exactly as in the sibling sweeps.
 _ss_total_removed=0
 sweep_short_lived_scratch() {
-  local base="$1" removed=0
+  local base="$1" removed=0 handles_rc
   [ -d "$base" ] || return 0
-  local -A fresh=()
-  local f entry name g match fresh_list
+  local -a fresh_names=()
+  local f entry name g match fresh_list fresh_name is_fresh
   if ! fresh_list=$(mktemp "${TMPDIR:-/tmp}/clean-short-scratch.XXXXXX"); then
     warn "short-lived scratch ($base): cannot create freshness-scan file; skipping this base"
     return 0
@@ -1407,33 +1434,45 @@ sweep_short_lived_scratch() {
     return 0
   fi
   while IFS= read -r -d '' f; do
-    fresh["${f##*/}"]=1
+    fresh_names+=("${f##*/}")
   done < "$fresh_list"
   rm -f "$fresh_list"
   for entry in "$base"/*; do
     [ -e "$entry" ] || [ -L "$entry" ] || continue
     name="${entry##*/}"
     short_scratch_is_kept "$name" && continue
-    [ -n "${fresh[$name]:-}" ] && continue   # touched inside the window: keep
+    is_fresh=0
+    for fresh_name in "${fresh_names[@]}"; do
+      [ "$fresh_name" = "$name" ] && { is_fresh=1; break; }
+    done
+    [ "$is_fresh" = 1 ] && continue   # touched inside the window: keep
     match=0
     for g in "${SHORT_SCRATCH_GLOBS[@]}"; do
       # shellcheck disable=SC2053
       [[ "$name" == $g ]] && { match=1; break; }
     done
     [ "$match" = 1 ] || continue
+    dir_has_open_handles "$entry"; handles_rc=$?
+    [ "$handles_rc" -eq 0 ] && continue  # something has it open
+    if [ "$handles_rc" -eq 2 ]; then echo "  keeping (cannot verify open handles; lsof unavailable): ${entry/#$CALLER_USER_HOME/\~}"; continue; fi
     del "$entry"; removed=$((removed + 1))
   done
   # Stale uv cache locks: a crashed `uv` leaves one of these behind, which is
   # exactly what makes the `uv cache prune` tier above wait out its own
-  # UV_LOCK_TIMEOUT instead of running.
+  # UV_LOCK_TIMEOUT instead of running. Same open-handle guard as the entries
+  # above (#2035): a lock whose handles are held or cannot be verified is
+  # kept -- deleting a live lock file would let a second uv run concurrently.
   while IFS= read -r lock; do
+    dir_has_open_handles "$lock"; handles_rc=$?
+    [ "$handles_rc" -eq 0 ] && continue  # something has it open
+    if [ "$handles_rc" -eq 2 ]; then echo "  keeping (cannot verify open handles; lsof unavailable): ${lock/#$CALLER_USER_HOME/\~}"; continue; fi
     del "$lock"; removed=$((removed + 1))
   done < <(find "$base" -maxdepth 1 -name 'uv-*.lock' -mmin "+$((SHORT_SCRATCH_STALE_HOURS * 60))" 2>/dev/null)
   _ss_total_removed=$((_ss_total_removed + removed))
   [ "$removed" -gt 0 ] && info "short-lived scratch (${base/#$CALLER_USER_HOME/\~}): removed $removed entries older than ${SHORT_SCRATCH_STALE_HOURS}h"
 }
 sweep_short_lived_scratch "$CALLER_USER_HOME/.local/share/opencode/tmp"
-for _vf_t in /private/var/folders/*/*/T; do
+for _vf_t in "$VAR_FOLDERS_ROOT"/*/*/T; do
   [ -d "$_vf_t" ] || continue
   sweep_short_lived_scratch "$_vf_t"
 done
@@ -1482,7 +1521,7 @@ sweep_ad_hoc_postgres_dirs() {
   done < <(find "$base" -maxdepth 2 -name PG_VERSION -type f 2>/dev/null)
 }
 sweep_ad_hoc_postgres_dirs "$CALLER_USER_HOME/.local/share/opencode/tmp"
-for _vf_t in /private/var/folders/*/*/T; do
+for _vf_t in "$VAR_FOLDERS_ROOT"/*/*/T; do
   [ -d "$_vf_t" ] || continue
   sweep_ad_hoc_postgres_dirs "$_vf_t"
 done
@@ -2226,13 +2265,36 @@ git_metadata_needs_repair() {
 repair_git_ownership() {
   local kind path git_dir pointer caller_uid repaired=0
   caller_uid="$(id -u "$CALLER_USER")"
+  # Scoped cross-user override (dezren39/darwin-nix#2012): the old star
+  # wildcard trusted every path on the machine. The trusted-roots twin
+  # (lib/git-trusted-roots.sh, mirroring gitSettings.nix) covers exactly
+  # the development roots; anything outside them warns and is skipped,
+  # never repaired.
+  GIT_TRUSTED_C_ARGS=()
+  if [ -f "$SELF_DIR/lib/git-trusted-roots.sh" ]; then
+    # shellcheck source=lib/git-trusted-roots.sh
+    . "$SELF_DIR/lib/git-trusted-roots.sh"
+    git_trusted_c_args
+  else
+    warn "trusted-root policy unavailable; skipping Git ownership repair"
+    return 0
+  fi
   while IFS=$'\t' read -r kind path; do
+    pointer=""
     [ -d "$path" ] || continue
+    if ! git_trusted_path "$path"; then
+      warn "outside trusted roots; skipping Git ownership repair: $path"
+      continue
+    fi
     if [ -f "$path/HEAD" ] && [ -d "$path/objects" ] && [ -d "$path/refs" ]; then
       git_dir="$path"
     elif [ -f "$path/.git" ]; then
       pointer="$path/.git"
-      git_dir="$(git -c safe.directory='*' -C "$path" rev-parse --absolute-git-dir 2>/dev/null)"
+      if [ "${#GIT_TRUSTED_C_ARGS[@]}" -gt 0 ]; then
+        git_dir="$(git "${GIT_TRUSTED_C_ARGS[@]}" -C "$path" rev-parse --absolute-git-dir 2>/dev/null)"
+      else
+        git_dir="$(git -C "$path" rev-parse --absolute-git-dir 2>/dev/null)"
+      fi
       [ -n "$git_dir" ] || { warn "could not resolve gitdir for $path"; continue; }
     elif [ -d "$path/.git" ]; then
       git_dir="$path/.git"
@@ -2240,6 +2302,10 @@ repair_git_ownership() {
       continue
     fi
     [ -d "$git_dir" ] || continue
+    if ! git_trusted_path "$git_dir"; then
+      warn "Git metadata outside trusted roots; skipping ownership repair: $git_dir"
+      continue
+    fi
     if { [ -n "${pointer:-}" ] && [ "$(stat -f '%u' "$pointer" 2>/dev/null)" != "$caller_uid" ]; } || git_metadata_needs_repair "$git_dir"; then
       if [ "$DRY_RUN" = "1" ]; then
         echo "  would repair Git ownership: ${git_dir/#$CALLER_USER_HOME/\~}"
@@ -2376,6 +2442,12 @@ fi
 # brew no longer ends at exit 0 looking exactly like "no drift".
 if [ "$BREW_DRIFT_FAILURES" -gt 0 ]; then
   warn "brew cask drift checks: $BREW_DRIFT_FAILURES enumeration failure(s) -- clean.sh exiting non-zero"
+  exit 1
+fi
+
+# A failed App Store enumeration fails the run (#2018), same convention.
+if [ "$MAS_DRIFT_FAILURES" -gt 0 ]; then
+  warn "App Store drift check: $MAS_DRIFT_FAILURES enumeration failure(s) -- clean.sh exiting non-zero"
   exit 1
 fi
 outcome_finish

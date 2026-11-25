@@ -23,6 +23,14 @@ name: flake packages build
 # exclusion above applies only to the x86_64-linux list — the
 # aarch64-darwin mcpx output has no other build owner, so the
 # darwin list is the flake's full aarch64-darwin package set.
+#
+# #1991: cai-claude-apim-proxy is excluded from BOTH lists. Its
+# source input (github:vertexinc/cai-claude-apim-proxy) is behind
+# vertexinc SAML — the tarball 404s and git access 403s from CI —
+# so every cai-claude-apim-proxy job fails on the fetch (flake
+# packages build run 45241870310). The package definition stays in
+# the flake for hosts that can fetch the source; re-add it here
+# once a fetchable source for the pinned rev exists.
 # The runner is macos-15, not macos-14: macos-14 jobs in this repo
 # are cancelled at assignment with no runner ever assigned
 # (flake-checks-build run 43999325716; this workflow's first
@@ -58,19 +66,19 @@ jobs:
 
       - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
 
-      - name: List x86_64-linux packages (mcpx excluded — owned by mcpx-nixbuild)
+      - name: List x86_64-linux packages (mcpx excluded — owned by mcpx-nixbuild; cai-claude-apim-proxy excluded — #1991 unfetchable source)
         id: list
         run: |
           set -euo pipefail
-          packages="$(nix eval --json .#packages.x86_64-linux --apply 'attrs: builtins.filter (name: name != "mcpx") (builtins.attrNames attrs)')"
+          packages="$(nix eval --json .#packages.x86_64-linux --apply 'attrs: builtins.filter (name: name != "mcpx" && name != "cai-claude-apim-proxy") (builtins.attrNames attrs)')"
           printf 'Packages: %s\n' "$packages"
           printf 'packages=%s\n' "$packages" >> "$GITHUB_OUTPUT"
 
-      - name: List aarch64-darwin packages
+      - name: List aarch64-darwin packages (cai-claude-apim-proxy excluded — #1991 unfetchable source)
         id: list-darwin
         run: |
           set -euo pipefail
-          packages="$(nix eval --json .#packages.aarch64-darwin --apply 'attrs: builtins.attrNames attrs')"
+          packages="$(nix eval --json .#packages.aarch64-darwin --apply 'attrs: builtins.filter (name: name != "cai-claude-apim-proxy") (builtins.attrNames attrs)')"
           printf 'Packages: %s\n' "$packages"
           printf 'packages=%s\n' "$packages" >> "$GITHUB_OUTPUT"
 

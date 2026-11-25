@@ -1,0 +1,33 @@
+name: tool pin drift
+
+# Drift gate for the twg-cli and codedb pins (#2039). Both packages ship
+# prebuilt binaries whose version and hashes are pinned in hashes.json,
+# and nothing else noticed when upstream moved on (twg 1.3.5 vs 1.4.6,
+# codedb 0.2.5855 vs 0.2.5864). This weekly run compares each pin with
+# its upstream release and fails visibly when one lags. The check is a
+# plain python3 script; it needs only the network and gh.
+
+"on":
+  schedule:
+    - cron: "37 9 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  tool-pin-drift:
+    name: twg-cli and codedb pin drift
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check twg-cli and codedb pins against upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 pkgs/check-tool-pins.py

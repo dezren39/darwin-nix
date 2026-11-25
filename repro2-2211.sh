@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 # Widened-window repro for darwin-nix#2211. Same fixture shape as
 # opencode-db-backup.test.sh's make_db, except the holder's final
-# transaction is one BEGIN..COMMIT spanning ~75 WAL frames (m2 plus
-# 20000 pad rows), so the commit takes long enough for the readiness
-# poll + kill -9 to land mid-commit. POLL=bytes uses the current
+# transaction is one BEGIN..COMMIT whose data (~9MB of pad rows)
+# exceeds the page cache, so WAL frames spill to the file throughout
+# the transaction while the commit frame lands only at the end: the
+# readiness poll + kill -9 can land mid-transaction. POLL=bytes uses the current
 # fixture's raw-byte grep; POLL=committed polls a real sqlite read.
 # An iteration is "bad" when a post-kill read cannot see m2, i.e. the
 # kill discarded a transaction the poll had already declared ready.
 set -u
 SQLITE3="$(command -v sqlite3)"
 POLL="${POLL:-bytes}"
-ITERS="${ITERS:-30}"
+ITERS="${ITERS:-20}"
 bad=0
 for n in $(seq 1 "$ITERS"); do
   D="$(mktemp -d)"
@@ -27,10 +28,10 @@ for n in $(seq 1 "$ITERS"); do
     "INSERT INTO session VALUES('s3');" \
     "BEGIN;" \
     "INSERT INTO migration VALUES('m2');" \
-    "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x < 20000) INSERT INTO migration SELECT 'pad' || x FROM c;" \
+    "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x < 600000) INSERT INTO migration SELECT 'pad' || x FROM c;" \
     "COMMIT;" >&9
   if [ "$POLL" = committed ]; then
-    for i in $(seq 1 100); do
+    for i in $(seq 1 200); do
       seen="$("$SQLITE3" "$D/opencode.db" "select count(*) from migration where id='m2';" 2>/dev/null)"
       [ "$seen" = "1" ] && break
       sleep 0.05

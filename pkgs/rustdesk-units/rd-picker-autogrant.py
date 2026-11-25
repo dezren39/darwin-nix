@@ -79,11 +79,27 @@ def cursorpos():
         return None
 
 def ydotool(*args):
-    run(["ydotool"] + list(args), timeout=8)
+    """Run one ydotool command; True only when it exits 0.
+
+    A nonzero exit, a timeout, or a spawn failure (e.g. the ydotool
+    device is unavailable) all mean the input was NOT injected (#2177):
+    callers must see that instead of the old fire-and-forget behaviour,
+    where a failed command read the same as a successful one.
+    """
+    try:
+        return run(["ydotool"] + list(args), timeout=8).returncode == 0
+    except Exception:
+        return False
 
 def calibrate():
-    """ydotool absolute moves are scaled (observed x2.45). Measure it."""
-    ydotool("mousemove", "--absolute", "-x", "100", "-y", "100")
+    """ydotool absolute moves are scaled (observed x2.45). Measure it.
+
+    Returns None when the calibration move itself fails: the probe move
+    was never injected, so the scale is unknown and every later click
+    would be a guess.
+    """
+    if not ydotool("mousemove", "--absolute", "-x", "100", "-y", "100"):
+        return None
     time.sleep(0.6)
     pos = cursorpos()
     if not pos or pos[0] == 0:
@@ -91,19 +107,25 @@ def calibrate():
     return pos[0] / 100.0
 
 def click(x, y, scale):
-    ydotool("mousemove", "--absolute", "-x", str(round(x / scale)),
-            "-y", str(round(y / scale)))
+    """Move + click; False on the first failed input operation."""
+    if not ydotool("mousemove", "--absolute", "-x", str(round(x / scale)),
+                   "-y", str(round(y / scale))):
+        return False
     time.sleep(0.7)
-    ydotool("click", "0xC0")
+    if not ydotool("click", "0xC0"):
+        return False
     time.sleep(0.7)
+    return True
 
 # evdev codes: SUPER_L=125; digit keys '1'..'9' = 2..10, '0' = 11
 def goto_ws(n):
+    """Switch workspace via ydotool key; False when the key failed."""
     if n is None or n < 1 or n > 10:
-        return
+        return True
     code = n + 1 if n < 10 else 11
-    ydotool("key", "125:1", f"{code}:1", f"{code}:0", "125:0")
+    ok = ydotool("key", "125:1", f"{code}:1", f"{code}:0", "125:0")
     time.sleep(0.9)
+    return ok
 
 def rustdesk_connected():
     try:
@@ -127,15 +149,26 @@ def grant(picker):
     ws = picker.get("workspace", {}).get("id")
     log(f"picker pid={pid} rect=({x},{y},{w}x{h}) ws={ws} - granting")
     scale = calibrate()
+    if scale is None:
+        log("grant FAILED - ydotool calibration move failed; aborting")
+        return False
     log(f"ydotool scale={scale:.3f}")
     cur = active_ws()
-    if ws and cur and ws != cur:
-        goto_ws(ws)
+    switched = bool(ws and cur and ws != cur)
+    if switched and not goto_ws(ws):
+        log("grant FAILED - ydotool workspace switch failed; aborting")
+        return False
     gone = None
+    input_failed = False
     # candidate (row_rel_y, share_rel_x_from_right) pairs; first that closes wins
     for row_rel, share_off in ((150, 48), (130, 107), (170, 48)):
-        click(x + w // 2, y + row_rel, scale)
-        click(x + w - share_off, y + h - 30, scale)
+        if not click(x + w // 2, y + row_rel, scale) or \
+           not click(x + w - share_off, y + h - 30, scale):
+            # #2177: a failed input operation aborts the attempt. The
+            # picker disappearing on its own afterwards must not turn
+            # clicks that never landed into a "grant OK".
+            input_failed = True
+            break
         time.sleep(1.6)
         gone = picker_gone(pid)
         if gone:
@@ -146,8 +179,11 @@ def grant(picker):
             log("grant UNKNOWN - hyprctl clients query failed; will retry")
         else:
             log("grant FAILED - picker still open after all attempts")
-    if ws and cur and ws != cur:
-        goto_ws(cur)
+    if input_failed:
+        log("grant FAILED - ydotool input command failed; aborting")
+        gone = False
+    if switched and not goto_ws(cur):
+        log("grant WARN - ydotool switch back to workspace failed")
     return gone
 
 def main():

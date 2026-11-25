@@ -2,6 +2,7 @@
 import importlib.util
 import os
 import pathlib
+import subprocess
 import unittest
 from unittest import mock
 
@@ -93,6 +94,105 @@ class MainLoopFetches(unittest.TestCase):
                 rpa.main()
         self.assertEqual(len(sleeps), 3)
         self.assertEqual(len(calls), 3)
+
+
+PICKER_WS2 = dict(PICKER, workspace={"id": 2})
+
+
+def make_run(mode, calls):
+    """A run() stub: hyprctl queries succeed; ydotool fails per mode.
+
+    Modes: "calibrate" (every ydotool call exits 1), "move" (the
+    calibration move succeeds, later mousemoves exit 1), "click"
+    (mousemove ok, click exits 1), "timeout" (click raises
+    TimeoutExpired), "key" (workspace-switch key exits 1), "ok".
+    """
+    moves = {"n": 0}
+
+    def fake_run(cmd, timeout=10):
+        calls.append(list(cmd))
+        if cmd[0] == "hyprctl":
+            if cmd[1] == "clients":
+                return subprocess.CompletedProcess(cmd, 0, stdout="[]")
+            if cmd[1] == "cursorpos":
+                return subprocess.CompletedProcess(cmd, 0, stdout="100, 100")
+            if cmd[1] == "activeworkspace":
+                return subprocess.CompletedProcess(cmd, 0, stdout='{"id": 1}')
+        if cmd[0] == "ydotool":
+            sub = cmd[1]
+            if mode == "calibrate":
+                return subprocess.CompletedProcess(cmd, 1)
+            if sub == "mousemove":
+                moves["n"] += 1
+                if mode == "move" and moves["n"] > 1:
+                    return subprocess.CompletedProcess(cmd, 1)
+            if sub == "click":
+                if mode == "click":
+                    return subprocess.CompletedProcess(cmd, 1)
+                if mode == "timeout":
+                    raise subprocess.TimeoutExpired(cmd, timeout)
+            if sub == "key" and mode == "key":
+                return subprocess.CompletedProcess(cmd, 1)
+            return subprocess.CompletedProcess(cmd, 0)
+        return subprocess.CompletedProcess(cmd, 0)
+
+    return fake_run
+
+
+class FailingYdotool(unittest.TestCase):
+    """#2177: failed ydotool commands must not read as a successful grant."""
+
+    def run_grant(self, mode, picker=PICKER):
+        calls, logged = [], []
+        with mock.patch.object(rpa, "run", side_effect=make_run(mode, calls)), \
+             mock.patch.object(rpa.time, "sleep"), \
+             mock.patch.object(rpa, "log",
+                               side_effect=lambda *a: logged.append(" ".join(map(str, a)))):
+            result = rpa.grant(picker)
+        ydotool_calls = [c for c in calls if c[0] == "ydotool"]
+        return result, ydotool_calls, logged
+
+    def assert_no_grant_ok(self, logged):
+        self.assertFalse(any("grant OK" in line for line in logged))
+
+    def test_calibration_move_failure_aborts(self):
+        result, ydotool_calls, logged = self.run_grant("calibrate")
+        self.assertFalse(result)
+        self.assert_no_grant_ok(logged)
+        self.assertTrue(any("calibration" in line for line in logged))
+        self.assertEqual(len(ydotool_calls), 1)
+
+    def test_failed_mousemove_aborts_before_any_click(self):
+        result, ydotool_calls, logged = self.run_grant("move")
+        self.assertFalse(result)
+        self.assert_no_grant_ok(logged)
+        # calibration move + one failed move; no click, no second candidate
+        self.assertEqual([c[1] for c in ydotool_calls],
+                         ["mousemove", "mousemove"])
+
+    def test_failed_click_aborts_after_first_attempt(self):
+        result, ydotool_calls, logged = self.run_grant("click")
+        self.assertFalse(result)
+        self.assert_no_grant_ok(logged)
+        self.assertEqual([c[1] for c in ydotool_calls].count("click"), 1)
+
+    def test_click_timeout_aborts(self):
+        result, ydotool_calls, logged = self.run_grant("timeout")
+        self.assertFalse(result)
+        self.assert_no_grant_ok(logged)
+        self.assertEqual([c[1] for c in ydotool_calls].count("click"), 1)
+
+    def test_failed_workspace_switch_aborts_before_clicking(self):
+        result, ydotool_calls, logged = self.run_grant("key", PICKER_WS2)
+        self.assertFalse(result)
+        self.assert_no_grant_ok(logged)
+        self.assertTrue(any("workspace switch" in line for line in logged))
+        self.assertNotIn("click", [c[1] for c in ydotool_calls])
+
+    def test_successful_grant_control(self):
+        result, ydotool_calls, logged = self.run_grant("ok")
+        self.assertTrue(result)
+        self.assertTrue(any("grant OK" in line for line in logged))
 
 
 if __name__ == "__main__":

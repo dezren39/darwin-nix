@@ -1,5 +1,10 @@
 Canonical: https://github.com/developing-today/code/blob/main/doc/platform/subagents.md
 
+> **Archived; no longer loaded.** Superseded by `work-strategies.md` (section
+> "Delegation: models, subagents and sessions") and, on the darwin-nix Mac, the
+> `delegate` skill. Kept as a record of the earlier subagent-first guidance; the
+> agent types it lists (`build`, `plan`, the Task tool) predate OpenCode v2.
+
 # Subagent-First Workflow
 
 **Your default approach should be to use subagents.** Delegate work to subagents (Task tool) unless you have a specific reason not to. Subagents run autonomously with their own context windows, enabling parallel execution and keeping the main conversation focused. Reaching for a subagent should be your first instinct — only skip it when the task is truly trivial.
@@ -17,12 +22,12 @@ Canonical: https://github.com/developing-today/code/blob/main/doc/platform/subag
 
 These are the commonly available types — others may be available depending on the session and plugins. Check what's offered before assuming only these exist.
 
-| Type         | Use for                                                                                                                                                                                   |
-| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `explore`      | Fast codebase search: find files by pattern, search code for keywords, answer structural questions. Specify thoroughness: "quick", "medium", or "very thorough".                          |
-| `general`      | General-purpose agent for researching complex questions and executing multi-step tasks in parallel. Can use all tools. Use for implementation, bug fixing, refactoring, running commands. |
-| `build`        | Full development agent with all tools enabled. Use for substantial implementation work, file operations, and system commands.                                                             |
-| `plan`         | Analysis and planning agent. Edits and bash require approval. Use for code review, architecture analysis, and creating plans without accidental changes.                                  |
+| Type      | Use for                                                                                                                                                                                   |
+| --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `explore` | Fast codebase search: find files by pattern, search code for keywords, answer structural questions. Specify thoroughness: "quick", "medium", or "very thorough".                          |
+| `general` | General-purpose agent for researching complex questions and executing multi-step tasks in parallel. Can use all tools. Use for implementation, bug fixing, refactoring, running commands. |
+| `build`   | Full development agent with all tools enabled. Use for substantial implementation work, file operations, and system commands.                                                             |
+| `plan`    | Analysis and planning agent. Edits and bash require approval. Use for code review, architecture analysis, and creating plans without accidental changes.                                  |
 
 <!--
 Disabled agent types — kept for reference / easy re-enable.

@@ -2,6 +2,8 @@
 .vscode
 
 result*
+# Dated skill-evaluation evidence is source, not a Nix result symlink.
+!/.agents/skills/*/evals/results-*.json
 
 *.o
 *.out

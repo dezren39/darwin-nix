@@ -1,0 +1,47 @@
+{
+  "skill": "delegate",
+  "status": "Run with scripts/skill-trigger-eval.mjs (fresh `opencode run` sessions, every tool visible, every call but `skill` refused). Results of each run are in results-<date>-<round>.json beside this file; these measure first-step loading, not task correctness.",
+  "should_load": [
+    "Split this migration across a few agents so it finishes faster.",
+    "Which pool should a quick lookup subagent use?",
+    "Start a separate session for the frontend half of this, with its own branch.",
+    "Run these four research questions in the background while you keep going.",
+    "Can a subagent launch its own subagents here?",
+    "Set up something cheap to keep these four sessions moving and restart any that stall.",
+    "Is summit overkill for this refactor, or should a workhorse do it?",
+    "Fan the review out into a security pass, a performance pass and a readability pass.",
+    "Have a summit lead plan this and hand each area to its own session.",
+    "Use a fast model for the mechanical renames instead of doing them yourself."
+  ],
+  "should_not_load": [
+    {
+      "request": "Change the scout pool so it tries Sonnet first.",
+      "load_instead": "routing-config"
+    },
+    {
+      "request": "How much of my quota did summit use this week?",
+      "load_instead": "routing-usage"
+    },
+    {
+      "request": "Why did the workhorse route fail over three times today?",
+      "load_instead": "routing-review"
+    },
+    {
+      "request": "Merge PR 1690 once All Tests Gate is green.",
+      "load_instead": "the repository's own rules (operations-portal: orchestrate, AGENTS.md)"
+    },
+    {
+      "request": "Tighten this subagent brief so it is self-contained.",
+      "load_instead": "prompt-writer"
+    },
+    {
+      "request": "Make me a worktree for this fix.",
+      "load_instead": "none (worktrees.md instruction)"
+    },
+    {
+      "request": "Write a script that pulls my Jira tickets and Datadog errors together.",
+      "load_instead": "mcpx-scripts"
+    },
+    { "request": "Fix this failing unit test.", "load_instead": "none" }
+  ]
+}

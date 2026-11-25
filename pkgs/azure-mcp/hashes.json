@@ -1,0 +1,7 @@
+{
+  "version": "3.0.0",
+  "hashes": {
+    "aarch64-darwin": "sha512-jdtYy8PsWn7gcbg30B9/J8ALvyPaJAW4RouOSXjrWRM7rOINq9dbWY8Hox+LEioKWVfFenzaB2nKTSZcyn1cAg==",
+    "x86_64-darwin": "sha512-i9F9+Oivhyy6oC5B2TbQvLsg/qnqI2k7//0csvFBNb290O8GKkkVS7MJUuoHMnx1Pa++ytsO1lH6OVfQB5v1wg=="
+  }
+}

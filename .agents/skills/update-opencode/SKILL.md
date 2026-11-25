@@ -32,7 +32,7 @@ openchamber/openchamber       ->  dezren39/openchamber -> developing-today-forks
     `OPENCODE_DB=$HOME/.local/share/opencode/opencode.db` and points `TMPDIR`
     at `~/.local/share/opencode/tmp` (`OPENCODE_TMPDIR` overrides). Never
     weaken the DB pin: every opencode and OpenChamber must open that one
-    database (the user's sessions; ~26 GB). OpenChamber's server hard-codes
+    database (the user's sessions). OpenChamber's server hard-codes
     `~/.local/share/opencode` and also honors `OPENCODE_DB`, which is set the
     same way in `environment.variables`, `launchd.user.envVariables` and
     home-manager `sessionVariables`.
@@ -45,21 +45,25 @@ openchamber/openchamber       ->  dezren39/openchamber -> developing-today-forks
   (`OPENCHAMBER_SERVER_URL`, `OPENCHAMBER_SKIP_LOCAL_SERVER=1`). Read the
   header of `openchamber.nix` before changing any of it.
 
-We may push to `main` of either fork at any time without asking. Prefer small,
-conventional-commit commits; rebase on `origin/main` before pushing. Never
-force-push `main`.
+Publish only when the task authorizes commits and pushes. Prefer small,
+conventional commits in your own worktree; merge `origin/main` if it advanced,
+rather than rebasing away merge resolutions. Verify `git remote get-url origin`
+immediately before every push: all worktrees share the remote. Never force-push.
 
 ## Update procedure
 
-1. Protect current work: `git status --short`. Never revert or commit unrelated
-   changes (the build scripts `git add .`, so mention anything unrelated that
-   would be swept into a build commit).
+1. Protect current work: `git status --short`, `git worktree list` and the
+   remote URL. Use your own worktree off `origin/main`; never revert, stage or
+   commit another session's changes. Stage intended files explicitly. The
+   build scripts no longer use `git add .`; `just build-no-commit` avoids
+   their marker commit too.
 2. Optionally bring upstream into the forks first (each fork has a daily
    upstream-sync workflow; check whether it ran or do the merge yourself):
    - opencode: merge `anomalyco/opencode` `dev` into fork `main`.
    - openchamber: merge `openchamber/openchamber` `main` into fork `main`.
-3. Verify the OpenCode fork builds here: in a clone of developing-today-forks/opencode
-   at the commit you want, `nix build .#opencode -L` (detached, poll the log).
+3. Verify the OpenCode fork builds here: in your worktree of
+   developing-today-forks/opencode at the commit you want,
+   `nix build .#opencode -L` (background command; completion notifies you).
 4. Update OpenChamber's pin and verify it builds against that OpenCode:
    in developing-today-forks/openchamber, `nix flake update opencode`, then
    `nix build .#openchamber .#openchamber-desktop -L`. Commit the lock and push.
@@ -68,8 +72,10 @@ force-push `main`.
    Activation (`just switch`) needs sudo and the user.
 
 Builds are slow (opencode alone is several minutes; node_modules downloads are
-fixed-output). Run them detached (`nohup ... > log 2>&1 &`) and check the log
-every few minutes; never block on one long timeout.
+fixed-output). Use the shell tool's `background: true`, do independent work,
+and read its completion result. Do not start a duplicate, sleep, or poll the
+log. If the harness lacks completion notifications, use its supported wait
+mechanism and record where the build is running.
 
 ## When something breaks: fix it where it lives, then re-pin upward
 
@@ -81,7 +87,8 @@ every few minutes; never block on one long timeout.
   here.
 
 Do not reintroduce a local patch stack here. A temporary
-`--override-input opencode path:/some/checkout` is fine for testing, never as
+`--override-input openchamber/opencode path:/some/checkout` is fine when testing
+this flake's nested OpenCode input, never as
 the committed state.
 
 ## Recurring failure modes
@@ -107,7 +114,7 @@ the committed state.
   before `comm`). Applied-but-unknown ids mean the build is older than the
   database: stop. Pending ones should be additive; read any that `DROP` or
   `UPDATE` existing tables. Take an APFS-clone backup first (`just
-  opencode-db-backup`).
+opencode-db-backup`).
 - **Unrelated sidepulse lock drift**: an unrestricted `nix flake update` moves
   `sidepulse-src`; its patch stack lives in `pkgs/sidepulse` (zero-fuzz GNU
   patch; see that package's comments).

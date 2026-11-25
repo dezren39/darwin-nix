@@ -404,6 +404,11 @@ rec {
         laptop-agent = pkgs.callPackage ./pkgs/laptop-agent/package.nix { };
         # mcp-remote and chrome-devtools-mcp, which mcpx.config.nix runs.
         npm-mcp-servers = pkgs.callPackage ./pkgs/npm-mcp-servers { };
+        # `record` (instructions/recordings.md), from the developing-today/code
+        # tree the opencode fork pins for mcpx; see pkgs/record.
+        record = pkgs.callPackage ./pkgs/record/package.nix {
+          src = inputs.openchamber.inputs.opencode.inputs.mcpx-src;
+        };
         cai-claude-apim-proxy = pkgs.callPackage ./pkgs/cai-claude-apim-proxy {
           src = inputs.cai-claude-apim-proxy-src;
         };
@@ -416,6 +421,10 @@ rec {
         };
       })
       // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin (rec {
+        # Prebuilt MCP servers for the Azure and Kubernetes namespaces in
+        # mcpx.config.nix. Darwin only: they are Mac release binaries.
+        azure-mcp = pkgs.callPackage ./pkgs/azure-mcp/package.nix { };
+        kubernetes-mcp-server = pkgs.callPackage ./pkgs/kubernetes-mcp-server/package.nix { };
         sidepulse-unwrapped = pkgs.callPackage ./pkgs/sidepulse {
           sidepulseSrc = inputs.sidepulse-src;
         };
@@ -1685,6 +1694,23 @@ rec {
         # their suites moved with them.
       }
       // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
+        # Protocol/artifact oracles, not text snapshots: the built servers
+        # must initialize, Kubernetes must expose reads but no writes, and
+        # its Secret denial must stop a request reaching a fake local API.
+        # No Azure credentials, real kubeconfig or cloud API is used.
+        agent-tooling =
+          let
+            packages = mkPackages pkgs;
+          in
+          pkgs.runCommandLocal "agent-tooling-smoke" { nativeBuildInputs = [ pkgs.python3 ]; } ''
+            export HOME="$TMPDIR/home"
+            mkdir -p "$HOME"
+            python3 -I ${./scripts/agent-tooling-smoke.py} \
+              --record ${packages.record} \
+              --azure ${packages.azure-mcp} \
+              --kubernetes ${packages.kubernetes-mcp-server}
+            touch "$out"
+          '';
         # #1768: build the Lisp dependencies and run upstream's --help install check.
         mac-app-util =
           assert pkgs.lib.assertMsg (pkgs.lib.versionAtLeast

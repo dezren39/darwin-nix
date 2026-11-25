@@ -1,0 +1,272 @@
+{
+  "skill": "delegate",
+  "model": "github-copilot/claude-opus-5.5",
+  "trials": 3,
+  "ranAt": "2026-11-25T00:33:18.541Z",
+  "expectedOf": {
+    "hits": 30,
+    "total": 54
+  },
+  "rows": [
+    {
+      "expect": "load",
+      "request": "Split this migration across a few agents so it finishes faster.",
+      "loaded": "2/3",
+      "flagged": true,
+      "failedTrials": 0,
+      "otherSkillsLoaded": [],
+      "sessions": [
+        "ses_e5defe242e6ffe0c2ScKWJzGKN",
+        "ses_e5defe242e6ffdzb3B5zCBzS7m",
+        "ses_e5defe242e6ffclpFk2dhoM3op"
+      ],
+      "errors": []
+    },
+    {
+      "expect": "load",
+      "request": "Which pool should a quick lookup subagent use?",
+      "loaded": "0/3",
+      "flagged": true,
+      "failedTrials": 0,
+      "otherSkillsLoaded": [],
+      "sessions": [
+        "ses_e5defe242e5ffe4F6QNz8tC6c9",
+        "ses_e5defe229daffey7QnmzChWGS2",
+        "ses_e5defe225a4ffe0mUZLOk1Gjjw"
+      ],
+      "errors": []
+    },
+    {
+      "expect": "load",
+      "request": "Start a separate session for the frontend half of this, with its own branch.",
+      "loaded": "1/3",
+      "flagged": true,
+      "failedTrials": 0,
+      "otherSkillsLoaded": [],
+      "sessions": [
+        "ses_e5defe22328ffePIpZnXs4jqvK",
+        "ses_e5defe2226cffeKPAP28egQiB6",
+        "ses_e5defe21897ffeA5amN3CQD42a"
+      ],
+      "errors": []
+    },
+    {
+      "expect": "load",
+      "request": "Run these four research questions in the background while you keep going.",
+      "loaded": "0/3",
+      "flagged": true,
+      "failedTrials": 0,
+      "otherSkillsLoaded": [],
+      "sessions": [
+        "ses_e5defe20f38ffefTAlrWq5Ywd1",
+        "ses_e5defe20cc4ffeq3z5BNmMNd7L",
+        "ses_e5defe210ceffeAeKsdi7N3lMk"
+      ],
+      "errors": []
+    },
+    {
+      "expect": "load",
+      "request": "Can a subagent launch its own subagents here?",
+      "loaded": "0/3",
+      "flagged": true,
+      "failedTrials": 0,
+      "otherSkillsLoaded": [],
+      "sessions": [
+        "ses_e5defe20965ffeEOoEcn8ZEPNK",
+        "ses_e5defe206cbffej4OT83mnGcUj",
+        "ses_e5defe2052affeuY0X4bY8RhKS"
+      ],
+      "errors": []
+    },
+    {
+      "expect": "load",
+      "request": "Set up something cheap to keep these four sessions moving and restart any that stall.",
+      "loaded": "3/3",
+      "flagged": false,
+      "failedTrials": 0,
+      "otherSkillsLoaded": [],
+      "sessions": [
+        "ses_e5defe1fb8affeuxcFgShE5beh",
+        "ses_e5defe1f14fffeq2AdWJYBxbf7",
+        "ses_e5defe1f334ffekfpQpETgdaul"
+      ],
+      "errors": []
+    },
+    {
+      "expect": "load",
+      "request": "Is summit overkill for this refactor, or should a workhorse do it?",
+      "loaded": "0/3",
+      "flagged": true,
+      "failedTrials": 0,
+      "otherSkillsLoaded": [],
+      "sessions": [
+        "ses_e5defe1ef7fffeyXEGJ3SDDDBN",
+        "ses_e5defe1e8d7ffej0PZ9NSSnYP3",
+        "ses_e5defe1d24bffe42y59tMBJ773"
+      ],
+      "errors": []
+    },
+    {
+      "expect": "load",
+      "request": "Fan the review out into a security pass, a performance pass and a readability pass.",
+      "loaded": "0/3",
+      "flagged": true,
+      "failedTrials": 0,
+      "otherSkillsLoaded": [],
+      "sessions": [
+        "ses_e5defe1d1f5ffeHkUDB8d3RMNI",
+        "ses_e5defe1d1f4ffekhoYZDndBmIm",
+        "ses_e5defe1c995ffe3sH015sgvduP"
+      ],
+      "errors": []
+    },
+    {
+      "expect": "load",
+      "request": "Have a summit lead plan this and hand each area to its own session.",
+      "loaded": "0/3",
+      "flagged": true,
+      "failedTrials": 0,
+      "otherSkillsLoaded": [],
+      "sessions": [
+        "ses_e5defe1c17affeM7XEUkX9mQ0u",
+        "ses_e5defe1b03cffeu04uvabzA7pG",
+        "ses_e5defe1b75cffe7LBJA0irqbjN"
+      ],
+      "errors": []
+    },
+    {
+      "expect": "load",
+      "request": "Use a fast model for the mechanical renames instead of doing them yourself.",
+      "loaded": "0/3",
+      "flagged": true,
+      "failedTrials": 0,
+      "otherSkillsLoaded": [],
+      "sessions": [
+        "ses_e5defe1aed1ffeqwHbxbGE3s2I",
+        "ses_e5defe1a036ffeL4e78NlojilO",
+        "ses_e5defe19d27ffesFZ3HmbguKjq"
+      ],
+      "errors": []
+    },
+    {
+      "expect": "not load",
+      "request": "Change the scout pool so it tries Sonnet first.",
+      "loaded": "0/3",
+      "flagged": false,
+      "failedTrials": 0,
+      "otherSkillsLoaded": ["routing-config"],
+      "loadInstead": "routing-config",
+      "sessions": [
+        "ses_e5defe19b2dffeUwB5deJFmBUp",
+        "ses_e5defe19c48ffenLBqDF55sPSW",
+        "ses_e5defe18d10ffekfBbv0Xq4BmY"
+      ],
+      "errors": []
+    },
+    {
+      "expect": "not load",
+      "request": "How much of my quota did summit use this week?",
+      "loaded": "0/3",
+      "flagged": false,
+      "failedTrials": 0,
+      "otherSkillsLoaded": [],
+      "loadInstead": "routing-usage",
+      "sessions": [
+        "ses_e5defe186e4ffe147Aq4ybxdj9",
+        "ses_e5defe180e6ffeQbZxveTuh61N",
+        "ses_e5defe17c2bffebEVYyGI80H1n"
+      ],
+      "errors": []
+    },
+    {
+      "expect": "not load",
+      "request": "Why did the workhorse route fail over three times today?",
+      "loaded": "0/3",
+      "flagged": false,
+      "failedTrials": 0,
+      "otherSkillsLoaded": [],
+      "loadInstead": "routing-review",
+      "sessions": [
+        "ses_e5defe178c6ffeYyb0A2ZQyzwb",
+        "ses_e5defe16f4effezMn9fOCAy2QN",
+        "ses_e5defe15db8ffe2r5K10jkbtdp"
+      ],
+      "errors": []
+    },
+    {
+      "expect": "not load",
+      "request": "Merge PR 1690 once All Tests Gate is green.",
+      "loaded": "0/3",
+      "flagged": false,
+      "failedTrials": 0,
+      "otherSkillsLoaded": [],
+      "loadInstead": "the repository's own rules (operations-portal: orchestrate, AGENTS.md)",
+      "sessions": [
+        "ses_e5defe15c19ffegpnMC8efMiub",
+        "ses_e5defe15ae3ffedKWucDZVKcF5",
+        "ses_e5defe155dbffeHu7SKvekGNNL"
+      ],
+      "errors": []
+    },
+    {
+      "expect": "not load",
+      "request": "Tighten this subagent brief so it is self-contained.",
+      "loaded": "0/3",
+      "flagged": false,
+      "failedTrials": 0,
+      "otherSkillsLoaded": [],
+      "loadInstead": "prompt-writer",
+      "sessions": [
+        "ses_e5defe14370ffeI6NT7h1iMCQL",
+        "ses_e5defe13ba4ffeI6RhyUdpZxCm",
+        "ses_e5defe144daffeanvdaLmwsdTD"
+      ],
+      "errors": []
+    },
+    {
+      "expect": "not load",
+      "request": "Make me a worktree for this fix.",
+      "loaded": "0/3",
+      "flagged": false,
+      "failedTrials": 0,
+      "otherSkillsLoaded": [],
+      "loadInstead": "none (worktrees.md instruction)",
+      "sessions": [
+        "ses_e5defe13afeffehZw2soWfadN6",
+        "ses_e5defe12de2ffe0hERykhJw9pX",
+        "ses_e5defe1343fffeRwt2fX0HLk0a"
+      ],
+      "errors": []
+    },
+    {
+      "expect": "not load",
+      "request": "Write a script that pulls my Jira tickets and Datadog errors together.",
+      "loaded": "0/3",
+      "flagged": false,
+      "failedTrials": 0,
+      "otherSkillsLoaded": ["mcpx-scripts"],
+      "loadInstead": "mcpx-scripts",
+      "sessions": [
+        "ses_e5defe12b8effeZbrmOYaU0IJ3",
+        "ses_e5defe1290bfferHxteY40TocA",
+        "ses_e5defe11bd8ffeeZs64JaWdjBI"
+      ],
+      "errors": []
+    },
+    {
+      "expect": "not load",
+      "request": "Fix this failing unit test.",
+      "loaded": "0/3",
+      "flagged": false,
+      "failedTrials": 0,
+      "otherSkillsLoaded": [],
+      "loadInstead": "none",
+      "sessions": [
+        "ses_e5defe11795ffeklJt826SWb9N",
+        "ses_e5defe11657ffeIoIDZs0JRH4G",
+        "ses_e5defe113b5ffenm7jb47lDFEr"
+      ],
+      "errors": []
+    }
+  ]
+}

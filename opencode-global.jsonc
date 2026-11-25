@@ -1,165 +1,261 @@
 {
-  // OpenCode v2 config (developing-today-forks/opencode). Native v2 keys only: v1's
-  // `agent`, `permission`, `plugin`, `autoupdate`, `small_model` and
-  // `compaction.reserved` are gone or renamed, and v2 no longer reads
-  // tui.jsonc (terminal UI settings live in ~/.config/opencode/cli.json).
+  // OpenCode v2 config (developing-today-forks/opencode), v2-native keys only:
+  // v1's `agent`, `permission`, `plugin`, `autoupdate` and `compaction.reserved`
+  // are `agents`, `permissions`, `plugins`, `update` and `compaction.buffer` here,
+  // and v2 reads terminal settings from ~/.config/opencode/cli.json, not tui.jsonc.
+  //
+  // This file mirrors the live config, ~/.opencode/opencode.jsonc (reached as
+  // ~/.config/opencode/opencode.jsonc), which OpenChamber edits and which is
+  // not linked to this file (ARCHITECTURE.md section 5); `just
+  // opencode-config-link` would make this file the live one. The routing
+  // below (the default model and agent, every route and pool, the hidden
+  // routes, subagent_depth and tuning) is copied from the live file, comments
+  // and all; it was last copied on 2026-11-24. Check that it still matches:
+  //   node .agents/skills/delegate/scripts/pools.mjs --diff opencode-global.jsonc
+  //
+  // The live file's own header, kept verbatim:
+  // Copilot-machine pools — built 2026-11-16 from AA Intelligence Index v5.1
+  // (score + time/task only; cost ignored). Each pool leg below is annotated
+  // "AA <score> @ <minutes> min" from that index.
+  // Gemini 4 Hydrogen: every route, hidden entry and pool leg for it is kept
+  // below but commented out; uncomment those lines to re-enable it.
+  // Models blocked for this use case, or leaving Copilot, are deliberately
+  // absent.
+  //
+  // HOW THE FORCING WORKS (verified in the fork, model-governance.ts /
+  // model-resolver.ts): a target's own #variant pin beats the variant the pool
+  // was called with, at every called effort including no-effort calls. A pool
+  // whose targets are all pinned offers no levels of its own, so callers cannot
+  // pick an effort for it — every call runs exactly the list below. No remap
+  // tables are needed, and remapping to "" would not do this (that value does
+  // not exist; a remap value is a variant id, or false to sit a level out).
+  //
+  // A pinned variant the model does not offer silently drops that leg from the
+  // pool (config/plugin/model-routes.ts), so check the model's variants before
+  // changing a pin. Model ids are the github-copilot catalog ids — verify on
+  // this machine with: opencode models | grep github-copilot
+
   "$schema": "https://opencode.ai/config.json",
   "update": "disable",
   "warming": true,
   "compaction": { "buffer": 8192 },
+  "websearch": { "provider": "random" },
 
-  // Every model below is a pool (experimental.model_routes), shown in pickers
-  // as opencode-route/<id>. Only github-copilot is configured today; adding a
-  // provider (e.g. anthropic) later means adding targets, not rewiring agents.
-  "model": "opencode-route/fast-strong",
+  "model": "github-copilot/claude-opus-5.5",
   "default_agent": "build",
-
+  // No agent pins a model, so a subagent runs its parent's model unless its
+  // launch names one (instructions/work-strategies.md, the delegate skill).
+  // The capability subagents this file used to define (deep, balanced,
+  // quick) pointed at pools the live config no longer has.
   "agents": {
-    // build: the one primary agent.
-    "build": { "model": "opencode-route/fast-strong" },
-    // Built-in subagents, re-pointed at pools.
-    "general": { "model": "opencode-route/fast-strong" },
-    "explore": { "model": "opencode-route/very-fast" },
-    // Extra subagents, one per capability pool, so the build agent can pick a
-    // speed/strength trade-off per task.
-    "deep": {
-      "mode": "subagent",
-      "model": "opencode-route/frontier",
-      "description": "Slowest, strongest models (Opus/Sonnet 5.5 at max and xhigh, GPT-6.1 Sol xhigh). Use for hard design, debugging or review problems where quality matters more than minutes. Expect long runs."
-    },
-    "balanced": {
-      "mode": "subagent",
-      "model": "opencode-route/balanced",
-      "description": "Mid-speed, mid-strength general-purpose agent (Sonnet 5.5 medium, Opus 5.5 low, GPT-6.1 Sol low, Terra high). Use for routine multi-step implementation where fast-strong would be overkill."
-    },
-    "quick": {
-      "mode": "subagent",
-      "model": "opencode-route/very-fast",
-      "description": "Fastest general-purpose agent with full tools (Luna low/medium, Terra low, Sonnet 5.5 low, Haiku). Use for small, well-specified edits and mechanical batch work."
-    },
-    // Hidden helpers. title is left unset on purpose: with no model, the
-    // Copilot provider names sessions with GitHub's free utility model.
-    "compaction": { "model": "opencode-route/balanced" },
-    "summary": { "model": "opencode-route/very-fast" },
     "plan": { "disabled": true }
   },
 
+  // hidden = absent from the picker, but still routable and directly
+  // resolvable (fork #230; the model-routes plugin applies these overrides
+  // to route models). Do NOT use "disabled" here — that would remove the
+  // routes from the pools too. The seven pools stay visible/selectable.
+  // Needs opencode with developing-today/opencode 118d889 (#1547); older
+  // builds (f9aa962) skipped building every route when this block existed.
+  // The key is v2's "providers", not v1's "provider": the v1 migration
+  // (core/src/v1/config/migrate.ts) drops "hidden" and "disabled", so under
+  // "provider" every entry loaded as {} and nothing was hidden.
+  "providers": {
+    "opencode-route": {
+      "models": {
+        "luna":     { "hidden": true },
+        "terra":    { "hidden": true },
+        "sol":      { "hidden": true },
+        "haiku":    { "hidden": true },
+        "sonnet":   { "hidden": true },
+        "opus":     { "hidden": true },
+        // "hydrogen": { "hidden": true },
+        "carbon":   { "hidden": true },
+        "mai":      { "hidden": true }
+      }
+    }
+  },
+
+  // v2 reads the depth limit only from experimental.subagent_depth; a
+  // top-level subagent_depth is dropped with a diagnostic and the limit
+  // silently falls back to 1 (core/src/tool/plugin/subagent.ts).
   "experimental": {
     "subagent_depth": 10,
-
-    // Two kinds of pools.
-    //
-    // Capability pools (round-robin, sticky per session, fail over in order):
-    // grouped by Artificial Analysis Intelligence Index, Coding Agent Index and
-    // their task times (2026-10):
-    //   Sonnet 5.5 max 0.684 / 5245s   Opus 5.5 max 0.660 / 3867s
-    //   GPT-6.1 Sol xhigh 0.629 / 931s  Sol medium 0.614 / 651s  Sol low 0.572
-    //   Sonnet 5.5 high 0.550 / 735s    Sonnet 5.5 medium 0.459 / 510s
-    //   GPT-6 Luna max 0.411; Intelligence Index: Opus 5.5 max 58, Opus 5.5
-    //   medium 51 (~200s/task), GPT-6 Sol high 42 (~100s), GPT-6 Luna high 33.
-    // Family pools (fixed order, newest first, the previous generation as
-    // failover): pick the effort as the variant, e.g. opencode-route/sonnet#high.
-    //
-    // firstTokenTimeoutMs defaults to 10s, which reasoning-heavy variants
-    // routinely exceed before their first output token (AA measures minutes
-    // for max effort), so it is raised or disabled per pool.
     "model_routes": {
-      "frontier": {
-        "name": "Frontier (strongest, slow)",
-        "autonomy": "rules",
-        "selection": "round-robin",
-        "health": { "firstTokenTimeoutMs": false },
-        "targets": [
-          "github-copilot/claude-opus-5.5#max",
-          "github-copilot/claude-sonnet-5.5#max",
-          "github-copilot/claude-opus-5.5#xhigh",
-          "github-copilot/claude-sonnet-5.5#xhigh",
-          "github-copilot/gpt-6.1-sol#xhigh"
-        ]
-      },
-      "fast-strong": {
-        "name": "Fast and strong",
-        "autonomy": "rules",
-        "selection": "round-robin",
-        "health": { "firstTokenTimeoutMs": 180000 },
-        "targets": [
-          "github-copilot/gpt-6.1-sol#medium",
-          "github-copilot/gpt-6.1-sol#high",
-          "github-copilot/claude-sonnet-5.5#high",
-          "github-copilot/claude-opus-5.5#medium",
-          "github-copilot/gpt-6.1-sol#xhigh"
-        ]
-      },
-      "balanced": {
-        "name": "Balanced (medium speed)",
-        "autonomy": "rules",
-        "selection": "round-robin",
-        "health": { "firstTokenTimeoutMs": 120000 },
-        "targets": [
-          "github-copilot/claude-sonnet-5.5#medium",
-          "github-copilot/gpt-6.1-sol#low",
-          "github-copilot/claude-opus-5.5#low",
-          "github-copilot/gpt-5.6-terra#high",
-          "github-copilot/gpt-6-sol#medium"
-        ]
-      },
-      "very-fast": {
-        "name": "Very fast",
-        "autonomy": "rules",
-        "selection": "round-robin",
-        "health": { "firstTokenTimeoutMs": 60000 },
-        "targets": [
-          "github-copilot/gpt-6-luna#low",
-          "github-copilot/gpt-6-luna#medium",
-          "github-copilot/gpt-5.6-terra#low",
-          "github-copilot/claude-sonnet-5.5#low",
-          "github-copilot/gpt-6.1-sol#none",
-          "github-copilot/claude-haiku-4.5#high"
-        ]
-      },
-
-      "opus": {
-        "name": "Claude Opus",
-        "autonomy": "fixed",
-        "health": { "firstTokenTimeoutMs": false },
-        "targets": [
-          { "model": "github-copilot/claude-opus-5.5", "defaultVariant": "medium" },
-          { "model": "github-copilot/claude-opus-5", "defaultVariant": "medium" }
-        ]
-      },
-      "sonnet": {
-        "name": "Claude Sonnet",
-        "autonomy": "fixed",
-        "health": { "firstTokenTimeoutMs": false },
-        "targets": [
-          { "model": "github-copilot/claude-sonnet-5.5", "defaultVariant": "medium" },
-          { "model": "github-copilot/claude-sonnet-5", "defaultVariant": "medium" }
-        ]
-      },
-      "sol": {
-        "name": "GPT Sol",
-        "autonomy": "fixed",
-        "health": { "firstTokenTimeoutMs": false },
-        "targets": [
-          { "model": "github-copilot/gpt-6.1-sol", "defaultVariant": "medium" },
-          { "model": "github-copilot/gpt-6-sol", "defaultVariant": "medium" }
-        ]
-      },
+      // ---- per-model routes: one Copilot leaf each, no -plan suffix ----
       "luna": {
-        "name": "GPT Luna",
-        "autonomy": "fixed",
-        "health": { "firstTokenTimeoutMs": false },
-        "targets": [
-          { "model": "github-copilot/gpt-6-luna", "defaultVariant": "medium" },
-          { "model": "github-copilot/gpt-5.6-luna", "defaultVariant": "medium" }
-        ]
+        "name": "GPT-6 Luna (Copilot)",
+        "targets": ["github-copilot/gpt-6-luna"],
+        "selection": "ordered",
+        "autonomy": "rules",
+        "health": {
+          "firstTokenTimeoutMs": 60000
+        }
       },
       "terra": {
-        "name": "GPT Terra",
-        "autonomy": "fixed",
-        "health": { "firstTokenTimeoutMs": false },
-        "targets": [{ "model": "github-copilot/gpt-5.6-terra", "defaultVariant": "medium" }]
+        "name": "GPT-6.1 Terra (Copilot)",
+        "targets": ["github-copilot/gpt-6.1-terra"],
+        "selection": "ordered",
+        "autonomy": "rules",
+        "health": {
+          "firstTokenTimeoutMs": 60000
+        }
+      },
+      "sol": {
+        "name": "GPT-6.1 Sol (Copilot)",
+        "targets": ["github-copilot/gpt-6.1-sol"],
+        "selection": "ordered",
+        "autonomy": "rules",
+        "health": {
+          "firstTokenTimeoutMs": 60000
+        }
+      },
+      "haiku": {
+        "name": "Claude Haiku 5.5 (Copilot)",
+        "targets": ["github-copilot/claude-haiku-5.5"],
+        "selection": "ordered",
+        "autonomy": "rules",
+        "health": {
+          "firstTokenTimeoutMs": 60000
+        }
+      },
+      "sonnet": {
+        "name": "Claude Sonnet 5.5 (Copilot)",
+        "targets": ["github-copilot/claude-sonnet-5.5"],
+        "selection": "ordered",
+        "autonomy": "rules",
+        "health": {
+          "firstTokenTimeoutMs": 60000
+        }
+      },
+      "opus": {
+        "name": "Claude Opus 5.5 (Copilot)",
+        "targets": ["github-copilot/claude-opus-5.5"],
+        "selection": "ordered",
+        "autonomy": "rules",
+        "health": {
+          "firstTokenTimeoutMs": false
+        }
+      },
+      // "hydrogen": {
+      //   "name": "Gemini 4 Hydrogen (Copilot)",
+      //   "targets": ["github-copilot/gemini-4-hydrogen"],
+      //   "selection": "ordered",
+      //   "autonomy": "rules"
+      // },
+      "carbon": {
+        "name": "Gemini 4 Carbon (Copilot)",
+        "targets": ["github-copilot/gemini-4-carbon"],
+        "selection": "ordered",
+        "autonomy": "rules",
+        "health": {
+          "firstTokenTimeoutMs": false
+        }
+      },
+      "mai": {
+        "name": "MAI-Code-1.1-Flash (Copilot, unmeasured on AA)",
+        "targets": ["github-copilot/mai-code-1.1-flash"],
+        "selection": "ordered",
+        "autonomy": "rules",
+        "health": {
+          "firstTokenTimeoutMs": 60000
+        }
+      },
+
+      // ---- the seven pools: ordered, every leg pinned ----
+      // Legs are tried top to bottom; the next leg is used only on failover.
+      // A trailing comma before a commented Hydrogen leg is deliberate (JSONC
+      // allows it) so that leg can be uncommented as-is.
+      // "autonomy": "agent" keeps the ordered selection (it includes "rules")
+      // and keeps route_stats / route_adjust available to the agent; those
+      // tools disappear when no route is at "agent" (model-route-autonomy.ts).
+      "small": {
+        "targets": [
+          "opencode-route/sol#low",          // AA 34.8 @ 1.9 min
+          // "opencode-route/hydrogen#low",  // AA 26.9 @ 1.4 min
+          "opencode-route/haiku#medium"      // AA 24.6 @ 4.0 min
+        ],
+        "selection": "ordered",
+        "autonomy": "agent",
+        "health": {
+          "firstTokenTimeoutMs": 60000
+        }
+      },
+      "speed": {
+        "targets": [
+          "opencode-route/terra#medium",        // AA 38.2 @ 2.8 min
+          // "opencode-route/hydrogen#medium",  // AA 41.2 @ 3.8 min
+          "opencode-route/opus#low"             // AA 34.8 @ 3.0 min
+        ],
+        "selection": "ordered",
+        "autonomy": "agent",
+        "health": {
+          "firstTokenTimeoutMs": 60000
+        }
+      },
+      "scout": {
+        "targets": [
+          "opencode-route/sol#medium",          // AA 46.4 @ 4.3 min
+          // "opencode-route/hydrogen#medium",  // AA 41.2 @ 3.8 min
+          "opencode-route/opus#low"             // AA 34.8 @ 3.0 min
+        ],
+        "selection": "ordered",
+        "autonomy": "agent",
+        "health": {
+          "firstTokenTimeoutMs": 60000
+        }
+      },
+      "workhorse": {
+        "targets": [
+          "opencode-route/opus#medium",       // AA 48.2 @ 6.9 min
+          "opencode-route/sol#high",          // AA 50.3 @ 7.6 min
+          // "opencode-route/hydrogen#high",  // AA 50.8 @ 8.4 min
+        ],
+        "selection": "ordered",
+        "autonomy": "agent",
+        "health": {
+          "firstTokenTimeoutMs": 62000
+        }
+      },
+      "specialist": {
+        "targets": [
+          "opencode-route/sol#xhigh",         // AA 52.5 @ 9.9 min
+          "opencode-route/opus#xhigh",        // AA 57.4 @ 15.7 min
+          // "opencode-route/hydrogen#xhigh", // AA 53.9 @ 14.8 min
+        ],
+        "selection": "ordered",
+        "autonomy": "agent",
+        "health": {
+          "firstTokenTimeoutMs": 60000
+        }
+      },
+      "summit": {
+        "targets": [
+          "opencode-route/carbon#high",       // AA 60.0 @ 32.1 min
+          "opencode-route/opus#max",          // AA 59.1 @ 24.9 min
+          "opencode-route/sol#max"            // AA 54.6 @ 22.9 min
+        ],
+        "selection": "ordered",
+        "autonomy": "agent",
+        "health": {
+          "firstTokenTimeoutMs": false
+        }
+      },
+      "background": {
+        "targets": [
+          "opencode-route/carbon#medium",     // AA 58.3 @ 28.4 min
+          "opencode-route/sol#max",           // AA 54.6 @ 22.9 min
+          "opencode-route/sonnet#max"         // AA 54.5 @ 31.4 min
+        ],
+        "selection": "ordered",
+        "autonomy": "agent",
+        "health": {
+          "firstTokenTimeoutMs": 60000
+        }
       }
+    },
+    "model_route_tuning": {
+      "enabled": true
     }
   },
 

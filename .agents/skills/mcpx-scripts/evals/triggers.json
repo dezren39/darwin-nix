@@ -1,0 +1,51 @@
+{
+  "skill": "mcpx-scripts",
+  "status": "Run with scripts/skill-trigger-eval.mjs (fresh `opencode run` sessions, every tool visible, every call but `skill` refused). Results of each run are in results-<date>-<round>.json beside this file; these measure first-step loading, not task correctness.",
+  "should_load": [
+    "Pull my in-progress Jira tickets and ops-portal's Datadog errors in one go.",
+    "Write a script that lists open PRs and which checks are failing on each.",
+    "Save this Datadog query so I can rerun it tomorrow.",
+    "Add a Grafana MCP server to mcpx.",
+    "Can we get PagerDuty into our MCP tools?",
+    "Why does gh fail inside mcpx_exec when it works in my terminal?",
+    "Turn these five MCP calls into one step.",
+    "Wire Argo CD into the tools we have.",
+    "Combine the Confluence page search with a git log of the same repo.",
+    "Make a reusable mcpx script for the weekly on-call summary.",
+    "My nixos MCP call hangs for 45 seconds and then says it was not confirmed. Fix it."
+  ],
+  "should_not_load": [
+    {
+      "request": "Find where this function is defined.",
+      "load_instead": "none (one codedb or grep call)"
+    },
+    {
+      "request": "What does this one Datadog monitor alert on?",
+      "load_instead": "none (a single tool call)"
+    },
+    {
+      "request": "Update OpenCode to the latest fork commit.",
+      "load_instead": "update-opencode"
+    },
+    {
+      "request": "The nix build is failing after a flake update.",
+      "load_instead": "nix-config"
+    },
+    {
+      "request": "Which model should this subagent use?",
+      "load_instead": "delegate"
+    },
+    {
+      "request": "Write a new skill for release notes.",
+      "load_instead": "skill-writer"
+    },
+    {
+      "request": "Hide the claude-haiku model from the picker.",
+      "load_instead": "routing-config"
+    },
+    {
+      "request": "Take a screenshot of localhost:3000.",
+      "load_instead": "none (one browser tool call)"
+    }
+  ]
+}

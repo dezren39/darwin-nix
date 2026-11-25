@@ -244,6 +244,11 @@ let
 
 in
 {
+  # kubernetes-mcp-server's read-only config.toml, so mcpx.config.nix can
+  # name it by its system-profile path. Only bin/ and a few share/ dirs are
+  # linked by default.
+  environment.pathsToLink = [ "/share/kubernetes-mcp-server" ];
+
   environment.systemPackages =
     with pkgs;
     [
@@ -416,6 +421,16 @@ in
       # mcp-remote and chrome-devtools-mcp, which are only on npm (pinned by
       # pkgs/npm-mcp-servers/package-lock.json).
       inputs.self.packages.${system}.npm-mcp-servers
+      # The `azure` and `kubernetes` servers (azmcp, kubernetes-mcp-server;
+      # prebuilt releases pinned in pkgs/*/hashes.json). Both authenticate
+      # through the Azure CLI (azure-cli above): azmcp directly, and the AKS
+      # kubeconfig through kubelogin, Azure's credential plugin, below.
+      inputs.self.packages.${system}.azure-mcp
+      inputs.self.packages.${system}.kubernetes-mcp-server
+      kubelogin
+      # `record`: append a moment worth keeping to ~/git/ai_recordings.jsonl
+      # (instructions/recordings.md).
+      inputs.self.packages.${system}.record
       # Vertex's APIM proxy for Claude Code, built from the pinned source input.
       inputs.self.packages.${system}.cai-claude-apim-proxy
       # service-event, for scripts that record into the service event log
@@ -550,7 +565,8 @@ in
       # zig # removed 2026-09-15: reclaiming disk
       # swiftPackages.swift # removed 2026-09-15: reclaiming disk (~880 MB; drops swiftc, nothing else depends on it)
       # dotnet-sdk_9 # DISABLED 2026-08: ~1.2 GB closure, ~590 MB of near-private
-      # dependencies. Re-enable if you need .NET.
+      # dependencies. Azure MCP does not need it: pkgs/azure-mcp ships the
+      # vendor's self-contained single-file app. Re-enable an SDK for .NET development.
       inputs.just.packages.${system}.default
       # linker/binary diagnostic and fixing tools
       patchelf # fix ELF binaries (rpath, interpreter) - essential for Linux containers/cross-compile

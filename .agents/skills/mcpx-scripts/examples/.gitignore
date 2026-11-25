@@ -1,0 +1,5 @@
+# Written beside a script by `mcpx run <file>`: the typed client, ambient
+# globals and a launcher entry. Regenerated on every run.
+mcpx-client.ts
+mcpx-globals.d.ts
+.*.mcpx-entry.ts

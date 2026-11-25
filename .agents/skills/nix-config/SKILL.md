@@ -25,7 +25,7 @@ breakdown; this skill is the fast path.
   `--no-commit`), then finish with one `just build` to commit.
 - `just switch` builds as you (`nix build`; it fails if nix exits 0 without
   producing `./result`), activates as root (`sudo ./result/sw/bin/darwin-rebuild
-  switch`), fixes repo ownership, commits empty markers (hostname + build store
+switch`), fixes repo ownership, commits empty markers (hostname + build store
   path, then generation), and ends by checking that every long-running launchd
   agent listed in `health_services` in `simple-rebuild.sh` keeps one pid for 3 s
   and answers its URL; otherwise the switch exits non-zero. Add new long-running
@@ -53,6 +53,7 @@ flake.nix → configuration.nix
 ```
 
 Where things go:
+
 - New system package → `systemPackages.nix` (the real list; `homePackages.nix` is a stub).
 - Shell/git/program config → `homePrograms.nix`.
 - macOS defaults / launchd / activation / homebrew meta → `configuration.nix`.
@@ -87,21 +88,26 @@ Where things go:
 
 ## OpenCode / OpenChamber / mcpx
 
-- Config: `opencode-global.jsonc` (meant to be linked as ~/.config/opencode/opencode.jsonc by
-  `just opencode-config-link`, but NOT linked as of 2026-10-19: the live config is the plain file ~/.opencode/opencode.jsonc (via ~/.config/opencode -> ~/nix/.opencode), which OpenChamber edits;
-  not named opencode.jsonc so the project walk does not load it twice; v2-native; github-copilot only; every model is a
-  pool in `experimental.model_routes`: capability pools frontier / fast-strong /
-  balanced / very-fast and family pools opus / sonnet / sol / luna / terra with
-  the effort as variant; agents build, general, explore, quick, balanced, deep).
-  The fork's built-in `routing-config` skill documents every routing key. v2
-  ignores `tui.jsonc` (it reads `~/.config/opencode/cli.json`).
+- Config: the live file is `~/.opencode/opencode.jsonc` (reached as
+  `~/.config/opencode/opencode.jsonc`), which OpenChamber edits. `opencode-global.jsonc` here is a
+  v2-native mirror of its routing, not linked to it (`just opencode-config-link` would link it; not
+  run). github-copilot only; default model `github-copilot/claude-opus-5.5`; one hidden route per
+  Copilot model (luna, terra, sol, haiku, sonnet, opus, carbon, mai) and seven pools on top,
+  weakest first: small, speed, scout, workhorse, specialist, summit, background; every pool pins
+  its legs' efforts, so it is called with none. `node .agents/skills/delegate/scripts/pools.mjs`
+  prints them; `--diff opencode-global.jsonc` says whether the mirror has drifted. The fork's
+  built-in `routing-config` skill documents every routing key. v2 ignores `tui.jsonc` (it reads
+  `~/.config/opencode/cli.json`).
 - **MCP servers all go through mcpx** (CLI `mcpx`, daemon = launchd agent
   `org.nixos.mcpx`). Every server is defined in `mcpx.config.nix` (written to
   `~/.config/mcpx/config.json` by `homeUser.nix`) and runs by absolute path from
   the system profile; the npm-only ones (`mcp-remote`, `chrome-devtools-mcp`)
-  are packaged from a lockfile in `pkgs/npm-mcp-servers`. OAuth for the remote
-  servers: `just mcp-login <name>` / `just context7-login`. Smoke test:
-  `just mcpx-check`.
+  are packaged from a lockfile in `pkgs/npm-mcp-servers`, and `azure` and
+  `kubernetes` from pinned release binaries (`pkgs/azure-mcp`,
+  `pkgs/kubernetes-mcp-server`). OAuth for the remote servers: `just mcp-login
+<name>` / `just context7-login`. Smoke tests: `just mcpx-check`, and `just
+mcpx-exec-env` for what a daemon-run script sees (directory, user, PATH). Docs:
+  `docs/mcp.md`; scripting them: the `mcpx-scripts` skill.
 - **OpenCode and OpenChamber come from forks we own** (developing-today-forks/opencode,
   developing-today-forks/openchamber; `main`; this repo's only developing-today
   input is `openchamber`, and opencode is reached as
@@ -112,7 +118,7 @@ Where things go:
   `OPENCODE_DB=~/.local/share/opencode/opencode.db` (the one database every
   opencode/OpenChamber must use) and a durable `TMPDIR`.
 - `openchamber.nix`: launchd agent `org.nixos.openchamber` keeps `openchamber
-  serve` up on 127.0.0.1:3000 (port of developing-today/code's systemd model);
+serve` up on 127.0.0.1:3000 (port of developing-today/code's systemd model);
   the desktop app is its client. mcpx (source: developing-today/code's
   `pkgs/mcpx`, built in the opencode fork and re-exposed here as
   `inputs.openchamber.inputs.opencode.packages.<sys>.mcpx` — not built here)
@@ -121,7 +127,7 @@ Where things go:
 - Database tools: `just opencode-db-backup` (instant APFS clone),
   `opencode-db-check`, `opencode-db-pending` (migrations a new build would
   apply; refuses if the DB is ahead of the build).
-- Slash commands live in `commands/` (`/gha-fix`, `/gha-why`). Run
+- Slash commands live in `commands/` (`/gha-fix`, `/gha-why`, `/tokenscope`, `/warp-import`). Run
   `./symlink-commands` to install them globally; use `--dry-run` to preview.
 
 ## Skills in this repo
@@ -130,8 +136,12 @@ Repo-local agent skills live in `.agents/skills/<name>/SKILL.md` (a plain
 git-tracked directory, same layout as the global `~/.agents/skills` that opencode
 auto-scans on boot — not a symlink). Add new skills there; opencode picks them up
 automatically. Currently shipped: **nix-config** (this skill),
-**update-opencode** (updates and repairs the OpenCode/OpenChamber fork stack, forks first) and
-**merge-first** (merge PRs without waiting for checks; only when the user asks for that mode).
+**update-opencode** (updates and repairs the OpenCode/OpenChamber fork stack, forks first),
+**merge-first** (merge PRs without waiting for checks; only when the user asks for that mode),
+**delegate** (models and pools, subagents, separate sessions, nesting, supervision) and
+**mcpx-scripts** (Code Mode and mcpx scripts, adding MCP servers). merge-first, delegate and
+mcpx-scripts are also linked by hand into `~/.agents/skills/` so every session sees them;
+ARCHITECTURE.md §7 has the command.
 
 ## Gotchas
 
@@ -154,11 +164,11 @@ automatically. Currently shipped: **nix-config** (this skill),
     dangling link). launchd then parks the job until that file appears (an
     `event triggers … Executable` block in the print) and `launchctl kickstart`
     hangs. After fixing the path, reload it: `launchctl bootout
-    gui/$(id -u)/<label>`, then `launchctl bootstrap gui/$(id -u)
-    ~/Library/LaunchAgents/<label>.plist`.
+gui/$(id -u)/<label>`, then `launchctl bootstrap gui/$(id -u)
+~/Library/LaunchAgents/<label>.plist`.
   - mcpx exiting 1 about every 10 s with "a daemon is already listening on
     …sock" in `/tmp/mcpx.err.log`: a daemon the CLI started itself (`daemon
-    --detached --idle-exit 4h`, possibly an older build) holds the socket and
+--detached --idle-exit 4h`, possibly an older build) holds the socket and
     never goes idle. Run `cd ~ && mcpx stop`, then `launchctl kickstart
-    gui/$(id -u)/org.nixos.mcpx`; `lsof -t` on the socket should then show
+gui/$(id -u)/org.nixos.mcpx`; `lsof -t` on the socket should then show
     launchd's `mcpx daemon --config …`.

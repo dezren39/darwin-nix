@@ -6,7 +6,7 @@ description: "Merge-first mode: open a PR, request a Copilot review, merge it im
 # Merge-first mode
 
 A deliberate trade: throughput over pre-merge review. Every PR is opened, sent to Copilot, and merged
-at once with admin rights, before CI runs. Review findings arrive *after* the merge and are triaged
+at once with admin rights, before CI runs. Review findings arrive _after_ the merge and are triaged
 in one place. That is the point: without it, every PR circles through local tests, Copilot rounds,
 CI and any merge queue before the next one can start.
 
@@ -18,10 +18,10 @@ merge queue is intended, not a risk to flag.
 ## Before the first merge
 
 1. **Read the branch rules.** `gh api repos/{owner}/{repo}/rulesets` and each ruleset's `rules`.
-2. **If a `pull_request` rule has `required_approving_review_count > 0`, stop and ask the user**
-   to approve overriding it — naming the repository and the count. An admin merge bypasses
-   required approvals; that is the user's decision to make, not yours to infer from "merge
-   immediately". Ask again for any other repository.
+2. **If a `pull_request` rule requires approving reviews, ask before every admin merge**
+   — name the PR, repository and required count. Approval of one override is not approval of the
+   next. An admin merge bypasses required reviews; that is the user's decision, not something to
+   infer from "merge immediately".
 3. **Note required status checks and whether a merge queue is enabled.** Do not assume either way.
    Merging before checks finish, or outside a queue, needs `--admin`.
 4. **Create the tracking issue** — "Pending review feedback (merged PRs)". Reuse it for the whole
@@ -29,7 +29,9 @@ merge queue is intended, not a risk to flag.
 5. **Use merge commits, not squash.** Squashing a PR that another branch is stacked on makes that
    branch re-merge the same work as different commits.
 
-`main` auto-deploys. That is known and accepted; you do not need to check it.
+Check whether `main` auto-deploys and to which environment before the first merge. This mode
+waives waiting for review/checks; it does not authorize an otherwise unrequested production release,
+destructive migration, access change or publication.
 
 ## The loop
 
@@ -41,8 +43,9 @@ merge queue is intended, not a risk to flag.
 4. **Request Copilot right after pushing**, every time — no waiting, no assuming it will pick the
    PR up on its own:
    `gh api --method POST repos/{o}/{r}/pulls/{n}/requested_reviewers -f "reviewers[]=copilot-pull-request-reviewer[bot]"`.
-5. **Merge at once:** `gh pr merge {n} --merge --admin`. Pass the method: non-interactively a missing
-   one is an error, and an error swallowed by a pipe looks exactly like waiting.
+5. **Merge at once:** `gh pr merge {n} --merge`, adding `--admin` only when bypassing a gate is
+   necessary and authorized (step 2 applies to every such merge). Pass the method: non-interactively
+   a missing one is an error, and an error swallowed by a pipe looks exactly like waiting.
 6. **Confirm it merged** — `gh pr view {n} --json state,mergeCommit`.
 7. **Append the PR's heading to the end of the tracking issue** with the warning
    `WARNING: no review found yet for #{n}`. Replace the warning with the findings when the review
@@ -59,6 +62,7 @@ merge queue is intended, not a risk to flag.
 
   ```markdown
   - [`{path}:{line}`]({html_url})
+
     > {body}
 
     _Note (optional):_ {one or two lines}
@@ -67,6 +71,7 @@ merge queue is intended, not a risk to flag.
   The link goes straight to the comment (`.../pull/{n}#discussion_r{id}`). The note is optional — a
   short summary, an opinion on whether the finding is valid, or why it happened. Keep it brief; do
   not stop to investigate.
+
 - **Do not stop to work them.** Treat security and data findings exactly like every other finding —
   no special category. Only stop for:
   - code that breaks a working page,

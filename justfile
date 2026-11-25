@@ -131,6 +131,34 @@ mcpx-check:
     mcpx exec 'await fff.grep({query: "mcpx"}); console.log("fff ok")'
     mcpx exec 'await chrome_devtools.list_pages({}); console.log("chrome-devtools ok")'
     mcpx exec 'await context7.resolve_library_id({libraryName: "react", query: "React documentation"}); console.log("context7 ok")'
+    # Unannotated read-only tools pass the write gate only through
+    # readOnlyTools (mcpx.config.nix); without it this waits 45s and fails.
+    mcpx exec 'await nixos.nix({action: "stats"}); console.log("nixos ok")'
+    # Reads ~/.kube/config only; listing a cluster's namespaces also needs
+    # the VPN (the AKS API servers are private) and `az login`.
+    mcpx exec 'await kubernetes.configuration_contexts_list({}); console.log("kubernetes ok")'
+    echo "azure: needs 'az login'; check with: mcpx exec 'console.log(await azure.subscription_list({}))'"
+
+# OpenCode's mcpx_exec runs scripts inside the mcpx daemon (POST /v1/exec),
+# unlike `mcpx exec` from a shell, which runs in the caller's directory and
+# environment. After `just switch` every command below should resolve
+# (configuration.nix, services.mcpx.environment.PATH).
+# Show the directory, user, shell and commands a daemon-run mcpx script gets
+mcpx-exec-env:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    sock=$(mcpx status | awk '$1 == "socket:" {print $2}')
+    [ -S "$sock" ] || { echo "no mcpx daemon socket (mcpx status)" >&2; exit 1; }
+    src='const which = async (c, a) => { try { const o = await new Deno.Command(c, { args: a }).output(); return o.success ? new TextDecoder().decode(o.stdout).split("\n")[0] : "exit " + o.code; } catch (e) { return "NOT FOUND (" + String(e.message).slice(0, 40) + ")"; } };
+    const row = { cwd: Deno.cwd(), user: Deno.env.get("USER"), shell: Deno.env.get("SHELL") };
+    for (const [c, a] of [["gh", ["--version"]], ["az", ["--version"]], ["kubectl", ["version", "--client"]], ["jq", ["--version"]], ["nix", ["--version"]], ["git", ["--version"]]]) row[c] = await which(c, a);
+    // record accepts any text as input, so probing --help would append junk. Resolve it without invoking it.
+    row.record = await which("/usr/bin/which", ["record"]);
+    console.log(JSON.stringify(row, null, 1));'
+    body=$(python3 -I -c 'import json, sys; print(json.dumps({"source": sys.argv[1]}))' "$src")
+    curl -sS --max-time 120 --unix-socket "$sock" -X POST http://localhost/v1/exec \
+        -H 'content-type: application/json' --data "$body" \
+        | python3 -I -c 'import json, sys; d = json.load(sys.stdin); print(d.get("stdout") or json.dumps(d))'
 
 # =============================================================================
 # Nix Rebuild

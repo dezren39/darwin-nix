@@ -1,0 +1,286 @@
+{
+  "skill": "mcpx-scripts",
+  "model": "github-copilot/claude-opus-5.5",
+  "trials": 3,
+  "ranAt": "2026-11-25T00:34:47.404Z",
+  "expectedOf": {
+    "hits": 46,
+    "total": 57
+  },
+  "rows": [
+    {
+      "expect": "load",
+      "request": "Pull my in-progress Jira tickets and ops-portal's Datadog errors in one go.",
+      "loaded": "3/3",
+      "flagged": false,
+      "failedTrials": 0,
+      "otherSkillsLoaded": [],
+      "sessions": [
+        "ses_e5defe0f802ffeyraMp0BW3Zal",
+        "ses_e5defe0f802ffcmDcRF9TuWfym",
+        "ses_e5defe0f802ffdb6LJSanDo8La"
+      ],
+      "errors": []
+    },
+    {
+      "expect": "load",
+      "request": "Write a script that lists open PRs and which checks are failing on each.",
+      "loaded": "2/3",
+      "flagged": true,
+      "failedTrials": 0,
+      "otherSkillsLoaded": [],
+      "sessions": [
+        "ses_e5defe0e610fferYAYZNVcG4Xf",
+        "ses_e5defe0e40fffetzvvUi83bKbb",
+        "ses_e5defe0f802ffbuqQ2VwShpkQI"
+      ],
+      "errors": []
+    },
+    {
+      "expect": "load",
+      "request": "Save this Datadog query so I can rerun it tomorrow.",
+      "loaded": "0/3",
+      "flagged": true,
+      "failedTrials": 0,
+      "otherSkillsLoaded": [],
+      "sessions": [
+        "ses_e5defe0e18cffeiPWvF0wCcVzS",
+        "ses_e5defe0d2f9ffe5sFdlvHMRHth",
+        "ses_e5defe0cba9ffeAcMYa7p0Shn3"
+      ],
+      "errors": []
+    },
+    {
+      "expect": "load",
+      "request": "Add a Grafana MCP server to mcpx.",
+      "loaded": "3/3",
+      "flagged": false,
+      "failedTrials": 0,
+      "otherSkillsLoaded": [],
+      "sessions": [
+        "ses_e5defe0c32cffeSScf2YDAU6Eh",
+        "ses_e5defe0bd9dffeGfOMOajj37a9",
+        "ses_e5defe0ac9cffe2ggj7f9nAa2C"
+      ],
+      "errors": []
+    },
+    {
+      "expect": "load",
+      "request": "Can we get PagerDuty into our MCP tools?",
+      "loaded": "3/3",
+      "flagged": false,
+      "failedTrials": 0,
+      "otherSkillsLoaded": [],
+      "sessions": [
+        "ses_e5defe0abc5ffeVcM1lEggTow9",
+        "ses_e5defe0a965ffezknFFKfRujk2",
+        "ses_e5defe0a5e2ffeUVMV854IvzQ8"
+      ],
+      "errors": []
+    },
+    {
+      "expect": "load",
+      "request": "Why does gh fail inside mcpx_exec when it works in my terminal?",
+      "loaded": "1/3",
+      "flagged": true,
+      "failedTrials": 0,
+      "otherSkillsLoaded": [],
+      "sessions": [
+        "ses_e5defe09b83ffeknKy2tSijdvM",
+        "ses_e5defe093f6ffeP9aPCS6xHzHt",
+        "ses_e5defe091e8ffe01iVBLsTOGfC"
+      ],
+      "errors": []
+    },
+    {
+      "expect": "load",
+      "request": "Turn these five MCP calls into one step.",
+      "loaded": "0/3",
+      "flagged": true,
+      "failedTrials": 0,
+      "otherSkillsLoaded": [],
+      "sessions": [
+        "ses_e5defe08d94ffeBeEenNcsRt5N",
+        "ses_e5defe07d76ffeC2eEocEGSAv3",
+        "ses_e5defe07ad8ffeln5Igx3N6PRd"
+      ],
+      "errors": []
+    },
+    {
+      "expect": "load",
+      "request": "Wire Argo CD into the tools we have.",
+      "loaded": "3/3",
+      "flagged": false,
+      "failedTrials": 0,
+      "otherSkillsLoaded": [],
+      "sessions": [
+        "ses_e5defe078deffevhjrnV0qhh93",
+        "ses_e5defe06dc1ffe0rKZXr9b26Sd",
+        "ses_e5defe06c58ffe5grXhSVGkHTj"
+      ],
+      "errors": []
+    },
+    {
+      "expect": "load",
+      "request": "Combine the Confluence page search with a git log of the same repo.",
+      "loaded": "3/3",
+      "flagged": false,
+      "failedTrials": 0,
+      "otherSkillsLoaded": [],
+      "sessions": [
+        "ses_e5defe06acdffeSrYiSY8Z9Jd5",
+        "ses_e5defe06546ffeaV06DWkCr5Ji",
+        "ses_e5defe05c08ffes3XtHbyQATW6"
+      ],
+      "errors": []
+    },
+    {
+      "expect": "load",
+      "request": "Make a reusable mcpx script for the weekly on-call summary.",
+      "loaded": "3/3",
+      "flagged": false,
+      "failedTrials": 0,
+      "otherSkillsLoaded": [],
+      "sessions": [
+        "ses_e5defe05975ffeOC1yOlIj4My4",
+        "ses_e5defe057b5ffePwBLcfYIBS7v",
+        "ses_e5defe04ee9ffe57U83dvR0rTK"
+      ],
+      "errors": []
+    },
+    {
+      "expect": "load",
+      "request": "My nixos MCP call hangs for 45 seconds and then says it was not confirmed. Fix it.",
+      "loaded": "1/3",
+      "flagged": true,
+      "failedTrials": 0,
+      "otherSkillsLoaded": [],
+      "sessions": [
+        "ses_e5defe044d5ffeq4RCOVRIDZkQ",
+        "ses_e5defe04c2dffeP8QJZOXuQ4R3",
+        "ses_e5defe04626ffeFJ8JvfTHu04I"
+      ],
+      "errors": []
+    },
+    {
+      "expect": "not load",
+      "request": "Find where this function is defined.",
+      "loaded": "0/3",
+      "flagged": false,
+      "failedTrials": 0,
+      "otherSkillsLoaded": [],
+      "loadInstead": "none (one codedb or grep call)",
+      "sessions": [
+        "ses_e5defe03c91ffeHkLp2QIoCyzb",
+        "ses_e5defe02f02ffeAIEVrTZquvDx",
+        "ses_e5defe02558ffeDn7Nxk0zhuOn"
+      ],
+      "errors": []
+    },
+    {
+      "expect": "not load",
+      "request": "What does this one Datadog monitor alert on?",
+      "loaded": "0/3",
+      "flagged": false,
+      "failedTrials": 0,
+      "otherSkillsLoaded": [],
+      "loadInstead": "none (a single tool call)",
+      "sessions": [
+        "ses_e5defe02353ffe0z10XDFzcVHp",
+        "ses_e5defe02546ffep9J0Esdj7DKT",
+        "ses_e5defe024f3ffeir6fkxkbfvJE"
+      ],
+      "errors": []
+    },
+    {
+      "expect": "not load",
+      "request": "Update OpenCode to the latest fork commit.",
+      "loaded": "0/3",
+      "flagged": false,
+      "failedTrials": 0,
+      "otherSkillsLoaded": [],
+      "loadInstead": "update-opencode",
+      "sessions": [
+        "ses_e5defe01a4cffeFaPN6EXjOxGe",
+        "ses_e5defe01914ffejKGTlvRbBa5J",
+        "ses_e5defe01a5cffeFfk5I1iaUy6f"
+      ],
+      "errors": []
+    },
+    {
+      "expect": "not load",
+      "request": "The nix build is failing after a flake update.",
+      "loaded": "0/3",
+      "flagged": false,
+      "failedTrials": 0,
+      "otherSkillsLoaded": [],
+      "loadInstead": "nix-config",
+      "sessions": [
+        "ses_e5defdfff0affeGnMKrueMUwsy",
+        "ses_e5defe01732ffeQt0ikmoH16HX",
+        "ses_e5defdffd8cffelsF5I2r3ljlN"
+      ],
+      "errors": []
+    },
+    {
+      "expect": "not load",
+      "request": "Which model should this subagent use?",
+      "loaded": "0/3",
+      "flagged": false,
+      "failedTrials": 0,
+      "otherSkillsLoaded": [],
+      "loadInstead": "delegate",
+      "sessions": [
+        "ses_e5defdffc9dffeD29ATCXvHdyI",
+        "ses_e5defdfec1dffekfJ8TcHKfPqX",
+        "ses_e5defdfeabbffes5NO7BSo4uER"
+      ],
+      "errors": []
+    },
+    {
+      "expect": "not load",
+      "request": "Write a new skill for release notes.",
+      "loaded": "0/3",
+      "flagged": false,
+      "failedTrials": 0,
+      "otherSkillsLoaded": ["skill-writer"],
+      "loadInstead": "skill-writer",
+      "sessions": [
+        "ses_e5defdfea44ffed0OpPx4BK6Q7",
+        "ses_e5defdfe5deffe7Mru2S3DUf1I",
+        "ses_e5defdfd824ffeeDl7ldUaXA1o"
+      ],
+      "errors": []
+    },
+    {
+      "expect": "not load",
+      "request": "Hide the claude-haiku model from the picker.",
+      "loaded": "0/3",
+      "flagged": false,
+      "failedTrials": 0,
+      "otherSkillsLoaded": ["routing-config"],
+      "loadInstead": "routing-config",
+      "sessions": [
+        "ses_e5defdfd725ffe32HRKCi9ajVM",
+        "ses_e5defdfd3f2ffei3v43Wdh7ddx",
+        "ses_e5defdfc16fffeBn0efj0bant2"
+      ],
+      "errors": []
+    },
+    {
+      "expect": "not load",
+      "request": "Take a screenshot of localhost:3000.",
+      "loaded": "0/3",
+      "flagged": false,
+      "failedTrials": 0,
+      "otherSkillsLoaded": [],
+      "loadInstead": "none (one browser tool call)",
+      "sessions": [
+        "ses_e5defdfb680ffeNcBkyKKQE2D9",
+        "ses_e5defdfc075ffeTh42tvEdjGkk",
+        "ses_e5defdfaf7bffeZFjADmb1HL1e"
+      ],
+      "errors": []
+    }
+  ]
+}

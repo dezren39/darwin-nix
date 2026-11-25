@@ -1062,7 +1062,18 @@ lib.recursiveUpdate {
   #   deliberately omits it (its header says so); mcpx starts are no
   #   longer recorded in the service-events log.
   # - environment.PATH below preserves the hand-rolled agent's PATH
-  #   (the MCP servers mcpx.config.nix starts inherit it).
+  #   (the MCP servers mcpx.config.nix starts inherit it), and since
+  #   2026-11-24 appends the directories a login shell searches.
+  #
+  # Scripts run through the daemon (OpenCode's mcpx_exec, POST /v1/exec)
+  # get this PATH too, plus mcpx's own git, deno, bun and node; they run as
+  # this user in WorkingDirectory ($HOME). `mcpx exec`/`mcpx run` from a
+  # shell are different: they run in the caller's directory with the
+  # caller's environment. Before the append, a daemon-run script could not
+  # find gh, az, kubectl, nix or anything from Homebrew (measured: gh
+  # "entity not found"). The appended directories come after /usr/bin:/bin,
+  # so every name that resolved before resolves to the same file; only
+  # names that did not resolve at all now do.
   services.mcpx = {
     enable = true;
     package = inputs.self.packages.${system}.mcpx;
@@ -1077,6 +1088,15 @@ lib.recursiveUpdate {
         pkgs.fff-mcp
       ]
       + ":/usr/bin:/bin"
+      + lib.concatMapStrings (dir: ":" + dir) [
+        "/usr/sbin"
+        "/sbin"
+        "/run/current-system/sw/bin"
+        "/etc/profiles/per-user/${config.system.primaryUser}/bin"
+        "/nix/var/nix/profiles/default/bin"
+        "/opt/homebrew/bin"
+        "${config.users.users.${config.system.primaryUser}.home}/.local/bin"
+      ]
     );
   };
 

@@ -43,11 +43,12 @@
 # sign-in. omit_tools takes exact names, not patterns. All tools:
 # https://docs.datadoghq.com/mcp_server/tools
 #
-# elicit.confirmDestructive stays off (mcpx's default): a caller that cannot
-# answer, which is every script, waits out elicit.askTimeout and then the call
-# proceeds anyway (internal/settings/consumer.go), so it would add a delay and
-# stop nothing. Hiding the dangerous tools protects every caller
-# (dezren39/darwin-nix#664).
+# elicit.confirmDestructive stays off (mcpx's default), but policy.write
+# separately defaults to ask: an unannotated possible write is refused after
+# elicit.askTimeout when nobody answers. It does NOT proceed after the wait
+# (measured 2026-11-24). The per-server settings below declare verified
+# read-only tools or explicitly allow a read-only server; dangerous tools
+# remain hidden for every caller (dezren39/darwin-nix#664).
 # Changing the URL is a new identity to mcp-remote and needs `just mcp-login
 # datadog` again.
 { lib }:
@@ -211,6 +212,40 @@ let
       args = [ ];
       env.DISABLE_THOUGHT_LOGGING = "true";
     };
+    # Microsoft's Azure MCP server (pkgs/azure-mcp), read-only: --read-only
+    # makes the server itself refuse every write operation. One tool per
+    # Azure service (namespace mode, its default). Credentials come only
+    # from the Azure CLI's login (`az login`): AZURE_TOKEN_CREDENTIALS
+    # selects AzureCliCredential alone, so a daemon nobody watches never
+    # falls back to opening a browser. PATH is the server's own because
+    # AzureCliCredential runs `az`, which the daemon's PATH may lack.
+    azure = {
+      command = bin "azmcp";
+      args = [
+        "server"
+        "start"
+        "--read-only"
+      ];
+      env = {
+        AZURE_TOKEN_CREDENTIALS = "AzureCliCredential";
+        AZURE_MCP_COLLECT_TELEMETRY = "false";
+        PATH = "/run/current-system/sw/bin:/usr/bin:/bin";
+      };
+    };
+    # containers/kubernetes-mcp-server (pkgs/kubernetes-mcp-server) on
+    # ~/.kube/config, which names the dev and prod AKS clusters. config.toml
+    # (beside the package, linked into the system profile by
+    # systemPackages.nix) makes it read-only and refuses Secrets. The AKS
+    # users authenticate with `kubelogin get-token --login azurecli`, so its
+    # PATH must reach kubelogin and az; both are in the system profile.
+    kubernetes = {
+      command = bin "kubernetes-mcp-server";
+      args = [
+        "--config"
+        "/run/current-system/sw/share/kubernetes-mcp-server/config.toml"
+      ];
+      env.PATH = "/run/current-system/sw/bin:/usr/bin:/bin";
+    };
   };
 
   # How mcpx pools each server, where the default (one process, shared by
@@ -253,6 +288,31 @@ let
     # uvx resolves and downloads the proxy on first start, which can outlast
     # the default 60s start timeout.
     aws.startTimeout = "180s";
+    # Read-only tools whose servers publish no annotations. Under the
+    # default policy.write=ask an unannotated tool counts as a possible
+    # write, so a caller nobody answers -- every script, every unattended
+    # agent -- waited 45s (elicit.askTimeout) and was refused. Measured
+    # 2026-11-24 from mcpx_exec: nixos.nix, nixos.nix_versions,
+    # deepwiki.read_wiki_structure and markitdown.convert_to_markdown were
+    # refused; fff, codedb, codebase_memory, context7, terraform,
+    # aws_knowledge and atlassian calls went through. readOnlyTools is the
+    # operator's declaration (mcpx #6116): exact names only, so a tool these
+    # servers add later keeps the default until it is listed here.
+    nixos.readOnlyTools = [
+      "nix"
+      "nix_versions"
+    ];
+    deepwiki.readOnlyTools = [
+      "read_wiki_structure"
+      "read_wiki_contents"
+      "ask_wiki_question"
+    ];
+    # Reads a URL or file and returns it as Markdown; it writes nothing.
+    markitdown.readOnlyTools = [ "convert_to_markdown" ];
+    # azmcp's tools carry no annotations at all, so every call would ask.
+    # The server's own --read-only (servers.azure above) is what refuses
+    # writes; allow only skips mcpx's question.
+    azure.writePolicy = "allow";
     # Not pooling, but the same per-server mcpx block. Hidden from listings
     # and refused if called by name. create_repository can make a public
     # repository (private: false), or one in the personal account when

@@ -2261,13 +2261,36 @@ git_metadata_needs_repair() {
 repair_git_ownership() {
   local kind path git_dir pointer caller_uid repaired=0
   caller_uid="$(id -u "$CALLER_USER")"
+  # Scoped cross-user override (dezren39/darwin-nix#2012): the old star
+  # wildcard trusted every path on the machine. The trusted-roots twin
+  # (lib/git-trusted-roots.sh, mirroring gitSettings.nix) covers exactly
+  # the development roots; anything outside them warns and is skipped,
+  # never repaired.
+  GIT_TRUSTED_C_ARGS=()
+  if [ -f "$SELF_DIR/lib/git-trusted-roots.sh" ]; then
+    # shellcheck source=lib/git-trusted-roots.sh
+    . "$SELF_DIR/lib/git-trusted-roots.sh"
+    git_trusted_c_args
+  else
+    warn "trusted-root policy unavailable; skipping Git ownership repair"
+    return 0
+  fi
   while IFS=$'\t' read -r kind path; do
+    pointer=""
     [ -d "$path" ] || continue
+    if ! git_trusted_path "$path"; then
+      warn "outside trusted roots; skipping Git ownership repair: $path"
+      continue
+    fi
     if [ -f "$path/HEAD" ] && [ -d "$path/objects" ] && [ -d "$path/refs" ]; then
       git_dir="$path"
     elif [ -f "$path/.git" ]; then
       pointer="$path/.git"
-      git_dir="$(git -c safe.directory='*' -C "$path" rev-parse --absolute-git-dir 2>/dev/null)"
+      if [ "${#GIT_TRUSTED_C_ARGS[@]}" -gt 0 ]; then
+        git_dir="$(git "${GIT_TRUSTED_C_ARGS[@]}" -C "$path" rev-parse --absolute-git-dir 2>/dev/null)"
+      else
+        git_dir="$(git -C "$path" rev-parse --absolute-git-dir 2>/dev/null)"
+      fi
       [ -n "$git_dir" ] || { warn "could not resolve gitdir for $path"; continue; }
     elif [ -d "$path/.git" ]; then
       git_dir="$path/.git"
@@ -2275,6 +2298,10 @@ repair_git_ownership() {
       continue
     fi
     [ -d "$git_dir" ] || continue
+    if ! git_trusted_path "$git_dir"; then
+      warn "Git metadata outside trusted roots; skipping ownership repair: $git_dir"
+      continue
+    fi
     if { [ -n "${pointer:-}" ] && [ "$(stat -f '%u' "$pointer" 2>/dev/null)" != "$caller_uid" ]; } || git_metadata_needs_repair "$git_dir"; then
       if [ "$DRY_RUN" = "1" ]; then
         echo "  would repair Git ownership: ${git_dir/#$CALLER_USER_HOME/\~}"

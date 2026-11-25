@@ -1060,7 +1060,7 @@ rec {
             ''
               cp $src/git-discover-repos $src/git-maintain-repos $src/spotlight-exclude-artifacts $src/search.sh $src/patch-vscode-insiders.sh $src/install-vscode-patch-agent.sh $src/var-folders-clean.sh $src/backup-zed.sh $src/code-install-extensions.sh $src/full-clean.sh $src/clean.sh $src/symlinker.sh $src/opencode-db-backup-prune.sh $src/opencode-db-prune.sh $src/opencode-db-vacuum.sh $src/help-extra-args.test.sh ./
               mkdir -p lib pkgs/brew-repair pkgs/adopt
-              cp $src/lib/common.sh $src/lib/arg-probe.sh lib/
+              cp $src/lib/common.sh $src/lib/arg-probe.sh $src/lib/git-trusted-roots.sh lib/
               cp $src/pkgs/brew-repair/brew-repair.sh pkgs/brew-repair/
               cp $src/pkgs/adopt/adopt.sh pkgs/adopt/
               chmod -R u+w ./
@@ -1182,6 +1182,7 @@ rec {
               mkdir -p lib
               cp $src/lib/common.sh lib/
               cp $src/lib/arg-probe.sh lib/
+              cp $src/lib/git-trusted-roots.sh lib/
               chmod u+w ./git-discover-repos ./git-discover-repos.test.sh
               patchShebangs ./git-discover-repos
               export HOME="$TMPDIR/home"
@@ -1209,6 +1210,7 @@ rec {
               cp $src/clean.sh $src/clean.test.sh $src/git-discover-repos $src/var-folders-clean.sh ./
               mkdir -p lib
               cp $src/lib/common.sh lib/
+              cp $src/lib/git-trusted-roots.sh lib/
               cp $src/lib/test-harness.sh lib/
               cp $src/lib/arg-probe.sh lib/
               cp $src/lib/outcome-probe.sh lib/
@@ -1218,6 +1220,31 @@ rec {
               mkdir -p "$HOME"
               export HARNESS_CHECK=1
               bash ./clean.test.sh
+              touch $out
+            '';
+        # #2012: real Git checks exact/recursive trust, inherited-wildcard
+        # reset, foreign-owner refusal outside the roots, and canonical
+        # ownership-repair boundaries (ordinary, bare, separate gitdir).
+        git-safe-directory-tests =
+          pkgs.runCommandLocal "git-safe-directory-tests"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.git
+              ];
+              src = inputs.self;
+            }
+            ''
+              cp $src/git-discover-repos $src/clean.sh $src/gitSettings.nix $src/ARCHITECTURE.md $src/git-safe-directory.test.sh ./
+              mkdir -p lib
+              cp $src/lib/common.sh lib/
+              cp $src/lib/arg-probe.sh lib/
+              cp $src/lib/git-trusted-roots.sh lib/
+              chmod u+w ./git-discover-repos ./clean.sh ./git-safe-directory.test.sh
+              patchShebangs ./git-discover-repos
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash ./git-safe-directory.test.sh
               touch $out
             '';
         # #1475 phase 2: keep the suite inventory complete, check source
@@ -1287,6 +1314,7 @@ rec {
               mkdir -p lib
               cp $src/lib/common.sh lib/
               cp $src/lib/arg-probe.sh lib/
+              cp $src/lib/git-trusted-roots.sh lib/
               chmod u+w ./git-maintain-repos ./git-maintain-repos.test.sh ./git-discover-repos
               patchShebangs ./git-discover-repos ./git-maintain-repos
               export HOME="$TMPDIR/home"
@@ -1326,6 +1354,7 @@ rec {
               mkdir -p lib
               cp $src/lib/common.sh lib/
               cp $src/lib/arg-probe.sh lib/
+              cp $src/lib/git-trusted-roots.sh lib/
               chmod u+w ./spotlight-exclude-artifacts ./spotlight-exclude-artifacts.test.sh ./git-discover-repos
               patchShebangs ./git-discover-repos
               export HOME="$TMPDIR/home"
@@ -1429,6 +1458,7 @@ rec {
               cp $src/clean.sh $src/opencode-db-backup-prune.sh $src/git-discover-repos $src/git-maintain-repos $src/var-folders-clean.sh $src/casks.nix $src/masApps.nix ./
               mkdir -p lib
               cp $src/lib/common.sh lib/
+              cp $src/lib/git-trusted-roots.sh lib/
               chmod u+w ./opencode-prune-report.test.sh
               export HOME="$TMPDIR/home"
               mkdir -p "$HOME"

@@ -1422,8 +1422,8 @@ _ss_total_removed=0
 sweep_short_lived_scratch() {
   local base="$1" removed=0 handles_rc
   [ -d "$base" ] || return 0
-  local -A fresh=()
-  local f entry name g match fresh_list
+  local -a fresh_names=()
+  local f entry name g match fresh_list fresh_name is_fresh
   if ! fresh_list=$(mktemp "${TMPDIR:-/tmp}/clean-short-scratch.XXXXXX"); then
     warn "short-lived scratch ($base): cannot create freshness-scan file; skipping this base"
     return 0
@@ -1434,14 +1434,18 @@ sweep_short_lived_scratch() {
     return 0
   fi
   while IFS= read -r -d '' f; do
-    fresh["${f##*/}"]=1
+    fresh_names+=("${f##*/}")
   done < "$fresh_list"
   rm -f "$fresh_list"
   for entry in "$base"/*; do
     [ -e "$entry" ] || [ -L "$entry" ] || continue
     name="${entry##*/}"
     short_scratch_is_kept "$name" && continue
-    [ -n "${fresh[$name]:-}" ] && continue   # touched inside the window: keep
+    is_fresh=0
+    for fresh_name in "${fresh_names[@]}"; do
+      [ "$fresh_name" = "$name" ] && { is_fresh=1; break; }
+    done
+    [ "$is_fresh" = 1 ] && continue   # touched inside the window: keep
     match=0
     for g in "${SHORT_SCRATCH_GLOBS[@]}"; do
       # shellcheck disable=SC2053

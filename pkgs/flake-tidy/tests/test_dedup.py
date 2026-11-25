@@ -25,6 +25,33 @@ class TestAnalyzeDedup:
 
         assert groups == {flake_tidy.source_key(lock["nodes"]["a"]): ["a", "b"]}
 
+    def test_root_match_phase_returns_same_source_root_proposal(
+        self, sample_lock, sample_flake_nix, default_config
+    ):
+        groups = flake_tidy._group_by_source(sample_lock)
+
+        proposals = flake_tidy._root_match_proposals(
+            sample_lock, sample_flake_nix, default_config, groups, False
+        )
+
+        assert any(
+            proposal["follows_parts"] == ["nixpkgs-unstable"]
+            and proposal["target"] == "nixpkgs"
+            for proposal in proposals
+        )
+
+    def test_dedupe_and_filter_phase_keeps_first_path_proposal(self):
+        first = {
+            "follows_parts": ["child", "input"],
+            "follows_path": "child.input",
+            "target": "nixpkgs",
+        }
+        duplicate = {**first, "target": "other-root"}
+
+        result = flake_tidy._dedupe_and_filter([first, duplicate], "")
+
+        assert result == [first]
+
     @pytest.mark.parametrize(
         ("candidate", "current", "expected"),
         [("git", "indirect", True), ("hg", "indirect", True), ("indirect", "git", False)],
@@ -330,6 +357,20 @@ class TestCrossTypeDedup:
         ]
         assert len(cross) == 1, f"Expected cross-type dedup proposal, got: {proposals}"
         assert "cross-type" in cross[0].get("source_key", "")
+
+    def test_hash_straggler_phase_prefers_git_root_over_indirect(self, default_config):
+        lock = self._make_cross_type_lock(
+            root_type="git", trans_type="indirect", same_hash=True
+        )
+        groups = flake_tidy._group_by_source(lock)
+
+        proposals = flake_tidy._hash_dedup_stragglers(
+            lock, self.CONTENT, default_config, groups, False
+        )
+
+        cross = [proposal for proposal in proposals if "cross-type" in proposal.get("source_key", "")]
+        assert len(cross) == 1
+        assert cross[0]["target"] == "flake-utils"
 
     def test_cross_type_skips_different_hash(self, default_config):
         """no proposal when hashes differ."""

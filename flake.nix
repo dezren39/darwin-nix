@@ -1048,7 +1048,7 @@ rec {
             ''
               cp $src/git-discover-repos $src/git-maintain-repos $src/spotlight-exclude-artifacts $src/search.sh $src/patch-vscode-insiders.sh $src/install-vscode-patch-agent.sh $src/var-folders-clean.sh $src/backup-zed.sh $src/code-install-extensions.sh $src/full-clean.sh $src/clean.sh $src/symlinker.sh $src/opencode-db-backup-prune.sh $src/opencode-db-prune.sh $src/opencode-db-vacuum.sh $src/help-extra-args.test.sh ./
               mkdir -p lib pkgs/brew-repair pkgs/adopt
-              cp $src/lib/common.sh $src/lib/arg-probe.sh lib/
+              cp $src/lib/common.sh $src/lib/arg-probe.sh $src/lib/git-trusted-roots.sh lib/
               cp $src/pkgs/brew-repair/brew-repair.sh pkgs/brew-repair/
               cp $src/pkgs/adopt/adopt.sh pkgs/adopt/
               chmod -R u+w ./
@@ -1210,11 +1210,9 @@ rec {
               bash ./clean.test.sh
               touch $out
             '';
-        # #2012: git-safe-directory.test.sh pins the scoped safe.directory
-        # trust roots — no star wildcard in gitSettings.nix, the runtime
-        # twin, or either script override; the nix list and the fragment
-        # agree; discovery really passes the scoped flags to git; docs no
-        # longer describe a wildcard.
+        # #2012: real Git checks exact/recursive trust, inherited-wildcard
+        # reset, foreign-owner refusal outside the roots, and canonical
+        # ownership-repair boundaries (ordinary, bare, separate gitdir).
         git-safe-directory-tests =
           pkgs.runCommandLocal "git-safe-directory-tests"
             {

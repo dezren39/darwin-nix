@@ -141,8 +141,11 @@ that list to change which providers are managed.
 linker pinned to `/usr/bin/cc`, credential helpers, an aerospace+fzf window
 switcher, and a `setup-opencode()` helper that symlinks a central `.opencode`
 into projects). Also atuin (Ctrl-R history), starship, direnv+nix-direnv, git
-(work identity, scoped `safe.directory` trust roots — `*/git`, `*/workspace`,
-`*/.local/share/opencode/worktree`, `*/.config/nix`; see `gitSettings.nix` and
+(work identity, scoped `safe.directory` trust roots — `~/git`, `~/workspace/github-work`,
+`~/.local/share/opencode/worktree`, `~/.config/nix`; each has an exact entry
+for the root repository and a trailing `/*` entry for descendants, after an
+empty reset of inherited trust. The rest of `~/workspace` is not trusted;
+see `gitSettings.nix` and
 `just git-config-check`), ghostty (ghostty-bin, synthwave theme).
 
 ---

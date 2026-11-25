@@ -12,6 +12,7 @@ full-clean.test.sh	interpreter-named	suite is run through bash; by-name stubs ar
 gc-root-activation.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
 git-discover-repos.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
 git-maintain-repos.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+git-safe-directory.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
 help-extra-args.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
 install-determinate-nix.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
 install-vscode-patch-agent.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below

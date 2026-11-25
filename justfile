@@ -324,19 +324,18 @@ spotlight-system:
     ./spotlight-exclude-artifacts --system
     sudo ./spotlight-exclude-artifacts --system
 
-# Git: trust check for #2012 — the repo files stay wildcard-free and in
-# agreement, and the managed config on THIS machine (if any) carries the
-# scoped roots. The refusal direction (an untrusted path is actually
-# refused) only fires under foreign ownership; exercise it on the Mac
-# with: sudo -u nobody git -C /tmp status  # must fail: dubious ownership
+# Git: #2012 — isolated real-Git ownership/repair regression tests first,
+# then inspect THIS user's managed config separately. A pre-deployment
+# bare wildcard fails this live check; scoped trailing /* entries are valid.
 [group('maintenance')]
 git-config-check:
     #!/usr/bin/env bash
-    set -uo pipefail
-    ./git-safe-directory.test.sh
+    set -euo pipefail
+    bash ./git-safe-directory.test.sh
     managed="$HOME/.config/git/config"
     if [ ! -f "$managed" ]; then echo "no managed gitconfig at $managed — repo checks above are the verdict"; exit 0; fi
     if git config --file "$managed" --get-all safe.directory | grep -qx '\*'; then echo "FAIL: managed gitconfig still trusts '*'" >&2; exit 1; fi
+    if ! git config --file "$managed" --get-all safe.directory | grep -q .; then echo "FAIL: managed gitconfig has no safe.directory entries" >&2; exit 1; fi
     git config --file "$managed" --get-all safe.directory
 
 # Git: deep maintenance across ~/git (reflog expiry + prune + repack)

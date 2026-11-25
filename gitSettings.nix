@@ -24,23 +24,28 @@
 
   init.defaultBranch = "main";
   # Scoped trust, not a global wildcard (dezren39/darwin-nix#2012,
-  # CVE-2022-24765): git honours a repo only if the repo or one of its
-  # parents is listed here, so each entry covers its whole subtree
-  # (~/git covers ~/git/fleet worktrees). A bare `*` used to opt every
+  # CVE-2022-24765): exact entries trust only that repository; trailing
+  # /* entries trust descendants (including ~/git/fleet worktrees).
+  # A bare `*` used to opt every
   # repository out of the ownership check, silently trusting even
   # attacker-controlled paths owned by another user.
   #
   # Keep this list identical to lib/git-trusted-roots.sh (the runtime
   # twin sourced by git-discover-repos and clean.sh for their cross-user
   # -c overrides). `just git-config-check` fails if the two diverge.
-  # /private/var/folders scratch worktrees stay out deliberately: git
-  # takes no globs here, and same-user TMPDIR checkouts never trip the
+  # /private/var/folders scratch worktrees stay out deliberately: Git
+  # supports trailing /*, not interior globs; same-user checkouts avoid the
   # ownership gate anyway.
   safe.directory = [
+    "" # Reset inherited trust, including a system-level bare wildcard.
     "/Users/drewry.pope/git"
-    "/Users/drewry.pope/workspace"
+    "/Users/drewry.pope/git/*"
+    "/Users/drewry.pope/workspace/github-work"
+    "/Users/drewry.pope/workspace/github-work/*"
     "/Users/drewry.pope/.local/share/opencode/worktree"
+    "/Users/drewry.pope/.local/share/opencode/worktree/*"
     "/Users/drewry.pope/.config/nix"
+    "/Users/drewry.pope/.config/nix/*"
   ];
 
   core = {

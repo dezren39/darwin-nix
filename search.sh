@@ -237,4 +237,5 @@ if [[ ! -s "$UNMANAGED_APPS_FILE" ]]; then
 else
     count=$(wc -l < "$UNMANAGED_APPS_FILE" | tr -d ' ')
     echo "Found ${count} app(s) not installed via Homebrew."
+    echo "To bring one under management, add its cask to casks.nix (see the adoption notes there)."
 fi

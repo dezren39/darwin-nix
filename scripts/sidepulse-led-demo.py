@@ -442,10 +442,24 @@ def main() -> int:
             "(nothing written to the device)."
         )
 
+    restored = False
+
     def restore(*_args):
+        # Idempotent (#2141): signal handlers and playback finally blocks
+        # all call restore(); without the guard the second call re-bootstraps
+        # an already-loaded service and reports a false handoff failure.
+        nonlocal restored
+        if restored:
+            return
+        restored = True
         restart_status_bar(target)
 
-    signal.signal(signal.SIGINT, lambda *_: (restore(), sys.exit(130)))
+    def restore_on_signal(signum, _frame):
+        restore()
+        raise SystemExit(128 + signum)
+
+    for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(signum, restore_on_signal)
     if args.palette:
         try:
             while True:

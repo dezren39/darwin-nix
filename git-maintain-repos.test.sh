@@ -255,6 +255,9 @@ else
 fi
 
 # --- --system --dry-run performs no install (#1718) ---
+DRY_RUN_HOME="$TMP_ROOT/system-dry-run-home"
+mkdir -p "$DRY_RUN_HOME"
+export HOME="$DRY_RUN_HOME"
 run --system --dry-run
 [ "$STATUS" -eq 0 ] || fail "--system --dry-run exited $STATUS (want 0)"
 if [ -s "$STUB_LOG" ]; then
@@ -266,6 +269,15 @@ case "$OUT" in
   *"dry-run: would run git maintenance start"*) echo "ok: --system --dry-run reports the skipped install" ;;
   *) fail "--system --dry-run did not report the skipped install (got: $OUT)" ;;
 esac
+if [ "$(find "$HOME" -mindepth 1 -print -quit)" ]; then
+  fail "--system --dry-run changed fresh HOME: $(find "$HOME" -mindepth 1 -print | sort | tr '\n' ' ')"
+else
+  echo "ok: --system --dry-run left fresh HOME unchanged"
+fi
+case "$OUT" in
+  *"dry-run: would create $HOME/.config/git/maintenance.config"*) echo "ok: --system --dry-run reports the skipped config creation" ;;
+  *) fail "--system --dry-run did not report the skipped config creation (got: $OUT)" ;;
+esac
 
 # --- plain --system still installs (#1718) ---
 # From inside a fixture repository: the install step needs one (it runs
@@ -274,6 +286,7 @@ esac
 (cd "$VALID/repo1" && bash "$SCRIPT" --system >"$TMP_ROOT/out" 2>"$TMP_ROOT/err"); STATUS=$?
 OUT="$(cat "$TMP_ROOT/out")"; ERR="$(cat "$TMP_ROOT/err")"
 [ "$STATUS" -eq 0 ] || fail "plain --system exited $STATUS (want 0)"
+[ -f "$HOME/.config/git/maintenance.config" ] || fail "plain --system did not create maintenance.config"
 if [ -s "$STUB_LOG" ]; then
   echo "ok: plain --system still installs the scheduler"
 else

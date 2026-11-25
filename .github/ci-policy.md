@@ -40,8 +40,10 @@ Per-workflow application in this repo:
 - `flake checks build` — #1134: class 4 like `flake packages build`.
   The full per-check `nix build` matrix (fail-fast off) runs nightly
   (07:17 UTC) and on `workflow_dispatch`, covering every
-  `checks` derivation — the 23 `*-tests` suites plus `formatting`,
-  `tidy`, and `mcpx-darwin-skip`. Coverage is partitioned by system
+  `checks` derivation — the 23 `*-tests` suites plus `formatting`
+  and `tidy`. (`mcpx-darwin-skip` is no longer an in-repo check: it
+  was removed with the mcpx consolidation in #1384 / fbfe162, and no
+  current flake output provides it.) Coverage is partitioned by system
   (#1832): each system's check list is derived from the flake for
   that system (`nix eval --json .#checks.x86_64-linux` /
   `.#checks.aarch64-darwin`), never hardcoded, and Darwin checks

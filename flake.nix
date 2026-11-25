@@ -398,7 +398,9 @@ rec {
               nodeModulesHash = "sha256-6ch57alCpe+WVcekFAgWPjSbD+nzLWp/Su0jKRqVVcU=";
             };
           in
-          inputs.openchamber.packages.${system}.openchamber.override ({ inherit opencode; } // platformHashOverride);
+          inputs.openchamber.packages.${system}.openchamber.override (
+            { inherit opencode; } // platformHashOverride
+          );
 
         brew-repair = import ./pkgs/brew-repair {
           inherit pkgs;

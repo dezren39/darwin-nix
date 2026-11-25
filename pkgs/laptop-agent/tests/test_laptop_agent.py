@@ -1347,6 +1347,18 @@ class PersistedJobTimestampTest(unittest.TestCase):
         if la_mod is not None:
             la_mod.JOBS.clear()
 
+    def test_spool_root_scan_failure_restores_none_and_names_dir(self):
+        la = self._import_agent()
+        with tempfile.TemporaryDirectory() as state_dir:
+            with patch.object(la, "_jobs_root",
+                              side_effect=ValueError("escapes state")):
+                stderr = self._load(la, state_dir)
+            self.assertEqual(la.JOBS, {})
+            lines = [ln for ln in stderr.splitlines() if ln.strip()]
+            self.assertEqual(len(lines), 1, stderr)
+            self.assertIn(str(Path(state_dir) / "jobs"), lines[0])
+            self.assertIn("escapes state", lines[0])
+
     def test_started_at_string_skipped_healthy_kept_stderr_names_dir(self):
         la = self._import_agent()
         with tempfile.TemporaryDirectory() as state_dir:

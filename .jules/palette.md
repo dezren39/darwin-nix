@@ -27,3 +27,9 @@ layer but not the read layer: unreadable/invalid-JSON meta.json hit
 vanished with zero operator-visible feedback while siblings restored.
 **Action:** When a loader has a skip-with-reason contract, audit the
 read/parse step too -- a silent `continue` there defeats the contract.
+
+## 2026-11-25 - The root scan is part of the skip contract too
+**Learning:** `load_persisted_jobs()` can lose every saved job before it
+reaches per-entry validation when `_jobs_root()` or `iterdir()` fails.
+**Action:** Keep the one-line stderr contract at the root scan boundary too;
+name `STATE_DIR / "jobs"` so `_jobs_root()` failures have a path to report.

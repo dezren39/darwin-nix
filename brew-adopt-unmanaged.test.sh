@@ -312,6 +312,16 @@ check "no arg: exit 2" test $rc -eq 2
 check "no arg: usage printed" out_has "usage: brew-adopt-unmanaged.sh PRIMARY_USER"
 check "no arg: no stub calls" test ! -s "$tmp/state/calls"
 
+# 12b. Empty-string argument: the count check alone passes, so the value
+# must be rejected at the contract too — usage error, exit 2, no side
+# effects (#2188; PR #1974 dropped the old ${1:?} guard).
+reset_state
+run_args ""
+check "empty arg: exit 2" test $rc -eq 2
+check "empty arg: names the problem" out_has "PRIMARY_USER must not be empty"
+check "empty arg: usage printed" out_has "usage: brew-adopt-unmanaged.sh PRIMARY_USER"
+check "empty arg: no stub calls" test ! -s "$tmp/state/calls"
+
 # 13. --help and -h: usage on stdout, exit 0, no side effects (#1884).
 reset_state
 run_args --help

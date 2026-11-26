@@ -404,10 +404,17 @@ if [ -n "${VACUUM_TEST_SECOND_FS_DIR:-}" ]; then
   cat >"$statshim/stat" <<EOF
 #!/bin/sh
 path=""
-for arg in "\$@"; do path="\$arg"; done
+follow=0
+for arg in "\$@"; do
+  path="\$arg"
+  [ "\$arg" = "-L" ] && follow=1
+done
 case "\$path" in
-  "$xdir"|"$xdir"/*|"$fx"/xlink-parent|"$fx"/xlink-parent/*) echo second-device; exit 0 ;;
-  "$fx"/*) echo database-device; exit 0 ;;
+  "$xdir"|"$xdir"/*|"$fx"/xlink-parent/*) echo second-device; exit 0 ;;
+  "$fx"/xlink-parent)
+    if [ "\$follow" -eq 1 ]; then echo second-device; else echo database-device; fi
+    exit 0 ;;
+  "$fx"|"$fx"/*) echo database-device; exit 0 ;;
 esac
 exec "$real_stat" "\$@"
 EOF

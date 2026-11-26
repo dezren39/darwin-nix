@@ -80,9 +80,12 @@ make_fixture() { # $1 = fixture dir
 # private store so this fixture also works inside a Nix build sandbox.
 set -euo pipefail
 store_uri="local?root=$SR_TEST_NIX_ROOT"
-got="$("$SR_TEST_REAL_NIX" --store "$store_uri" eval --json --extra-experimental-features 'nix-command flakes' .#inp)"
+# macos-15 can export NIX_REMOTE=daemon for its newer runner daemon. Keep
+# this fixture's real probe on its private local store, even when the runner
+# environment selects the incompatible daemon by default.
+got="$(NIX_REMOTE="$store_uri" "$SR_TEST_REAL_NIX" --store "$store_uri" eval --json --extra-experimental-features 'nix-command flakes' .#inp)"
 [ "$got" = '"brand new input\n"' ] || { echo "stub nix: flake did not see new-input.txt (got: $got)" >&2; exit 1; }
-got2="$("$SR_TEST_REAL_NIX" --store "$store_uri" eval --json --extra-experimental-features 'nix-command flakes' .#inp2)"
+got2="$(NIX_REMOTE="$store_uri" "$SR_TEST_REAL_NIX" --store "$store_uri" eval --json --extra-experimental-features 'nix-command flakes' .#inp2)"
 [ "$got2" = '"pkg input\n"' ] || { echo "stub nix: flake did not see vendor/newpkg/default.nix (got: $got2)" >&2; exit 1; }
 printf '#!/bin/sh\nexit 0\n' > "$SR_TEST_FAKE_SYSTEM/sw/bin/darwin-rebuild"
 chmod +x "$SR_TEST_FAKE_SYSTEM/sw/bin/darwin-rebuild"

@@ -652,7 +652,14 @@ check_services() {
       pid=$(agent_pid "$label")
       if [[ -n "$pid" ]]; then
         sleep 3
-        if [[ "$(agent_pid "$label")" == "$pid" ]] && agent_answers "$url"; then
+        # The deadline gates acceptance, not just the wait (#2020):
+        # the success test used to run before the deadline check
+        # below, so a service first seen healthy in the settle sleep,
+        # already past HEALTH_TIMEOUT, was still reported up. Once
+        # the deadline has expired the success test no longer runs;
+        # the deadline check below reports the agent as not up.
+        if (( SECONDS < deadline )) \
+          && [[ "$(agent_pid "$label")" == "$pid" ]] && agent_answers "$url"; then
           echo "up: $label (pid $pid)"
           break
         fi

@@ -153,8 +153,8 @@ mkdir -p "$work/real-home/.local/share/opencode/tmp/opencode" "$work/real-home/A
 # The report test is about the copied script reaching its OpenCode section,
 # not about this runner's Homebrew installation or identity setup.
 mkdir -p "$work/test-bin"
-cat > "$work/test-bin/sudo" <<'SUDO'
-#!/usr/bin/env bash
+printf '#!%s\n' "$(command -v bash)" > "$work/test-bin/sudo"
+cat >> "$work/test-bin/sudo" <<'SUDO'
 set -eu
 if [ "${1:-}" = "-u" ]; then shift 2; fi
 if [ "${1:-}" != "env" ]; then exit 64; fi

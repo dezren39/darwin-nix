@@ -611,6 +611,34 @@ rec {
               bash tests/failing-jobs-extraction.sh
               touch $out
             '';
+        # #2068: tests/workflow-dispatch-timeouts.sh pins the inline
+        # OIDC mints and pm-dispatch POSTs in the two dispatch
+        # workflows to explicit curl deadlines (mirroring the bounded
+        # helper calls from #1997), so an unbounded inline request
+        # cannot merge back in and stall a job until its outer
+        # timeout.
+        workflow-dispatch-timeouts =
+          pkgs.runCommandLocal "workflow-dispatch-timeouts"
+            {
+              nativeBuildInputs = [
+                pkgs.bash
+                pkgs.coreutils
+                pkgs.gawk
+                pkgs.gnugrep
+              ];
+            }
+            ''
+              mkdir -p .github/workflows tests
+              cp ${./.github/workflows/main-broken-watcher.yml} .github/workflows/main-broken-watcher.yml
+              cp ${./.github/workflows/flake-checks-build.yml} .github/workflows/flake-checks-build.yml
+              cp ${./tests/workflow-dispatch-timeouts.sh} tests/workflow-dispatch-timeouts.sh
+              chmod u+w .github/workflows/*.yml tests/workflow-dispatch-timeouts.sh
+              sed -i "s|#!/usr/bin/env bash|#!${pkgs.bash}/bin/bash|g" tests/workflow-dispatch-timeouts.sh
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              bash tests/workflow-dispatch-timeouts.sh
+              touch $out
+            '';
         # #1149: simple-rebuild.test.sh pins simple-rebuild.sh's
         # mode-flag parser -- --build-only with --activate-only in
         # either order and a repeated --activate-only exit 2 naming

@@ -520,7 +520,10 @@ have() { command -v "$1" >/dev/null 2>&1; }
 dir_has_open_handles() {
   local path="$1" out rc err err_file
   command -v lsof >/dev/null 2>&1 || return 2
-  err_file="$(mktemp)" || return 2
+  # Explicit /tmp template, never bare mktemp: this helper is extracted
+  # into harnesses whose TMPDIR can point at an already-removed scratch
+  # dir, and a bare mktemp failure there would misread idle as unknown.
+  err_file="$(mktemp /tmp/clean-lsof-err.XXXXXX)" || return 2
   out="$(lsof +D "$path" 2>"$err_file")"; rc=$?
   err="$(cat "$err_file" 2>/dev/null)"; rm -f "$err_file"
   [ -n "$out" ] && return 0

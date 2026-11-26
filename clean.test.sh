@@ -355,6 +355,45 @@ fi
 [ -d "$VF1977_OTHER_T/mcpx-fake-1977other" ] && [ -d "$VF1977_OTHER_T/zzpg1977other" ] && [ -d "$VF1977_OTHER_T/pytest-of-1977other/pytest-1" ] || fail "vf-root (#1977): unconfigured root entries were touched"
 echo "ok: vf-root (#1977): unconfigured root untouched"
 
+# ─── Full-run unknown-scratch catch-all honors VAR_FOLDERS_ROOT (#1903) ───
+# #1865 fixed the enumeration at both unknown-scratch call sites, but
+# its section above drives only the --only-unknown-scratch early exit;
+# the full-run catch-all leg (the sweep over "$VAR_FOLDERS_ROOT"/*/*/T
+# in the main body) had no fixture of its own -- #1903's remaining
+# item. Fixture mirrors the twin-root shape: an eligible entry under a
+# configured root's */*/T, a twin under an unconfigured root, driven
+# with --system --dry-run: the configured entry must appear in the
+# end-of-run unknown-scratch report, the twin must not even be named,
+# and the flagged entry must be left in place.
+VFU_ROOT="$TMP_ROOT/vf-root-1903"
+VFU_T="$VFU_ROOT/ab/cd/T"
+mkdir -p "$VFU_T"
+VFU_ENTRY="$VFU_T/zzunk1903"
+mkdir -p "$VFU_ENTRY"
+dd if=/dev/zero of="$VFU_ENTRY/blob" bs=1024 count=1536 2>/dev/null
+touch -d '2020-01-02 03:04:05' "$VFU_ENTRY"
+VFU_OTHER_T="$TMP_ROOT/vf-other-1903/ef/gh/T"
+mkdir -p "$VFU_OTHER_T"
+VFU_OTHER_ENTRY="$VFU_OTHER_T/zzunk1903other"
+mkdir -p "$VFU_OTHER_ENTRY"
+dd if=/dev/zero of="$VFU_OTHER_ENTRY/blob" bs=1024 count=1536 2>/dev/null
+touch -d '2020-01-02 03:04:05' "$VFU_OTHER_ENTRY"
+OUT="$(PATH="$LSOF_STUB_DIR:$PATH" VAR_FOLDERS_ROOT="$VFU_ROOT" UNKNOWN_SCRATCH_MIN_MB=1 UNKNOWN_SCRATCH_STALE_DAYS=1 bash "$SCRIPT" --system --dry-run 2>"$TMP_ROOT/err")"; STATUS=$?
+ERR="$(cat "$TMP_ROOT/err")"
+[ "$STATUS" -eq 0 ] || fail "vf-root (#1903): --system --dry-run exited $STATUS (stderr: $ERR)"
+if grep -q 'vf-root-1903/ab/cd/T/zzunk1903' <<<"$OUT"; then
+  echo "ok: vf-root (#1903): full-run unknown-scratch catch-all reports the configured root's entry"
+else
+  fail "vf-root (#1903): full-run unknown-scratch catch-all did not report the configured root's entry"
+fi
+if grep -q 'vf-other-1903' <<<"$OUT"; then
+  fail "vf-root (#1903): unconfigured root was scanned"
+else
+  echo "ok: vf-root (#1903): unconfigured root not scanned"
+fi
+[ -d "$VFU_ENTRY" ] || fail "vf-root (#1903): flagged-only full run deleted the fixture entry"
+echo "ok: vf-root (#1903): flagged entry left in place"
+
 # Pytest newest-run guard fires under BSD and GNU stat alike. Both
 # runs are older than PYTEST_KEEP_HOURS, so only the guard keeps the
 # newest (pytest-2). --dry-run makes del() report instead of remove:

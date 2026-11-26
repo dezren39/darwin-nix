@@ -151,12 +151,6 @@ def read_token(path: Path) -> str:
 TOKEN = read_token(TOKEN_FILE)
 
 
-def tail_bytes(data: bytes, cap: int):
-    if len(data) <= cap:
-        return data, False
-    return data[-cap:], True
-
-
 def tail_file(path: Path, cap: int = MAX_OUT):
     """Return the last `cap` bytes of a spool file and whether it was cut.
 

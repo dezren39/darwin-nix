@@ -387,11 +387,33 @@ counts_ok "$db" || fail "row counts after swap-in mv rollback are not 500/500/50
 [ ! -e "${db}.staging" ] || fail "swap-in mv rollback left the staging file behind"
 ok_if_clean "$before" "injected swap-in mv failure rolls back: original restored byte-identical at the active path, no .old or .staging left"
 
-# A second filesystem for the cross-filesystem cases below: /dev/shm is
-# the usual one on Linux, and the device numbers must actually differ
-# or a case would silently be same-filesystem.
+# A second filesystem for the cross-filesystem cases below. Nix's Darwin
+# builder has no /dev/shm, so its check injects a second-volume path and a
+# stat double that gives it a distinct device identity. The files remain
+# inside the fixture HOME; this drives the same cross-filesystem code path
+# deterministically without requiring a mounted volume.
 xdir=""
-if [ -d /dev/shm ] && [ -w /dev/shm ]; then
+statshim=""
+statshim_prefix=""
+if [ -n "${VACUUM_TEST_SECOND_FS_DIR:-}" ]; then
+  xdir="$VACUUM_TEST_SECOND_FS_DIR"
+  mkdir -p "$xdir"
+  real_stat="$(command -v stat)"
+  statshim="$HOME/second-fs-stat-shim"
+  mkdir -p "$statshim"
+  cat >"$statshim/stat" <<EOF
+#!/bin/sh
+path=""
+for arg in "\$@"; do path="\$arg"; done
+case "\$path" in
+  "$xdir"|"$xdir"/*|"$fx"/xlink-parent|"$fx"/xlink-parent/*) echo second-device; exit 0 ;;
+  "$fx"/*) echo database-device; exit 0 ;;
+esac
+exec "$real_stat" "\$@"
+EOF
+  chmod +x "$statshim/stat"
+  statshim_prefix="$statshim:"
+elif [ -d /dev/shm ] && [ -w /dev/shm ]; then
   dev_of() { stat -c %d "$1" 2>/dev/null || df -P "$1" | awk 'NR==2 {print $1}'; }
   if [ "$(dev_of "$fx")" != "$(dev_of /dev/shm)" ]; then xdir="/dev/shm"; fi
 fi
@@ -405,7 +427,7 @@ db="$fx/stagefail.db"; mk_fixture "$db"
 cp "$db" "$fx/stagefail.before"
 shimdir="$HOME/stagefail-shim"
 mk_stage_cp_fail_shim "$shimdir"
-out="$(PATH="$shimdir:$PATH" bash "$VACUUM" --db "$db" --into "$xdir/stagefail-$$.compact" -y 2>&1)"; rc=$?
+out="$(PATH="$shimdir:$statshim_prefix$PATH" bash "$VACUUM" --db "$db" --into "$xdir/stagefail-$$.compact" -y 2>&1)"; rc=$?
 [ "$rc" -ne 0 ] || fail "staging cp failure exited 0, expected failure before any rename: $out"
 case "$out" in
   *"could not stage the compacted copy"*) ;;
@@ -465,7 +487,7 @@ if [ -n "$xdir" ]; then
   mkdir -p "$xdir/vacuum-xlink-$$"
   ln -s "$xdir/vacuum-xlink-$$" "$fx/xlink-parent"
   into="$fx/xlink-parent/xlink.compact"
-  out="$(bash "$VACUUM" --db "$db" --into "$into" --force -y 2>&1)"; rc=$?
+  out="$(PATH="$statshim_prefix$PATH" bash "$VACUUM" --db "$db" --into "$into" --force -y 2>&1)"; rc=$?
   [ "$rc" -eq 0 ] || fail "symlinked cross-filesystem --into exited $rc: $out"
   case "$out" in
     *"staging the verified copy beside the database"*) ;;
@@ -494,7 +516,7 @@ if [ -n "$xdir" ]; then
   db="$fx/xfs.db"; mk_fixture "$db"
   orig_size="$(size_of "$db")"
   into="$xdir/vacuum-xfs-$$.compact"
-  out="$(bash "$VACUUM" --db "$db" --into "$into" --force -y 2>&1)"; rc=$?
+  out="$(PATH="$statshim_prefix$PATH" bash "$VACUUM" --db "$db" --into "$into" --force -y 2>&1)"; rc=$?
   if [ "$rc" -ne 0 ]; then
     fail "cross-filesystem --into run exited $rc: $out"
   else

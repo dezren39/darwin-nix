@@ -146,10 +146,14 @@ for f in "$work/store-tools"/*; do
     sed -i "1s|^#!/usr/bin/env bash|#!$(command -v bash)|" "$f"
   fi
 done
-mkdir -p "$work/real-home/.local/share/opencode/tmp/opencode" "$work/var-folders"
-env HOME="$work/real-home" VAR_FOLDERS_ROOT="$work/var-folders" \
+mkdir -p "$work/real-home/.local/share/opencode/tmp/opencode" "$work/real-home/Applications" "$work/var-folders"
+env HOME="$work/real-home" VAR_FOLDERS_ROOT="$work/var-folders" CLEAN_APPS_DIR="$work/real-home/Applications" \
   bash "$work/store-tools/clean.sh" --dry-run --no-git-maintenance > "$work/real.out" 2>&1
 rc=$?
+if [ "$rc" -ne 0 ]; then
+  echo "real clean.sh output (exit $rc):" >&2
+  sed 's/^/  /' "$work/real.out" >&2
+fi
 [ "$rc" -eq 0 ]; check "real store-copied clean.sh exits 0 in the report shape" "$?"
 grep -q 'opencode scratch dirs' "$work/real.out"
 check "real clean.sh reaches the opencode scratch section" "$?"

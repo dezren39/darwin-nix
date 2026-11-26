@@ -158,7 +158,9 @@ rec {
       # mcpx-src) carry every fix this flake used to pin forward
       # (opencode #1547 route overrides, the #1791 node_modules hash,
       # code #11443/#11453/#11476 for mcpx on aarch64-darwin), as of
-      # openchamber 1f22216 / opencode cd2ce27 / code 2dc8cb8 (2026-11-24).
+      # openchamber 1f22216 / opencode cd2ce27 / code 54626513 (2026-11-26).
+      # The code pin advances past the one-off takeover failure on 2dc8cb8;
+      # that exact test passed 10 consecutive runs in Fleet run 45864210459.
       # The opencode bump moves past the #2712 restamp: dfa989e was the
       # stale pre-restamp pin behind the #1991 flake-build failures.
       # If the chain regresses, pin here again with
@@ -932,6 +934,7 @@ rec {
               cp $src/lib/test-harness.sh lib/
               chmod u+w ./opencode-db-vacuum.sh ./opencode-db-vacuum.test.sh
               export HARNESS_CHECK=1
+              export VACUUM_TEST_SECOND_FS_DIR="$TMPDIR/vacuum-test-second-fs"
               bash ./opencode-db-vacuum.test.sh
               touch $out
             '';

@@ -66,7 +66,11 @@ let
     mkdir -p $out/bin
     ln -s ${state}/bin/opencode $out/bin/opencode
   '';
-  openchamber = inputs.openchamber.packages.${system}.openchamber.override {
+  # Use this flake's package so the aarch64-darwin nodeModulesHash
+  # correction in flake.nix is preserved. Calling the raw input here
+  # bypassed that override and made this module's activation build use
+  # the stale upstream hash (#2229).
+  openchamber = ocPkgs.openchamber.override {
     opencode = opencodeLink;
   };
   # The app's bundled opencode-cli is unused while it attaches to the agent's

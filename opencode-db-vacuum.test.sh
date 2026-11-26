@@ -481,6 +481,8 @@ if [ -n "$xdir" ]; then
   [ ! -e "${db}.staging" ] || fail "symlinked cross-filesystem swap left a staging file behind"
   rm -rf "$xdir/vacuum-xlink-$$"
   ok_if_clean "$before" "symlinked --into parent on another filesystem is treated as cross-filesystem: staged swap, DB shrunk, counts intact, no leftovers"
+else
+  harness_environment_waiver "second-filesystem" "symlinked cross-filesystem --into" "no second filesystem available on this runner"
 fi
 
 # --- Cross-filesystem --into succeeds through the staging swap (#1780).

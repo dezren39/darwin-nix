@@ -235,7 +235,7 @@ jobs:
             --arg kind "ci_investigation" \
             --argjson issue_number "$ISSUE_NUMBER" \
             '{repo: $repo, title: $title, prompt: $prompt, issue: true, priority: $priority, kind: $kind, issue_number: $issue_number}')"
-          response="$(curl -sS --connect-timeout 10 --max-time 300 -w $'\n%{http_code}' -X POST "https://dispatch.security.cab/v1/tasks" \
+          response="$(curl -sS -w $'\n%{http_code}' -X POST "https://dispatch.security.cab/v1/tasks" \
             -H "Authorization: Bearer $oidc_token" \
             -H "Content-Type: application/json" \
             -d "$payload")"

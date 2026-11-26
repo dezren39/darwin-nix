@@ -12,7 +12,7 @@ name: flake checks build
 # in-repo check — removed in the #1384 mcpx consolidation, fbfe162),
 # partitioned by system (#1832): the
 # x86_64-linux checks build on ubuntu-latest and the aarch64-darwin
-# checks on macos-14, each list enumerated from the flake for its own
+# checks on macos-15, each list enumerated from the flake for its own
 # system. x86_64-darwin gets no checks from the flake itself
 # (flake.nix excludes it), so it has no partition here.
 #
@@ -95,7 +95,7 @@ jobs:
   nix-build-darwin:
     name: nix build (aarch64-darwin) ${{ matrix.check }}
     needs: list-checks
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 60
     strategy:
       fail-fast: false

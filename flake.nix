@@ -656,6 +656,10 @@ rec {
                 pkgs.coreutils
                 pkgs.gnugrep
                 pkgs.gawk
+                # agent_answers isolates each cmd: probe in its own process
+                # group via perl setpgrp (#2221); perl is stock macOS on the
+                # laptop, but the sandbox needs it provided explicitly.
+                pkgs.perl
               ];
             }
             ''

@@ -334,6 +334,69 @@ EOF
   fi
 fi
 
+# --- check_services enforces the HEALTH_TIMEOUT deadline (#2020) ----
+# The polling loop ran its PID/health success test before the deadline
+# check, so a service first seen healthy in the 3s settle sleep --
+# already past HEALTH_TIMEOUT -- was still reported up. The real
+# function is extracted from simple-rebuild.sh and run under zsh with
+# agent_pid / agent_answers / report_agent / print_error stubbed: the
+# pid is stable and health always answers, so in the late case the
+# deadline itself is the only thing that can refuse acceptance.
+SVC_FN="$TMP_ROOT/check-services.zsh"
+awk '/^check_services\(\) \{$/ { capture=1 } capture { print } capture && /^}$/ { exit }' "$SCRIPT" >"$SVC_FN"
+if [ ! -s "$SVC_FN" ]; then
+  fail "could not extract check_services from simple-rebuild.sh"
+else
+  SVC_RUN="$TMP_ROOT/check-services-run"
+  mkdir -p "$SVC_RUN"
+  cat >"$SVC_RUN/driver.zsh" <<EOF
+agent_pid() { echo 1234; }
+agent_answers() { return 0; }
+report_agent() { echo "not up: \$1" >&2; }
+print_error() { echo "\$*" >&2; }
+health_services=("org.example.test -")
+source "$SVC_FN"
+check_services
+EOF
+  # svc_case <HEALTH_TIMEOUT>: sets SVC_STATUS, SVC_OUT and SVC_ERR.
+  svc_case() {
+    SVC_OUT="$(HEALTH_TIMEOUT="$1" zsh "$SVC_RUN/driver.zsh" 2>"$TMP_ROOT/svc.err")"
+    SVC_STATUS=$?
+    SVC_ERR="$(cat "$TMP_ROOT/svc.err")"
+  }
+
+  # Late success: HEALTH_TIMEOUT=1 expires during the settle sleep, so
+  # the (stubbed, succeeding) health check is first observed after the
+  # deadline and must not be accepted as on-time.
+  svc_case 1
+  if [ "$SVC_STATUS" -ne 0 ]; then
+    ok "check_services refuses a first health success observed after the deadline (#2020)"
+  else
+    fail "check_services accepted a health success after HEALTH_TIMEOUT=1 expired (status 0, out: $SVC_OUT)"
+  fi
+  case "$SVC_OUT" in
+    *"up: org.example.test"*) fail "check_services printed 'up:' for a post-deadline success (#2020)" ;;
+    *) ok "check_services prints no 'up:' line for a post-deadline success (#2020)" ;;
+  esac
+  case "$SVC_ERR" in
+    *"not up: org.example.test"*) ok "check_services reports the late agent as not up (#2020)" ;;
+    *) fail "check_services did not report the late agent as not up (stderr: $SVC_ERR)" ;;
+  esac
+
+  # Control: the same always-healthy service, well inside the
+  # deadline, is accepted.
+  svc_case 30
+  if [ "$SVC_STATUS" -eq 0 ]; then
+    ok "check_services accepts a service healthy before the deadline (#2020)"
+  else
+    fail "check_services refused an on-time healthy service (status $SVC_STATUS, out: $SVC_OUT, err: $SVC_ERR)"
+  fi
+  case "$SVC_OUT" in
+    *"up: org.example.test (pid 1234)"*) ok "check_services prints 'up:' for an on-time healthy service (#2020)" ;;
+    *) fail "check_services did not print the expected 'up:' line (got: $SVC_OUT)" ;;
+  esac
+fi
+
 if [ "$failures" -gt 0 ]; then
   echo "$failures simple-rebuild parser check(s) failed" >&2
   exit 1

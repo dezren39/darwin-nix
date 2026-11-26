@@ -76,4 +76,28 @@ else
 fi
 ok "unsupported BSD formats are rejected"
 harness_stat_double_end
+
+# A named second-filesystem waiver is explicit in check output, while an
+# ordinary skip still fails the same check-mode summary.
+waiver_out="$HARNESS_ROOT/waiver-output"
+if HARNESS_CHECK=1 bash -c 'set -u; . "$1"; harness_environment_waiver second-filesystem cross-filesystem "host has no separate filesystem"; harness_summary' _ "$SELF_DIR/test-harness.sh" >"$waiver_out" 2>&1; then
+  grep -q 'waiver: environment capability second-filesystem absent; case=cross-filesystem; reason=host has no separate filesystem' "$waiver_out" \
+    || fail "environment waiver output omitted its capability or reason"
+  grep -q 'harness: 0 failure(s), 0 skip(s), 1 environment waiver(s)' "$waiver_out" \
+    || fail "check summary did not count the environment waiver"
+else
+  fail "a named environment waiver failed check mode"
+fi
+if harness_environment_waiver unrelated-capability case reason >"$HARNESS_ROOT/unsupported-waiver" 2>&1; then
+  fail "an unrecognized environment capability was accepted"
+fi
+grep -q 'unsupported environment waiver capability: unrelated-capability' "$HARNESS_ROOT/unsupported-waiver" \
+  || fail "unsupported waiver refusal omitted the capability"
+if HARNESS_CHECK=1 bash -c 'set -u; . "$1"; harness_skip ordinary-skip; harness_summary' _ "$SELF_DIR/test-harness.sh" >"$HARNESS_ROOT/skip-output" 2>&1; then
+  fail "an ordinary skip passed check mode"
+fi
+grep -q 'harness: check mode forbids skips' "$HARNESS_ROOT/skip-output" \
+  || fail "check-mode skip failure did not report its rule"
+ok "check mode records only the named second-filesystem waiver and rejects ordinary skips"
+
 harness_summary

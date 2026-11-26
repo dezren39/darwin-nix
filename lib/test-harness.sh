@@ -11,6 +11,8 @@
 #   ... assertions ...
 #   harness_ps_double_end              # ... and only inside this block
 #   harness_skip "reason"              # recorded; fatal in check mode
+#   harness_environment_waiver CAP CASE REASON
+#                                      # records an approved environment absence
 #   harness_summary                    # prints counts, exits nonzero on failure
 #
 # Why a harness at all: the flake checks repeated `HOME=$TMPDIR/home` by
@@ -185,11 +187,34 @@ harness_skip() {
   echo "skip: $1"
 }
 
+# harness_environment_waiver CAPABILITY CASE REASON — record the one
+# environment absence accepted by a check. This is narrower than a skip:
+# only the second-filesystem capability is accepted, and its case and reason
+# are printed into the harness output.
+harness_environment_waiver() {
+  [ "$#" -eq 3 ] || { echo "harness: environment waiver requires capability, case, and reason" >&2; return 1; }
+  local capability="$1" case_name="$2" reason="$3"
+  [ "$capability" = "second-filesystem" ] || {
+    echo "harness: unsupported environment waiver capability: $capability" >&2
+    return 1
+  }
+  [ -n "$case_name" ] && [ -n "$reason" ] || {
+    echo "harness: environment waiver requires a case and reason" >&2
+    return 1
+  }
+  HARNESS_ENVIRONMENT_WAIVERS=$((${HARNESS_ENVIRONMENT_WAIVERS:-0} + 1))
+  printf 'waiver: environment capability %s absent; case=%s; reason=%s\n' "$capability" "$case_name" "$reason"
+}
+
 # harness_summary — print the counts and exit accordingly.
 #   Failures always fail. Skips fail only in check mode (HARNESS_CHECK=1).
 harness_summary() {
-  local failures="${HARNESS_FAILURES:-0}" skips="${HARNESS_SKIPS:-0}"
-  echo "harness: $failures failure(s), $skips skip(s)"
+  local failures="${HARNESS_FAILURES:-0}" skips="${HARNESS_SKIPS:-0}" waivers="${HARNESS_ENVIRONMENT_WAIVERS:-0}"
+  if [ "$waivers" -gt 0 ]; then
+    echo "harness: $failures failure(s), $skips skip(s), $waivers environment waiver(s)"
+  else
+    echo "harness: $failures failure(s), $skips skip(s)"
+  fi
   [ "$failures" -eq 0 ] || exit 1
   if [ "$skips" -gt 0 ] && [ "${HARNESS_CHECK:-0}" = "1" ]; then
     echo "harness: check mode forbids skips" >&2

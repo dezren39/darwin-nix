@@ -375,7 +375,8 @@ class AuthedUnreadBodyConnectionTest(unittest.TestCase):
     def _call(self, conn, method, path, body=None):
         headers = {"X-Agent-Token": self.token,
                    "Content-Type": "application/json"}
-        data = json.dumps(body).encode() if body is not None else None
+        data = (body if isinstance(body, bytes) else json.dumps(body).encode()
+                if body is not None else None)
         conn.request(method, path, body=data, headers=headers)
         r = conn.getresponse()
         payload = r.read()
@@ -389,6 +390,154 @@ class AuthedUnreadBodyConnectionTest(unittest.TestCase):
         status, _, parsed = self._call(conn, "GET", "/health")
         self.assertEqual(status, 200, parsed)
         self.assertTrue(parsed.get("ok"), parsed)
+
+    def _raw_response(self, request):
+        with socket.create_connection(("127.0.0.1", self.port), timeout=2) as sock:
+            sock.settimeout(2)
+            sock.sendall(request)
+            response = bytearray()
+            while True:
+                try:
+                    chunk = sock.recv(4096)
+                except socket.timeout:
+                    self.fail("server left an ambiguous request connection open")
+                if not chunk:
+                    break
+                response.extend(chunk)
+        head, _, body = response.partition(b"\r\n\r\n")
+        return head, body
+
+    def _framing_request(self, method, path, headers, body=b""):
+        wire = (f"{method} {path} HTTP/1.1\r\nHost: localhost\r\n"
+                f"X-Agent-Token: {self.token}\r\n").encode()
+        wire += b"".join(f"{name}: {value}\r\n".encode()
+                         for name, value in headers)
+        return wire + b"\r\n" + body
+
+    def test_chunked_exec_is_rejected_and_connection_closed(self):
+        chunk = b'{"cmds":[]}'
+        head, body = self._raw_response(self._framing_request(
+            "POST", "/exec", [("Transfer-Encoding", "chunked")],
+            (f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n0\r\n\r\n")))
+        self.assertIn(b" 400 ", head)
+        self.assertIn(b"Connection: close", head)
+        self.assertIn(b"unsupported Transfer-Encoding", body)
+
+    def test_chunked_jobs_is_rejected_and_connection_closed(self):
+        chunk = b'{"argv":["/bin/true"]}'
+        head, body = self._raw_response(self._framing_request(
+            "POST", "/jobs", [("Transfer-Encoding", "chunked")],
+            (f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n0\r\n\r\n")))
+        self.assertIn(b" 400 ", head)
+        self.assertIn(b"Connection: close", head)
+        self.assertIn(b"unsupported Transfer-Encoding", body)
+
+    def test_duplicate_transfer_encoding_fields_are_rejected(self):
+        head, body = self._raw_response(self._framing_request(
+            "POST", "/exec", [("Transfer-Encoding", "identity"),
+                               ("Transfer-Encoding", "chunked")]))
+        self.assertIn(b" 400 ", head)
+        self.assertIn(b"Connection: close", head)
+        self.assertIn(b"unsupported Transfer-Encoding", body)
+
+    def test_content_length_and_transfer_encoding_are_rejected(self):
+        smuggled = b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        head, body = self._raw_response(self._framing_request(
+            "POST", "/exec", [("Content-Length", "2"),
+                               ("Transfer-Encoding", "chunked")],
+            b"{}" + smuggled))
+        self.assertIn(b" 400 ", head)
+        self.assertIn(b"Connection: close", head)
+        self.assertIn(b"Content-Length and Transfer-Encoding", body)
+        self.assertEqual(body.count(b"ok"), 0)
+
+    def test_chunked_unread_post_paths_are_rejected(self):
+        chunk = b"junk"
+        framed = f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n0\r\n\r\n"
+        for path in ("/jobs/deadbeef/kill", "/no-such-route"):
+            with self.subTest(path=path):
+                head, body = self._raw_response(self._framing_request(
+                    "POST", path, [("Transfer-Encoding", "chunked")], framed))
+                self.assertIn(b" 400 ", head)
+                self.assertIn(b"Connection: close", head)
+                self.assertIn(b"unsupported Transfer-Encoding", body)
+
+    def test_duplicate_content_length_exec_is_rejected(self):
+        # Issue #2174: two differing Content-Length fields used to pass
+        # the guard; the reader took the first value and the trailing
+        # bytes were parsed as a second request on the same connection.
+        smuggled = b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        head, body = self._raw_response(self._framing_request(
+            "POST", "/exec", [("Content-Length", "2"),
+                              ("Content-Length", "100")],
+            b"{}" + smuggled))
+        self.assertIn(b" 400 ", head)
+        self.assertIn(b"Connection: close", head)
+        self.assertIn(b"duplicate Content-Length", body)
+        self.assertEqual(body.count(b"ok"), 0)
+
+    def test_duplicate_content_length_jobs_is_rejected(self):
+        head, body = self._raw_response(self._framing_request(
+            "POST", "/jobs", [("Content-Length", "2"),
+                              ("Content-Length", "22")],
+            b"{}"))
+        self.assertIn(b" 400 ", head)
+        self.assertIn(b"Connection: close", head)
+        self.assertIn(b"duplicate Content-Length", body)
+
+    def test_identical_duplicate_content_length_is_rejected(self):
+        # Pinned fail-closed (#2174): identical duplicates are rejected
+        # too, never silently coalesced to the first value -- no
+        # intermediary normalizes requests for this daemon.
+        head, body = self._raw_response(self._framing_request(
+            "POST", "/exec", [("Content-Length", "2"),
+                              ("Content-Length", "2")],
+            b"{}"))
+        self.assertIn(b" 400 ", head)
+        self.assertIn(b"Connection: close", head)
+        self.assertIn(b"duplicate Content-Length", body)
+
+    def test_duplicate_content_length_unread_post_paths_are_rejected(self):
+        for path in ("/jobs/deadbeef/kill", "/no-such-route"):
+            with self.subTest(path=path):
+                head, body = self._raw_response(self._framing_request(
+                    "POST", path, [("Content-Length", "2"),
+                                   ("Content-Length", "100")],
+                    b"{}"))
+                self.assertIn(b" 400 ", head)
+                self.assertIn(b"Connection: close", head)
+                self.assertIn(b"duplicate Content-Length", body)
+
+    def test_identity_transfer_encoding_exec_is_rejected(self):
+        # Issue #2170: Transfer-Encoding: identity with no
+        # Content-Length declares no body length; the reader consumed
+        # zero bytes and the real body was parsed as the next request.
+        smuggled = b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        head, body = self._raw_response(self._framing_request(
+            "POST", "/exec", [("Transfer-Encoding", "identity")],
+            b"{}" + smuggled))
+        self.assertIn(b" 400 ", head)
+        self.assertIn(b"Connection: close", head)
+        self.assertIn(b"identity Transfer-Encoding", body)
+        self.assertEqual(body.count(b"ok"), 0)
+
+    def test_identity_transfer_encoding_jobs_is_rejected(self):
+        head, body = self._raw_response(self._framing_request(
+            "POST", "/jobs", [("Transfer-Encoding", "identity")],
+            b"{}"))
+        self.assertIn(b" 400 ", head)
+        self.assertIn(b"Connection: close", head)
+        self.assertIn(b"identity Transfer-Encoding", body)
+
+    def test_identity_transfer_encoding_unread_post_paths_are_rejected(self):
+        for path in ("/jobs/deadbeef/kill", "/no-such-route"):
+            with self.subTest(path=path):
+                head, body = self._raw_response(self._framing_request(
+                    "POST", path, [("Transfer-Encoding", "identity")],
+                    b"{}"))
+                self.assertIn(b" 400 ", head)
+                self.assertIn(b"Connection: close", head)
+                self.assertIn(b"identity Transfer-Encoding", body)
 
     def test_kill_unknown_job_with_body_then_health_same_connection(self):
         conn = self._conn()
@@ -433,6 +582,57 @@ class AuthedUnreadBodyConnectionTest(unittest.TestCase):
         self.assertEqual(parsed, {"error": "no such job"})
         self._assert_health_ok(conn)
         conn.close()
+
+    def test_get_health_with_body_then_health_same_connection(self):
+        conn = self._conn()
+        status, connection, parsed = self._call(
+            conn, "GET", "/health", b"junk")
+        self.assertEqual(status, 200, parsed)
+        self.assertTrue(parsed["ok"])
+        self.assertNotEqual(connection, "close")
+        self._assert_health_ok(conn)
+        conn.close()
+
+    def test_get_unknown_route_with_body_then_health_same_connection(self):
+        conn = self._conn()
+        status, connection, parsed = self._call(
+            conn, "GET", "/no-such-route", b"junk")
+        self.assertEqual(status, 404, parsed)
+        self.assertEqual(parsed, {"error": "no such route"})
+        self.assertNotEqual(connection, "close")
+        self._assert_health_ok(conn)
+        conn.close()
+
+    def test_get_oversized_body_returns_closing_400(self):
+        conn = self._conn()
+        conn.putrequest("GET", "/health")
+        conn.putheader("X-Agent-Token", self.token)
+        conn.putheader("Content-Length", str((1 << 20) + 1))
+        conn.endheaders()
+        response = conn.getresponse()
+        self.assertEqual(response.status, 400)
+        self.assertEqual(response.getheader("Connection"), "close")
+        self.assertIn("too large", json.loads(response.read())["error"])
+        conn.close()
+
+    def test_get_truncated_body_returns_closing_400(self):
+        with socket.create_connection(("127.0.0.1", self.port), timeout=5) as sock:
+            sock.sendall(
+                b"GET /health HTTP/1.1\r\nHost: localhost\r\n"
+                + f"X-Agent-Token: {self.token}\r\n".encode()
+                + b"Content-Length: 4\r\n\r\n"
+            )
+            sock.shutdown(socket.SHUT_WR)
+            response = bytearray()
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                response.extend(chunk)
+        head, _, body = response.partition(b"\r\n\r\n")
+        self.assertIn(b" 400 ", head)
+        self.assertIn(b"Connection: close", head)
+        self.assertIn(b"truncated", body)
 
 class TailFileTest(unittest.TestCase):
     def test_job_public_samples_state_before_reading_spools(self):
@@ -1223,6 +1423,18 @@ class PersistedJobTimestampTest(unittest.TestCase):
         la_mod = sys.modules.get("laptop_agent")
         if la_mod is not None:
             la_mod.JOBS.clear()
+
+    def test_spool_root_scan_failure_restores_none_and_names_dir(self):
+        la = self._import_agent()
+        with tempfile.TemporaryDirectory() as state_dir:
+            with patch.object(la, "_jobs_root",
+                              side_effect=ValueError("escapes state")):
+                stderr = self._load(la, state_dir)
+            self.assertEqual(la.JOBS, {})
+            lines = [ln for ln in stderr.splitlines() if ln.strip()]
+            self.assertEqual(len(lines), 1, stderr)
+            self.assertIn(str(Path(state_dir) / "jobs"), lines[0])
+            self.assertIn("escapes state", lines[0])
 
     def test_started_at_string_skipped_healthy_kept_stderr_names_dir(self):
         la = self._import_agent()
@@ -2240,6 +2452,72 @@ class PersistedJobExitCwdCmdTest(unittest.TestCase):
             self.assertEqual([s["job_id"] for s in summaries],
                              ["healthy"])
             self.assertEqual(publics[0]["exit"], 0)
+
+
+class PersistedJobOversizedMetaTest(unittest.TestCase):
+    """Issue #2094: load_persisted_jobs read each spool meta.json
+    with an uncapped read_text() before parsing, so one oversized
+    meta.json spiked daemon memory at startup.
+
+    Oracle: a meta.json larger than MAX_META is rejected with one
+    logged line naming its dir and the cap, without being restored;
+    a normal meta.json in a sibling spool still restores (control).
+    """
+
+    def _import_agent(self):
+        with tempfile.NamedTemporaryFile("w", suffix="-token",
+                                         delete=False) as f:
+            f.write("persisted-oversized-meta-test-token\n")
+            token_path = f.name
+        os.environ.setdefault("LAPTOP_AGENT_TOKEN_FILE", token_path)
+        sys.path.insert(0, str(AGENT.parent))
+        import laptop_agent as la
+        return la
+
+    def _base_meta(self, job_id):
+        return {"id": job_id, "cwd": "/", "cmd": "test",
+                "started_at": 100.0, "ended_at": 150.0, "exit": 0,
+                "state": "done", "interrupted": False}
+
+    def _write_spool(self, state_dir, job_id, raw):
+        spool = Path(state_dir) / "jobs" / job_id
+        spool.mkdir(parents=True)
+        (spool / "meta.json").write_bytes(raw)
+        (spool / "stdout").write_bytes(b"")
+        (spool / "stderr").write_bytes(b"")
+        return spool
+
+    def _load(self, la, state_dir):
+        la.JOBS.clear()
+        err = io.StringIO()
+        with patch.object(la, "STATE_DIR", Path(state_dir)):
+            with contextlib.redirect_stderr(err):
+                la.load_persisted_jobs()
+        return err.getvalue()
+
+    def tearDown(self):
+        la_mod = sys.modules.get("laptop_agent")
+        if la_mod is not None:
+            la_mod.JOBS.clear()
+
+    def test_oversized_meta_skipped_normal_meta_restores(self):
+        la = self._import_agent()
+        with tempfile.TemporaryDirectory() as state_dir:
+            big = dict(self._base_meta("big-job"))
+            big["cmd"] = "x" * (la.MAX_META + 1)
+            big_spool = self._write_spool(
+                state_dir, "big-job", json.dumps(big).encode())
+            self.assertGreater(
+                (big_spool / "meta.json").stat().st_size, la.MAX_META)
+            self._write_spool(state_dir, "healthy",
+                              json.dumps(self._base_meta("healthy")).encode())
+            stderr = self._load(la, state_dir)
+            self.assertNotIn("big-job", la.JOBS)
+            self.assertIn("healthy", la.JOBS)
+            lines = [ln for ln in stderr.splitlines() if ln.strip()]
+            self.assertEqual(len(lines), 1, stderr)
+            self.assertIn(str(big_spool), lines[0])
+            self.assertIn("meta.json exceeds", lines[0])
 
 
 class ReaperStartupTest(unittest.TestCase):

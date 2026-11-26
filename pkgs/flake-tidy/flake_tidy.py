@@ -3744,28 +3744,54 @@ def run_nix_flake_lock_robust(
 # ---------------------------------------------------------------------------
 
 
-def analyze_dedup(
-    lock: dict,
-    content: str,
-    config: dict[str, Any],
-    verbose: bool = False,
-) -> list[dict[str, Any]]:
-    """Analyze the lock graph and return dedup proposals.
+# Explicit source types must outrank the generic indirect type when lock
+# hashes match (#526, #539). Keep the comparison shared by root selection
+# and transitive filtering so the two decisions cannot drift apart.
+_DEDUP_TYPE_PREFERENCE = {
+    "github": 0,
+    "gitlab": 1,
+    "sourcehut": 2,
+    "git": 3,
+    "hg": 4,
+    "tarball": 5,
+    "file": 6,
+    "path": 7,
+    "indirect": 8,
+}
 
-    Does NOT modify any files. Returns list of proposal dicts.
-    """
+
+def _dedup_type_preferred(candidate_type: str, current_type: str) -> bool:
+    """Whether candidate_type is a better hash-match root than current_type."""
+    return _DEDUP_TYPE_PREFERENCE.get(candidate_type, 99) < _DEDUP_TYPE_PREFERENCE.get(
+        current_type, 99
+    )
+
+
+def _group_by_source(lock: dict) -> dict[str, list[str]]:
+    """Group non-root inputs by source identity."""
     nodes = lock["nodes"]
-    root_inputs = nodes.get("root", {}).get("inputs", {})
-    file_order = get_input_file_order(content)
-    max_depth = config["max-depth"]
-
-    # Build source key groups
     groups: dict[str, list[str]] = defaultdict(list)
     for node_name, node_data in nodes.items():
         if node_name == "root" or "original" not in node_data:
             continue
         key = source_key(node_data)
         groups[key].append(node_name)
+
+    return groups
+
+
+def _root_match_proposals(
+    lock: dict,
+    content: str,
+    config: dict[str, Any],
+    groups: dict[str, list[str]],
+    verbose: bool,
+) -> list[dict[str, Any]]:
+    """Propose same-source root and transitive deduplications."""
+    nodes = lock["nodes"]
+    root_inputs = nodes.get("root", {}).get("inputs", {})
+    file_order = get_input_file_order(content)
+    max_depth = config["max-depth"]
 
     proposals: list[dict[str, Any]] = []
 
@@ -3986,6 +4012,21 @@ def analyze_dedup(
                 _annotate_rev(proposal, trans_node, canonical_node)
                 proposals.append(proposal)
 
+    return proposals
+
+
+def _hash_dedup_stragglers(
+    lock: dict,
+    content: str,
+    config: dict[str, Any],
+    groups: dict[str, list[str]],
+    verbose: bool,
+) -> list[dict[str, Any]]:
+    """Propose hash-verified cross-type deduplications."""
+    nodes = lock["nodes"]
+    root_inputs = nodes.get("root", {}).get("inputs", {})
+    max_depth = config["max-depth"]
+    proposals: list[dict[str, Any]] = []
     # --- Cross-type hash dedup ---
     # source_key grouping above misses cases where the original type differs
     # (e.g. github vs indirect) but locked content is byte-identical.
@@ -3995,18 +4036,6 @@ def analyze_dedup(
     # an explicit git URL below indirect — git roots were never chosen and
     # git transitive inputs were wrongly proposed as follows to indirect.
     # hg must be listed for the same reason (#539).
-    _TYPE_PREF = {
-        "github": 0,
-        "gitlab": 1,
-        "sourcehut": 2,
-        "git": 3,
-        "hg": 4,
-        "tarball": 5,
-        "file": 6,
-        "path": 7,
-        "indirect": 8,
-    }
-
     grouped_nodes: set[str] = set()
     for _gk, gmembers in groups.items():
         if len(gmembers) >= 2:
@@ -4028,7 +4057,7 @@ def analyze_dedup(
             existing_type = (
                 nodes[root_by_hash[h][0]].get("original", {}).get("type", "")
             )
-            if _TYPE_PREF.get(cur_type, 99) < _TYPE_PREF.get(existing_type, 99):
+            if _dedup_type_preferred(cur_type, existing_type):
                 root_by_hash[h] = (nname, iname)
         else:
             root_by_hash[h] = (nname, iname)
@@ -4056,7 +4085,7 @@ def analyze_dedup(
         # Prefer explicit type at root; skip if transitive is MORE explicit
         trans_type = node_data.get("original", {}).get("type", "")
         canon_type = nodes[canon_node].get("original", {}).get("type", "")
-        if _TYPE_PREF.get(trans_type, 99) < _TYPE_PREF.get(canon_type, 99):
+        if _dedup_type_preferred(trans_type, canon_type):
             continue
 
         # Never pair a rev-pinned node with an unpinned one, even when
@@ -4125,6 +4154,13 @@ def analyze_dedup(
                 }
             )
 
+    return proposals
+
+
+def _dedupe_and_filter(
+    proposals: list[dict[str, Any]], content: str
+) -> list[dict[str, Any]]:
+    """Keep the first proposal for each path and omit existing follows."""
     # Deduplicate by follows_path
     seen_paths: set[str] = set()
     unique: list[dict[str, Any]] = []
@@ -4141,6 +4177,23 @@ def analyze_dedup(
         if not follows_exists_in_content(content, p["follows_parts"], p["target"])
     ]
     return new_proposals
+
+
+
+def analyze_dedup(
+    lock: dict,
+    content: str,
+    config: dict[str, Any],
+    verbose: bool = False,
+) -> list[dict[str, Any]]:
+    """Analyze the lock graph and return dedup proposals.
+
+    Does NOT modify any files. Returns list of proposal dicts.
+    """
+    groups = _group_by_source(lock)
+    proposals = _root_match_proposals(lock, content, config, groups, verbose)
+    proposals.extend(_hash_dedup_stragglers(lock, content, config, groups, verbose))
+    return _dedupe_and_filter(proposals, content)
 
 
 def apply_dedup(

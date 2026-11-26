@@ -73,6 +73,13 @@ STATE_DIR = Path(os.environ.get(
     "LAPTOP_AGENT_STATE", Path.home() / ".local/state/laptop-agent"))
 MAX_OUT = 1 << 20            # per-stream capture cap for /exec (tail kept)
 MAX_BODY = 1 << 20           # request body cap for /exec and /jobs
+# Spool meta.json read cap (#2094): load_persisted_jobs() reads each
+# persisted job's meta.json at startup. The daemon's own metas are a
+# few hundred bytes; an uncapped read_text() let one oversized spool
+# file spike daemon memory before any validation could run. Reads
+# are capped at this many bytes (plus one, to detect overflow) and
+# anything larger is skipped with a logged reason.
+MAX_META = 1 << 20
 _META_WRITE_ATTEMPTS = 3     # bounded retries for a meta.json write (#2037)
 _META_WRITE_RETRY_DELAY_S = 0.1  # pause between meta.json write attempts
 EXEC_TIMEOUT_DEFAULT = 120
@@ -547,7 +554,10 @@ def load_persisted_jobs():
     try:
         base = _jobs_root()
         entries = list(base.iterdir())
-    except (OSError, RuntimeError, ValueError):
+    except (OSError, RuntimeError, ValueError) as e:
+        print(f"laptop-agent: skipping persisted jobs in {STATE_DIR / 'jobs'}: "
+              f"cannot scan spool root ({e})",
+              file=sys.stderr, flush=True)
         return
     for d in entries:
         if d.is_symlink():
@@ -558,7 +568,14 @@ def load_persisted_jobs():
         if not d.is_dir():
             continue
         try:
-            meta = json.loads((d / "meta.json").read_text())
+            with open(d / "meta.json", "rb") as f:
+                raw = f.read(MAX_META + 1)
+            if len(raw) > MAX_META:
+                print(f"laptop-agent: skipping persisted job {d}: "
+                      f"meta.json exceeds {MAX_META} bytes",
+                      file=sys.stderr, flush=True)
+                continue
+            meta = json.loads(raw)
         except ValueError as e:
             print(f"laptop-agent: skipping persisted job {d}: "
                   f"invalid JSON in meta.json ({e})",
@@ -701,6 +718,49 @@ class FramingError(ValueError):
     so the connection must be closed after the 400 response."""
 
 
+def _check_body_framing(headers):
+    """Reject request framing this daemon cannot parse (#1986).
+
+    A chunked body reads as empty from a Content-Length-only read, and a
+    request carrying both Content-Length and Transfer-Encoding makes the
+    declared length the body while the trailing bytes are parsed as a
+    second request (request smuggling). RFC 9112 section 6.3 requires a
+    server that sees both to reject the message and close the
+    connection. The same section covers the two gaps closed later:
+    duplicate Content-Length fields (#2174) leave the body length
+    ambiguous -- the readers below would take the first value and leave
+    the rest on the socket -- and a Transfer-Encoding that does not end
+    in chunked (identity alone, #2170) declares no body length at all.
+    `headers` is the message object http.server parsed the request
+    headers into.
+    """
+    transfer_encodings = headers.get_all("Transfer-Encoding", [])
+    content_lengths = headers.get_all("Content-Length", [])
+    if len(content_lengths) > 1:
+        # Fail closed on every duplicate (#2174): RFC 9112 section 6.3
+        # permits rejecting differing values or coalescing identical
+        # ones, but no intermediary normalizes requests for this
+        # daemon, so first-wins is never a safe reading.
+        values = ", ".join(content_lengths)
+        raise FramingError(f"duplicate Content-Length: {values}")
+    if transfer_encodings and content_lengths:
+        raise FramingError(
+            "Content-Length and Transfer-Encoding are mutually exclusive")
+    if transfer_encodings:
+        codings = [c.strip().lower()
+                   for value in transfer_encodings
+                   for c in value.split(",") if c.strip()]
+        if codings != ["identity"]:
+            values = ", ".join(transfer_encodings)
+            raise FramingError(f"unsupported Transfer-Encoding: {values}")
+        # Identity alone reaches here only with no Content-Length (the
+        # both-headers case raised above), so the body length is
+        # unreliable: the readers below would consume zero bytes and
+        # leave the real body on the socket as the next request (#2170).
+        raise FramingError(
+            "identity Transfer-Encoding requires Content-Length")
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -765,6 +825,7 @@ class Handler(BaseHTTPRequestHandler):
         return any(hmac.compare_digest(c, expected) for c in candidates)
 
     def _body(self):
+        _check_body_framing(self.headers)
         try:
             n = int(self.headers.get("Content-Length") or 0)
         except (TypeError, ValueError):
@@ -789,6 +850,7 @@ class Handler(BaseHTTPRequestHandler):
         be established from the headers or the wire; the caller's
         error path then answers with Connection: close, the same
         contract as an unreadable body in _body()."""
+        _check_body_framing(self.headers)
         try:
             n = int(self.headers.get("Content-Length") or 0)
         except (TypeError, ValueError):
@@ -823,6 +885,7 @@ class Handler(BaseHTTPRequestHandler):
     def _do_GET(self):
         if not self._authed():
             return self._send(401, {"error": "bad token"}, close=True)
+        self._drain_body()
         path = urlparse(self.path)
         if path.path == "/health":
             with JOBS_LOCK:

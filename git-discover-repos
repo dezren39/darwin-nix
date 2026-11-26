@@ -281,9 +281,30 @@ fi
 # --tmpdir sweep; unset means the production /private/var/folders).
 VAR_FOLDERS_ROOT="${VAR_FOLDERS_ROOT:-/private/var/folders}"
 
-# git refuses to touch repos owned by another user; every consumer here is
-# read-only discovery, so assert safety rather than fail.
-git_q() { git -c safe.directory='*' "$@"; }
+# git refuses to touch repos owned by another user; discovery is
+# read-only, so route the cross-user override through the scoped trust
+# roots (dezren39/darwin-nix#2012) instead of asserting safety for every
+# path on the machine. Sourced lazily on first use: SCAN_HOME is only
+# final after argument parsing, and --help paths must never pay for it.
+# When the fragment is absent (older checkouts), fall back to plain git:
+# strict ownership enforcement, which fails closed (unknown -> kept).
+GIT_TRUSTED_INIT=""
+GIT_TRUSTED_C_ARGS=()
+git_q() {
+  if [ -z "$GIT_TRUSTED_INIT" ]; then
+    GIT_TRUSTED_INIT=1
+    if [ -f "$_self_dir/lib/git-trusted-roots.sh" ]; then
+      # shellcheck source=lib/git-trusted-roots.sh
+      . "$_self_dir/lib/git-trusted-roots.sh"
+      git_trusted_c_args
+    fi
+  fi
+  if [ "${#GIT_TRUSTED_C_ARGS[@]}" -gt 0 ]; then
+    git "${GIT_TRUSTED_C_ARGS[@]}" "$@"
+  else
+    git "$@"
+  fi
+}
 
 canon() { (cd "$1" 2>/dev/null && pwd -P) || printf '%s\n' "$1"; }
 is_repo() { [ -e "$1/.git" ]; }

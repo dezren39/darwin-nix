@@ -339,6 +339,12 @@ in
       settings = (import ./gitSettings.nix) // {
         include.path = "~/.config/git/maintenance.config";
       };
+      # Conditional identity includes (#2096): the work identity applies
+      # only inside work checkouts; the default identity in gitSettings.nix
+      # stays personal. The entries live in gitIncludes.nix so the
+      # git-identity flake check can evaluate the real list through
+      # home-manager instead of a copy.
+      includes = import ./gitIncludes.nix;
       ignores = [
         ".DS_Store"
         "*.swp"

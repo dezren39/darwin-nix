@@ -19,11 +19,43 @@
 {
   user = {
     name = "Drewry Pope";
-    email = "drewry.pope@vertexinc.com"; # TODO: move work email out of default
+    # Personal identity by default: the GitHub noreply address for dezren39,
+    # so a commit from any checkout on this machine attributes to the
+    # personal account unless a conditional include says otherwise. The work
+    # identity is NOT the default (dezren39/darwin-nix#2096): it lives in
+    # gitIncludes.nix and home-manager applies it only inside work checkouts
+    # (a gitdir under ~/workspace/github-work). Do not
+    # put a work address back here — the git-identity flake check fails if
+    # the default rendered from this file is one, and so does
+    # `just git-config-check` on a deployed config.
+    email = "11225574+dezren39@users.noreply.github.com";
   };
 
   init.defaultBranch = "main";
-  safe.directory = "*";
+  # Scoped trust, not a global wildcard (dezren39/darwin-nix#2012,
+  # CVE-2022-24765): exact entries trust only that repository; trailing
+  # /* entries trust descendants (including ~/git/fleet worktrees).
+  # A bare `*` used to opt every
+  # repository out of the ownership check, silently trusting even
+  # attacker-controlled paths owned by another user.
+  #
+  # Keep this list identical to lib/git-trusted-roots.sh (the runtime
+  # twin sourced by git-discover-repos and clean.sh for their cross-user
+  # -c overrides). `just git-config-check` fails if the two diverge.
+  # /private/var/folders scratch worktrees stay out deliberately: Git
+  # supports trailing /*, not interior globs; same-user checkouts avoid the
+  # ownership gate anyway.
+  safe.directory = [
+    "" # Reset inherited trust, including a system-level bare wildcard.
+    "/Users/drewry.pope/git"
+    "/Users/drewry.pope/git/*"
+    "/Users/drewry.pope/workspace/github-work"
+    "/Users/drewry.pope/workspace/github-work/*"
+    "/Users/drewry.pope/.local/share/opencode/worktree"
+    "/Users/drewry.pope/.local/share/opencode/worktree/*"
+    "/Users/drewry.pope/.config/nix"
+    "/Users/drewry.pope/.config/nix/*"
+  ];
 
   core = {
     editor = "vim";

@@ -44,6 +44,10 @@ from sidepulse.compose import (
 )
 
 STATUS_BAR_JOB = "io.sidepulse.agentstatus"
+# launchctl normally answers in well under a second. The bound exists so a
+# hung status-bar handoff cannot stall the demo forever (#2185): generous
+# enough never to fire on a healthy call, finite enough to hand control back.
+LAUNCHCTL_TIMEOUT_SECONDS = 10.0
 BLURBS = {
     "round-robin": "each signal's own gesture, in turn, whole device",
     "split": "front and back alternate, each carrying one colour",
@@ -159,7 +163,10 @@ def launchctl(action: str) -> bool:
 
     Returns True on success. On failure, prints the exit status and any
     captured stderr to stderr and returns False, so callers can stop
-    instead of racing the status-bar app for the device.
+    instead of racing the status-bar app for the device. The call is
+    bounded by LAUNCHCTL_TIMEOUT_SECONDS (#2185): a timeout is reported
+    distinctly and also returns False, so a hung launchctl can neither
+    stall the demo nor be mistaken for a successful handoff.
     """
     uid = os.getuid()
     plist = Path.home() / "Library/LaunchAgents" / f"{STATUS_BAR_JOB}.plist"
@@ -167,7 +174,21 @@ def launchctl(action: str) -> bool:
         command = ["launchctl", "bootout", f"gui/{uid}/{STATUS_BAR_JOB}"]
     else:
         command = ["launchctl", "bootstrap", f"gui/{uid}", str(plist)]
-    result = subprocess.run(command, capture_output=True, text=True)
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=LAUNCHCTL_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        print(
+            f"launchctl timed out after {LAUNCHCTL_TIMEOUT_SECONDS:g}s "
+            f"trying to {action} the status bar; treating the handoff as "
+            "failed",
+            file=sys.stderr,
+        )
+        return False
     if result.returncode != 0:
         detail = (result.stderr or "").strip()
         print(
@@ -442,10 +463,28 @@ def main() -> int:
             "(nothing written to the device)."
         )
 
-    def restore(*_args):
-        restart_status_bar(target)
+    restored = False
 
-    signal.signal(signal.SIGINT, lambda *_: (restore(), sys.exit(130)))
+    def restore(*_args):
+        # Idempotent once it succeeds (#2141): signal handlers and playback
+        # finally blocks all call restore(); without the guard the second
+        # call re-bootstraps an already-loaded service and reports a false
+        # handoff failure. A failed restart must not latch, though (#2179):
+        # restart_status_bar() reports the failure itself, and only its
+        # success marks restoration complete, so the next caller (e.g. the
+        # finally block after a signal handler's failed attempt) retries.
+        nonlocal restored
+        if restored:
+            return
+        if restart_status_bar(target):
+            restored = True
+
+    def restore_on_signal(signum, _frame):
+        restore()
+        raise SystemExit(128 + signum)
+
+    for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(signum, restore_on_signal)
     if args.palette:
         try:
             while True:

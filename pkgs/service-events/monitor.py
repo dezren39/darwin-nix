@@ -242,7 +242,19 @@ class Monitor:
         if procs is None:
             self.emit("monitor.error", error="sample failed: ps")
         else:
-            for pid in sorted(set(self.procs) - set(procs)):
+            # #1985: a pid present in both samples whose (role, program)
+            # changed was reused by a different process: the old process
+            # exited and a new one started. Diffing by pid alone hid both
+            # events and carried the old role's conns/stats into the new
+            # role, mis-attributing conn.close. Treat changed pids as
+            # exit+start so their conn/stat state is dropped below with
+            # the old role's exit accounting.
+            changed = {
+                pid
+                for pid in set(self.procs) & set(procs)
+                if (self.procs[pid][0], self.procs[pid][2]) != (procs[pid][0], procs[pid][2])
+            }
+            for pid in sorted((set(self.procs) - set(procs)) | changed):
                 role, ppid, program = self.procs[pid]
                 open_conns = self.conns.pop(pid, {})
                 self.emit("process.exit", role=role, pid=pid, ppid=ppid, program=program, open_connections=len(open_conns))
@@ -254,7 +266,7 @@ class Monitor:
                 if opened or closed:
                     self.emit("conn.stats", role=role, pid=pid, opened=opened, closed=closed,
                               open_now=0, window_s=round(now - self.last_stats))
-            for pid in sorted(set(procs) - set(self.procs)):
+            for pid in sorted((set(procs) - set(self.procs)) | changed):
                 role, ppid, program = procs[pid]
                 parent = procs.get(ppid, (None,))[0] or ("launchd" if ppid == 1 else None)
                 self.emit("process.running" if self.first else "process.start", role=role, pid=pid, ppid=ppid,

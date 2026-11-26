@@ -8,10 +8,13 @@ chromium-family-cdp.test.sh	interpreter-named	suite is run through bash; by-name
 clean.test.sh	harness	bash suite sources the shared test harness
 code-install-extensions.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
 context7-login.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+deploy-services.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
 full-clean.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
 gc-root-activation.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
 git-discover-repos.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+git-identity.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
 git-maintain-repos.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+git-safe-directory.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
 help-extra-args.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
 install-determinate-nix.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
 install-vscode-patch-agent.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
@@ -26,6 +29,7 @@ opencode-db-backup.test.sh	interpreter-named	suite is run through bash; by-name 
 opencode-db-pids.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
 opencode-db-prune.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
 opencode-db-vacuum.test.sh	harness	bash suite sources the shared test harness
+opencode-notifier-deploy.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
 opencode-prune-report.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
 opencode-tmp-guard.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
 patch-vscode-insiders.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
@@ -35,6 +39,7 @@ pkgs/brew-repair/brew-repair.test.sh	interpreter-named	suite is run through bash
 pkgs/buffer-backup/check-lock-sync.test.py	interpreter-named	suite is run through python
 pkgs/buffer-backup/cleanup-count.test.mjs	interpreter-named	suite is run through node
 pkgs/bun-bin/check-pin-sync.test.py	interpreter-named	suite is run through python
+pkgs/check-tool-pins.test.py	interpreter-named	suite is run through python
 pkgs/flake-tidy/tests/test_cli.py	interpreter-named	suite is run through python
 pkgs/flake-tidy/tests/test_config.py	interpreter-named	suite is run through python
 pkgs/flake-tidy/tests/test_dedup.py	interpreter-named	suite is run through python
@@ -54,8 +59,11 @@ plugins/tool-definitions.test.mjs	interpreter-named	suite is run through node
 plugins/warp-import.test.mjs	interpreter-named	suite is run through node
 rebuild-backup-zed.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
 rebuild-staging.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+scripts/sidepulse-led-demo.test.py	interpreter-named	suite is run through python
 search.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+simple-rebuild-phase-build.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
 simple-rebuild-staging.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+simple-rebuild-token-race.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
 simple-rebuild.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
 spotlight-exclude-artifacts.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
 symlink-scripts.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below

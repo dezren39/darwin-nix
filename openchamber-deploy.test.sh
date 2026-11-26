@@ -150,6 +150,51 @@ check "real password rotation restarts the running service" $?
 [ "$(cat "$rotation/state/deployed")" = "$rotation/start-script:$real_hash" ]
 check "rotation stores the real password hash" $?
 
+run_deploy_not_running() { # $1 fixture root; $2 output file; $3 kickstart exit status; echoes deploy exit status
+  local root=$1 out=$2 kickstart_rc=$3
+  ROOT="$root" HOME="$root/home" PATH="$work/bin:$PATH" \
+    DEPLOY_SCRIPT="$work/deploy.sh" KICKSTART_RC="$kickstart_rc" bash -c '
+      set -u
+      launchctl() {
+        if [ "$1" = print ]; then echo "state = not running"; return 0; fi
+        printf "%s\n" "$*" >> "$ROOT/calls.log"
+        return "$KICKSTART_RC"
+      }
+      run() { "$@"; }
+      sleep() { :; }
+      source "$DEPLOY_SCRIPT"
+    ' > "$out" 2>&1
+  local status=$?
+  if [ "$status" -ne 0 ]; then cat "$out" >&2; fi
+  echo "$status"
+}
+
+# A failed start of a not-running service must not record the new key:
+# otherwise the next activation sees deployed == key and never retries.
+failed_start="$work/failed-start"
+prepare_case "$failed_start" hunter2 "$failed_start/start-script:$old_hash"
+rc=$(run_deploy_not_running "$failed_start" "$work/failed-start.out" 1)
+[ "$rc" -eq 1 ]; check "failed not-running kickstart fails activation" $?
+grep -q 'deploy.start-failed cause=ui-password-changed' "$failed_start/events.log"
+check "failed kickstart emits deploy.start-failed" $?
+! grep -q 'deploy.restart' "$failed_start/events.log"
+check "failed kickstart does not emit deploy.restart" $?
+grep -q 'kickstart gui/' "$failed_start/calls.log"
+check "failed kickstart was attempted without -k" $?
+[ "$(cat "$failed_start/state/deployed")" = "$failed_start/start-script:$old_hash" ]
+check "failed kickstart leaves deployed marker unchanged" $?
+
+# A successful start of a not-running service still writes the marker and
+# emits deploy.restart, so the next activation can retry only on failure.
+ok_start="$work/ok-start"
+prepare_case "$ok_start" hunter2 "$ok_start/start-script:$old_hash"
+rc=$(run_deploy_not_running "$ok_start" "$work/ok-start.out" 0)
+[ "$rc" -eq 0 ]; check "successful not-running kickstart succeeds" $?
+grep -q 'deploy.restart cause=ui-password-changed' "$ok_start/events.log"
+check "successful kickstart emits deploy.restart" $?
+[ "$(cat "$ok_start/state/deployed")" = "$ok_start/start-script:$real_hash" ]
+check "successful kickstart writes deployed marker" $?
+
 # The start script (launchd's ProgramArguments) and the boot race: after a
 # reboot sops-nix can decrypt the password after this agent starts, and the
 # script used to start OpenChamber without it. Extract the real script, stub

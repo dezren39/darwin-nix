@@ -16,6 +16,23 @@ Note (2026-11-03, #1388): the `mcpx-src` input no longer exists; mcpx
 now arrives through the openchamber -> opencode chain. The 2026-10-19
 pins above are kept as the record of what this page was written against.
 
+Note (2026-11-25, #1393): on the Linux laptop, the OpenChamber and
+mcpx systemd user units no longer need a Home Manager switch to
+deploy a new build. Their units exec the stable entrypoints
+(`~/.local/state/openchamber/start`, `~/.local/state/mcpx/bin/mcpx`;
+contract in developing-today/code#14187 and the canonical page's
+"Stable deploy entrypoints" section), and this flake's deploy apps
+move a service onto this flake's pinned build through them:
+
+    nix run .#deploy-openchamber
+    nix run .#deploy-mcpx
+
+Each validates the target, repoints the entrypoint atomically,
+restarts the unit only when the entrypoint moved, health-checks,
+and rolls back if the new build does not come up. The unit files
+stay Home Manager-owned. This page's switch-based account below is
+the Mac's deploy path, which is unchanged.
+
 ## What runs
 
 | Service | launchd label | Program | Listens | Logs |
@@ -301,7 +318,7 @@ pids, ports, exit codes and store paths, never secrets.
 | service-monitor | `conn.stats` | every 5 minutes per server: connections opened and closed |
 | service-monitor | `log.rotate` | an agent log passed 20 MB and was rotated (copy, then truncate; 3 kept) |
 | rebuild | `switch.begin`, `switch.activated`, `switch.fail`, `switch.incomplete`, `switch.recorded` | a `just switch`. Activation output goes to `~/Library/Logs/nix-services/switch-<time>.log`; `switch.incomplete` means `/run/current-system` did not move (#656) |
-| openchamber-deploy | `deploy.restart`, `deploy.opencode-handover`, `deploy.unchanged` | what the switch decided for OpenChamber, with `cause` (`first-deploy`, `start-script-changed`, `ui-password-changed`, `opencode-changed`) |
+| openchamber-deploy | `deploy.restart`, `deploy.start-failed`, `deploy.opencode-handover`, `deploy.unchanged` | what the switch decided for OpenChamber, with `cause` (`first-deploy`, `start-script-changed`, `ui-password-changed`, `opencode-changed`); `deploy.start-failed` means the start failed, the deployed marker was not updated, and the next activation retries |
 | openchamber-agent, mcpx-agent | `agent.start` | the agent's start script ran (pid, store path) |
 
 Limits:

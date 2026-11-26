@@ -475,7 +475,19 @@ if [[ -n "$UNDO_TIMESTAMP" ]]; then
   UNDO_ORIG_OUTPUT_DIR=""
   UNDO_ORIG_SKIP_BACKUP=false
   UNDO_ORIG_FORCE=false
+  UNDO_ORIG_SKIP_CONFLICT=false
+  UNDO_ORIG_STRICT=false
 
+  # Undo-header contract (#2016): every v3 header key is AUDIT metadata
+  # describing the original forward run — it is parsed and logged below
+  # so the persisted format cannot drift from the reader, but it does
+  # NOT change how this undo behaves. Undo behaviour is governed only
+  # by this undo invocation's own flags (--force, --strict, --dry-run,
+  # --skip-restore). The one defined exception is skip-backup: it only
+  # selects the diagnostic reason reported for DELETE records (the
+  # original was permanently deleted, not merely lost). Keys absent
+  # from older v2/v3 files keep the defaults above, so those files
+  # parse exactly as before.
   while IFS= read -r hdr; do
     case "$hdr" in
       "# UNDO_VERSION:2") UNDO_VERSION=2 ;;
@@ -485,6 +497,8 @@ if [[ -n "$UNDO_TIMESTAMP" ]]; then
       "# output-dir:"*)   UNDO_ORIG_OUTPUT_DIR="${hdr#"# output-dir: "}" ;;
       "# skip-backup:"*)  [[ "${hdr#"# skip-backup: "}" == "true" ]] && UNDO_ORIG_SKIP_BACKUP=true ;;
       "# force:"*)        [[ "${hdr#"# force: "}" == "true" ]] && UNDO_ORIG_FORCE=true ;;
+      "# skip-conflict:"*) [[ "${hdr#"# skip-conflict: "}" == "true" ]] && UNDO_ORIG_SKIP_CONFLICT=true ;;
+      "# strict:"*)       [[ "${hdr#"# strict: "}" == "true" ]] && UNDO_ORIG_STRICT=true ;;
       "#"*) ;;  # other comments
       *) break ;;  # first non-comment line — stop parsing header
     esac
@@ -520,6 +534,18 @@ if [[ -n "$UNDO_TIMESTAMP" ]]; then
 
   if [[ -n "$UNDO_ORIG_CMD" ]]; then
     ulog "Original command: $UNDO_ORIG_CMD"
+  fi
+  # Audit display of the remaining header keys (#2016 contract above):
+  # logged verbatim so a reader can see exactly what the original run
+  # recorded; none of these values is fed into the undo logic.
+  if [[ -n "$UNDO_ORIG_INPUT_DIR" ]]; then
+    ulog "Original input-dir: $UNDO_ORIG_INPUT_DIR"
+  fi
+  if [[ -n "$UNDO_ORIG_OUTPUT_DIR" ]]; then
+    ulog "Original output-dir: $UNDO_ORIG_OUTPUT_DIR"
+  fi
+  if [[ "$UNDO_VERSION" -ge 3 ]]; then
+    ulog "Original flags (audit only): force=$UNDO_ORIG_FORCE skip-backup=$UNDO_ORIG_SKIP_BACKUP skip-conflict=$UNDO_ORIG_SKIP_CONFLICT strict=$UNDO_ORIG_STRICT"
   fi
 
   ulog ""
@@ -1423,7 +1449,12 @@ if $DRY_RUN; then
   log ""
   log "Log: $LOG_FILE"
 else
-  # Write undo file header (v3 format)
+  # Write undo file header (v3 format). Contract (#2016): all keys
+  # below are audit metadata about this run; the undo reader parses
+  # and logs every one of them but never lets them change undo
+  # behaviour (see the reader's contract comment). Do not add a key
+  # here without adding its parse + audit log line there — the
+  # round-trip tests in symlinker.test.sh pin the two sides together.
   UNDO_FILE="$LOG_DIR/$RUN_TIMESTAMP.undo"
   {
     echo "# UNDO_VERSION:3"

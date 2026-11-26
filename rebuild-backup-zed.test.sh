@@ -48,7 +48,8 @@ HOME_DIR="$TMP_ROOT/home"
 LOG="$TMP_ROOT/steps.log"
 REAL_CP="$(command -v cp)"
 REAL_MV="$(command -v mv)"
-export REAL_CP REAL_MV
+REAL_RM="$(command -v rm)"
+export REAL_CP REAL_MV REAL_RM
 mkdir -p "$BIN" "$HOME_DIR"
 : > "$LOG"
 
@@ -77,6 +78,9 @@ fi
 if [ "${FAIL_RESTORE_CP:-0}" = 1 ]; then
   case "$2:$3" in ./.zed/.settings.json.bak.*:./.zed/settings.json) exit 1 ;; esac
 fi
+if [ "${FAIL_RESTORE_INDEX_CP:-0}" = 1 ]; then
+  case "$2:$3" in ./.zed/.index.json.bak.*:./.zed/index.json) exit 1 ;; esac
+fi
 exec "$REAL_CP" "$@"
 EOF
 cat > "$HOME_DIR/.nix-profile/bin/mv" <<'EOF'
@@ -84,9 +88,24 @@ cat > "$HOME_DIR/.nix-profile/bin/mv" <<'EOF'
 if [ "${FAIL_PUBLISH_MV:-0}" = 1 ] && [ "$3" = "./.zed/index.json" ]; then
   exit 1
 fi
+if [ "${FAIL_PUBLISH_INSTALLED_MV:-0}" = 1 ] && [ "$3" = "./.zed/installed.txt" ]; then
+  exit 1
+fi
 exec "$REAL_MV" "$@"
 EOF
-chmod +x "$HOME_DIR/.nix-profile/bin/cp" "$HOME_DIR/.nix-profile/bin/mv"
+cat > "$HOME_DIR/.nix-profile/bin/rm" <<'EOF'
+#!/bin/sh
+if [ "${FAIL_ROLLBACK_RM:-0}" = 1 ]; then
+  for arg in "$@"; do
+    case "$arg" in
+      ./.zed/settings.json|./.zed/index.json) exit 1 ;;
+    esac
+  done
+fi
+exec "$REAL_RM" "$@"
+EOF
+chmod +x "$HOME_DIR/.nix-profile/bin/cp" "$HOME_DIR/.nix-profile/bin/mv" \
+  "$HOME_DIR/.nix-profile/bin/rm"
 
 # --- rebuild.sh fixture -------------------------------------------------------
 REBUILD_WORK="$TMP_ROOT/rebuild"
@@ -275,6 +294,58 @@ check "backup-zed.sh failed restore cp does not claim prior snapshot restored" \
 check "backup-zed.sh failed restore cp preserves unaffected outputs" \
   grep -qx 'OLD index' "$ZED_OUT/index.json"
 check_no_zed_leftovers "backup-zed.sh failed restore cp leaves no temp files"
+
+# First publish (no prior snapshot) plus a publish failure: rollback must
+# REMOVE the already-published outputs, not restore them (#2191). If the
+# removal itself fails, the script must name the file it could not remove
+# and report that the prior snapshot was not fully restored.
+rm -f "$ZED_OUT/settings.json" "$ZED_OUT/index.json" "$ZED_OUT/installed.txt"
+FAIL_PUBLISH_MV=1 FAIL_ROLLBACK_RM=1 run_script "$BACKUP_WORK" backup-zed.sh
+expect_rc "backup-zed.sh first-publish failed rollback rm exits nonzero" 1
+check "backup-zed.sh first-publish failed rollback rm names the new settings output" \
+  grep -q "could not remove new ./.zed/settings.json" "$TMP_ROOT/err"
+check "backup-zed.sh first-publish failed rollback rm reports not fully restored" \
+  grep -q "was not fully restored" "$TMP_ROOT/err"
+check "backup-zed.sh first-publish failed rollback rm leaves the new settings in place" \
+  grep -q '"fixture": "settings"' "$ZED_OUT/settings.json"
+check "backup-zed.sh first-publish failed rollback rm publishes no index" \
+  test ! -e "$ZED_OUT/index.json"
+check "backup-zed.sh first-publish failed rollback rm publishes no installed list" \
+  test ! -e "$ZED_OUT/installed.txt"
+
+# Same first-publish rollback one publish step later: settings and index
+# both published, the installed rename fails, and both removals fail —
+# the index rm branch is named as well.
+rm -f "$ZED_OUT/settings.json" "$ZED_OUT/index.json" "$ZED_OUT/installed.txt"
+FAIL_PUBLISH_INSTALLED_MV=1 FAIL_ROLLBACK_RM=1 run_script "$BACKUP_WORK" backup-zed.sh
+expect_rc "backup-zed.sh first-publish late failure exits nonzero" 1
+check "backup-zed.sh first-publish late failure names the new settings output" \
+  grep -q "could not remove new ./.zed/settings.json" "$TMP_ROOT/err"
+check "backup-zed.sh first-publish late failure names the new index output" \
+  grep -q "could not remove new ./.zed/index.json" "$TMP_ROOT/err"
+check "backup-zed.sh first-publish late failure reports not fully restored" \
+  grep -q "was not fully restored" "$TMP_ROOT/err"
+check "backup-zed.sh first-publish late failure leaves the new index in place" \
+  grep -q '"fixture": "index"' "$ZED_OUT/index.json"
+check "backup-zed.sh first-publish late failure publishes no installed list" \
+  test ! -e "$ZED_OUT/installed.txt"
+
+# A failed restore of the index (the last publish step fails after the
+# index was already replaced) must name the index output, while the
+# settings restore still succeeds (#2191).
+seed_prior_snapshot
+FAIL_PUBLISH_INSTALLED_MV=1 FAIL_RESTORE_INDEX_CP=1 run_script "$BACKUP_WORK" backup-zed.sh
+expect_rc "backup-zed.sh failed index restore cp exits nonzero" 1
+check "backup-zed.sh failed index restore cp names the index output" \
+  grep -q "could not restore ./.zed/index.json" "$TMP_ROOT/err"
+check "backup-zed.sh failed index restore cp reports not fully restored" \
+  grep -q "was not fully restored" "$TMP_ROOT/err"
+check "backup-zed.sh failed index restore cp still restores settings" \
+  grep -qx 'OLD settings' "$ZED_OUT/settings.json"
+check "backup-zed.sh failed index restore cp leaves the new index in place" \
+  grep -q '"fixture": "index"' "$ZED_OUT/index.json"
+check "backup-zed.sh failed index restore cp preserves the installed list" \
+  grep -qx 'old-ext' "$ZED_OUT/installed.txt"
 
 # Missing source index: settings source is NEW, the index copy fails.
 seed_prior_snapshot

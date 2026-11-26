@@ -163,6 +163,57 @@ if ! grep -qF "failed to enumerate: $enum_zz/zz" "$TMP_ROOT/err"; then fail "fin
 if [ -e "$enum_zz/aa" ]; then fail "find failure (zz): top-level sweep did not run"; fi
 if [ ! -e "$enum_zz/zz/keepme" ]; then fail "find failure (zz): zz contents were removed anyway"; fi
 
+# Sweep-run enumeration failure (#2189): the probe-then-repeat form
+# reads only the probe's status, so a failure that strikes only the
+# run feeding the delete loop (per-root invocation counting: probe
+# succeeds, sweep fails) used to exit 0 on a partial sweep. The
+# shim below counts invocations per start path in $FIND_SHIM_STATE
+# and fails the second invocation for the path named by
+# $FIND_SHIM_FAIL_SECOND.
+sweep_shim_dir="$TMP_ROOT/find-sweep-shim"
+mkdir -p "$sweep_shim_dir"
+cat > "$sweep_shim_dir/find" <<SHIM_EOF
+#!/bin/sh
+count_file="\$FIND_SHIM_STATE/\$(printf '%s' "\$1" | tr '/' '_')"
+count=0
+if [ -f "\$count_file" ]; then count=\$(cat "\$count_file"); fi
+count=\$((count + 1))
+printf '%s\n' "\$count" > "\$count_file"
+if [ "\$1" = "\$FIND_SHIM_FAIL_SECOND" ] && [ "\$count" -eq 2 ]; then
+  echo "find: \$1: Permission denied (shimmed sweep failure)" >&2
+  exit 1
+fi
+exec $real_find "\$@"
+SHIM_EOF
+chmod +x "$sweep_shim_dir/find"
+
+# Case 3: the root sweep enumeration fails after a successful probe
+# — non-zero exit, the root named on stderr, and the top-level
+# entries the failed enumeration would have fed left in place.
+sweepfail_root="$TMP_ROOT/sweepfailfolders"
+mkdir -p "$sweepfail_root/aa" "$sweepfail_root/zz/inner"
+touch "$sweepfail_root/aa/f" "$sweepfail_root/topfile" "$sweepfail_root/zz/inner/g"
+mkdir -p "$TMP_ROOT/sweep-counts-root"
+rc=0
+PATH="$sweep_shim_dir:$PATH" FIND_SHIM_STATE="$TMP_ROOT/sweep-counts-root" FIND_SHIM_FAIL_SECOND="$sweepfail_root" bash "$HELPER" "$sweepfail_root" >"$TMP_ROOT/out" 2>"$TMP_ROOT/err" || rc=$?
+if [ "$rc" -eq 0 ]; then fail "sweep find failure (root): expected non-zero exit, got 0"; fi
+if ! grep -qF "failed to enumerate: $sweepfail_root" "$TMP_ROOT/err"; then fail "sweep find failure (root): failed root not named on stderr"; fi
+if [ ! -e "$sweepfail_root/aa/f" ] || [ ! -e "$sweepfail_root/topfile" ]; then fail "sweep find failure (root): top-level entries were swept despite the failed sweep enumeration"; fi
+
+# Case 4: the zz sweep enumeration fails after a successful probe —
+# non-zero exit and zz named on stderr; the top-level sweep still
+# ran, zz contents remain.
+sweepfail_zz="$TMP_ROOT/sweepfailzz"
+mkdir -p "$sweepfail_zz/aa" "$sweepfail_zz/zz"
+touch "$sweepfail_zz/aa/f" "$sweepfail_zz/zz/keepme"
+mkdir -p "$TMP_ROOT/sweep-counts-zz"
+rc=0
+PATH="$sweep_shim_dir:$PATH" FIND_SHIM_STATE="$TMP_ROOT/sweep-counts-zz" FIND_SHIM_FAIL_SECOND="$sweepfail_zz/zz" bash "$HELPER" "$sweepfail_zz" >"$TMP_ROOT/out" 2>"$TMP_ROOT/err" || rc=$?
+if [ "$rc" -eq 0 ]; then fail "sweep find failure (zz): expected non-zero exit, got 0"; fi
+if ! grep -qF "failed to enumerate: $sweepfail_zz/zz" "$TMP_ROOT/err"; then fail "sweep find failure (zz): failed zz not named on stderr"; fi
+if [ -e "$sweepfail_zz/aa" ]; then fail "sweep find failure (zz): top-level sweep did not run"; fi
+if [ ! -e "$sweepfail_zz/zz/keepme" ]; then fail "sweep find failure (zz): zz contents were removed anyway"; fi
+
 # TMPDIR inside the swept root (Codex P1 on PR #1322): on the real
 # macOS layout the caller's TMPDIR lives under a top-level entry of
 # the root, so any enumeration state the script stores via mktemp
@@ -218,6 +269,16 @@ PATH="$find_shim_dir:$PATH" BASH_ENV="$bash32_env" bash "$HELPER" "$enum_root32"
 if [ "$rc" -eq 0 ]; then fail "bash 3.2 find failure (root): expected non-zero exit, got 0"; fi
 if ! grep -qF "failed to enumerate: $enum_root32" "$TMP_ROOT/err"; then fail "bash 3.2 find failure (root): failed root not named on stderr"; fi
 if [ ! -e "$enum_root32/aa/f" ] || [ ! -e "$enum_root32/topfile" ] || [ ! -e "$enum_root32/zz/inner/g" ]; then fail "bash 3.2 find failure (root): entries were swept despite the failed enumeration"; fi
+
+sweepfail_root32="$TMP_ROOT/sweepfailfolders32"
+mkdir -p "$sweepfail_root32/aa" "$sweepfail_root32/zz/inner"
+touch "$sweepfail_root32/aa/f" "$sweepfail_root32/topfile" "$sweepfail_root32/zz/inner/g"
+mkdir -p "$TMP_ROOT/sweep-counts-root32"
+rc=0
+PATH="$sweep_shim_dir:$PATH" FIND_SHIM_STATE="$TMP_ROOT/sweep-counts-root32" FIND_SHIM_FAIL_SECOND="$sweepfail_root32" BASH_ENV="$bash32_env" bash "$HELPER" "$sweepfail_root32" >"$TMP_ROOT/out" 2>"$TMP_ROOT/err" || rc=$?
+if [ "$rc" -eq 0 ]; then fail "bash 3.2 sweep find failure (root): expected non-zero exit, got 0"; fi
+if ! grep -qF "failed to enumerate: $sweepfail_root32" "$TMP_ROOT/err"; then fail "bash 3.2 sweep find failure (root): failed root not named on stderr"; fi
+if [ ! -e "$sweepfail_root32/aa/f" ] || [ ! -e "$sweepfail_root32/topfile" ]; then fail "bash 3.2 sweep find failure (root): top-level entries were swept despite the failed sweep enumeration"; fi
 
 # And the plain success case under the simulated 3.2 shell.
 ok_root32="$TMP_ROOT/okfolders32"

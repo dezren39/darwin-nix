@@ -42,8 +42,12 @@ def check(cond, msg):
 def run_case(name, ws, active_seq, picker_gone_result=None):
     """Drive grant() with stubs; return (result, ydotool_calls)."""
     ydotool_calls = []
-    mod.ydotool = lambda *a: ydotool_calls.append(a)
-    mod.run = lambda cmd, timeout=10: type("R", (), {"stdout": ""})()
+    def fake_ydotool(*args):
+        ydotool_calls.append(args)
+        return True
+
+    mod.ydotool = fake_ydotool
+    mod.run = lambda cmd, timeout=10: type("R", (), {"stdout": "", "returncode": 0})()
     seq = iter(active_seq)
     mod.active_ws = lambda: next(seq, active_seq[-1])
     mod.calibrate = lambda: 1.0

@@ -12,6 +12,7 @@ deploy-services.test.sh	interpreter-named	suite is run through bash; by-name stu
 full-clean.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
 gc-root-activation.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
 git-discover-repos.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+git-identity.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
 git-maintain-repos.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
 git-safe-directory.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
 help-extra-args.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
@@ -28,6 +29,7 @@ opencode-db-backup.test.sh	interpreter-named	suite is run through bash; by-name 
 opencode-db-pids.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
 opencode-db-prune.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
 opencode-db-vacuum.test.sh	harness	bash suite sources the shared test harness
+opencode-notifier-deploy.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
 opencode-prune-report.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
 opencode-tmp-guard.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
 patch-vscode-insiders.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below

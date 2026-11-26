@@ -53,6 +53,7 @@ pkgs/flake-tidy/tests/test_lock.py	interpreter-named	suite is run through python
 pkgs/flake-tidy/tests/test_malformed_lock.py	interpreter-named	suite is run through python
 pkgs/flake-tidy/tests/test_merge.py	interpreter-named	suite is run through python
 pkgs/opencode-share/opencode-share.test.sh	interpreter-named	suite is run through bash; by-name stubs are checked below
+pkgs/rustdesk-units/rd-picker-autogrant.test.py	interpreter-named	suite is run through python
 pkgs/service-events/monitor.test.py	interpreter-named	suite is run through python
 plugins/durable-tmpdir.test.mjs	interpreter-named	suite is run through node
 plugins/tool-definitions.test.mjs	interpreter-named	suite is run through node

@@ -2080,7 +2080,18 @@ rec {
         # has no darwin evaluation of its own.
         mcpx-agent-restart =
           let
-            activation = inputs.self.darwinConfigurations.MGM9JJ4V3R.config.system.activationScripts;
+            # The separate mcpx check runs the complete Go suite. This
+            # activation-text check needs the runtime package path, but
+            # rebuilding its 30-minute Go suite alongside OpenChamber can
+            # hit the Go timeout on a loaded Darwin runner. Keep the same
+            # package output and skip only that duplicate check here.
+            mcpx-runtime = inputs.openchamber.inputs.opencode.packages.aarch64-darwin.mcpx.override {
+              doCheck = false;
+            };
+            host = inputs.self.darwinConfigurations.MGM9JJ4V3R.extendModules {
+              modules = [ { services.mcpx.package = pkgs.lib.mkForce mcpx-runtime; } ];
+            };
+            activation = host.config.system.activationScripts;
             extra = pkgs.writeText "extra-activation" activation.extraActivation.text;
             post = pkgs.writeText "post-activation" activation.postActivation.text;
           in

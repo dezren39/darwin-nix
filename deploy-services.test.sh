@@ -188,6 +188,7 @@ check "unhealthy new build exits non-zero" test "$rc" -ne 0
 check "unhealthy new build rolls the link back" link_is "$oc_link" "$old_target"
 check "rollback restarts a second time" test "$(restart_count)" -eq 2
 check "rollback is reported" grep -q 'rolled back' "$out"
+check "health wait announces itself" grep -q 'waiting for openchamber.service to become healthy' "$out"
 
 # --- scenario 5: clean state (no link yet) installs -------------------------
 

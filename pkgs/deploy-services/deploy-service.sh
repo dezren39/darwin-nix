@@ -84,10 +84,18 @@ health_check() {
 }
 
 wait_healthy() {
-  local tries="$health_tries"
+  local tries="$health_tries" announced=0
   while [ "$tries" -gt 0 ]; do
     if health_check; then
       return 0
+    fi
+    # Feedback, once per wait: with the default budget (60 tries x
+    # 0.5s) a deploy can sit here for ~30s, and the rollback path
+    # waits up to three times. Without this line a healthy-but-slow
+    # start is indistinguishable from a hung deploy.
+    if [ "$announced" -eq 0 ]; then
+      echo "$name: waiting for $unit to become healthy (up to $health_tries checks)..."
+      announced=1
     fi
     sleep "$health_delay"
     tries=$((tries - 1))

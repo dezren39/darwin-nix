@@ -513,11 +513,21 @@ have() { command -v "$1" >/dev/null 2>&1; }
 #       five deletion sites, silently disabling the in-use guard.
 # lsof exits 1 when nothing matches, so nonzero alone is NOT unknown:
 # unknown is decided by the command -v check plus exits other than 0/1.
+# Exit 1 is a clean no-match ONLY when stderr is empty (#2236): lsof can
+# also exit 1 after printing an operational diagnostic (e.g. a permission
+# warning while walking the directory), which means the scan was
+# incomplete -- that is unknown, not "not held".
 dir_has_open_handles() {
-  local path="$1" out rc
+  local path="$1" out rc err err_file
   command -v lsof >/dev/null 2>&1 || return 2
-  out="$(lsof +D "$path" 2>/dev/null)"; rc=$?
+  # Explicit /tmp template, never bare mktemp: this helper is extracted
+  # into harnesses whose TMPDIR can point at an already-removed scratch
+  # dir, and a bare mktemp failure there would misread idle as unknown.
+  err_file="$(mktemp /tmp/clean-lsof-err.XXXXXX)" || return 2
+  out="$(lsof +D "$path" 2>"$err_file")"; rc=$?
+  err="$(cat "$err_file" 2>/dev/null)"; rm -f "$err_file"
   [ -n "$out" ] && return 0
+  if [ "$rc" -eq 1 ] && [ -n "$err" ]; then return 2; fi
   if [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ]; then return 1; fi
   return 2
 }

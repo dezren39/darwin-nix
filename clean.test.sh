@@ -1312,7 +1312,7 @@ echo "ok: successful empty freshness scan preserves normal tidy behavior"
 # below returns prunable and the recorder fires, so the section fails.
 AP_DIR="$TMP_ROOT/artifact-prunable"
 mkdir -p "$AP_DIR/bin-fail" "$AP_DIR/bin-ok" "$AP_DIR/bin-open" \
-  "$AP_DIR/stale/node_modules" "$AP_DIR/fresh/node_modules"
+  "$AP_DIR/bin-diag" "$AP_DIR/stale/node_modules" "$AP_DIR/fresh/node_modules"
 touch -t 200001010000 "$AP_DIR/stale/node_modules/pkg.js"
 touch "$AP_DIR/fresh/node_modules/pkg.js"
 { sed -n '/^dir_has_open_handles() {/,/^}/p' "$SCRIPT"
@@ -1344,8 +1344,13 @@ cat > "$AP_DIR/bin-open/lsof" <<'STUB'
 echo "node 4242 user 9r DIR 1,5 0 0 /fixture"
 exit 0
 STUB
+cat > "$AP_DIR/bin-diag/lsof" <<'STUB'
+#!/bin/sh
+echo "lsof: WARNING: can't stat() /fixture: Permission denied" >&2
+exit 1
+STUB
 chmod +x "$AP_DIR/bin-fail/find" "$AP_DIR/bin-fail/lsof" \
-  "$AP_DIR/bin-ok/lsof" "$AP_DIR/bin-open/lsof"
+  "$AP_DIR/bin-ok/lsof" "$AP_DIR/bin-open/lsof" "$AP_DIR/bin-diag/lsof"
 AP_OLD_PATH="$PATH"
 del_and_stub() { printf '%s\n' "$1" >> "$AP_DIR/deleted"; }
 
@@ -1382,6 +1387,17 @@ if artifact_is_prunable "$AP_DIR/stale/node_modules" 2>/dev/null; then
 else
   echo "ok: lsof output still keeps a stale artifact"
 fi
+# #2236: lsof exit 1 with a stderr diagnostic is an incomplete scan, not
+# a clean no-match -- the artifact must be kept with a cannot-verify note.
+PATH="$AP_DIR/bin-diag:$AP_OLD_PATH"
+if artifact_is_prunable "$AP_DIR/stale/node_modules" 2> "$AP_DIR/diag.err"; then
+  fail "lsof diagnostic exit 1 judged a stale artifact prunable (#2236)"
+else
+  echo "ok: lsof diagnostic exit 1 keeps a stale artifact"
+fi
+grep -q 'cannot verify open handles' "$AP_DIR/diag.err" \
+  || fail "lsof diagnostic exit 1: no cannot-verify note (got: $(cat "$AP_DIR/diag.err"))"
+echo "ok: lsof diagnostic exit 1 keeps the artifact with a cannot-verify note"
 PATH="$AP_OLD_PATH"
 rm -rf "$AP_DIR"
 
@@ -1395,9 +1411,11 @@ rm -rf "$AP_DIR"
 # missing/erroring lsof keeps, a holder keeps, a working lsof with no
 # holder still removes. Mutation check: reverting the sweep to the raw
 # lsof test makes the missing/erroring cases record a deletion.
+# #2236 adds a fifth scenario: exit 1 WITH a stderr diagnostic is an
+# incomplete scan (unknown), distinct from the silent exit-1 no-match.
 PG_DIR="$TMP_ROOT/lsof-fail-closed"
 mkdir -p "$PG_DIR/base/pgdata" "$PG_DIR/bin-missing" \
-  "$PG_DIR/bin-error" "$PG_DIR/bin-held" "$PG_DIR/bin-idle"
+  "$PG_DIR/bin-error" "$PG_DIR/bin-held" "$PG_DIR/bin-idle" "$PG_DIR/bin-diag"
 touch "$PG_DIR/base/pgdata/PG_VERSION"
 touch -t 200001010000 "$PG_DIR/base/pgdata/PG_VERSION"
 { sed -n '/^dir_has_open_handles() {/,/^}/p' "$SCRIPT"
@@ -1422,7 +1440,12 @@ cat > "$PG_DIR/bin-idle/lsof" <<'STUB'
 #!/bin/sh
 exit 1
 STUB
-chmod +x "$PG_DIR/bin-error/lsof" "$PG_DIR/bin-held/lsof" "$PG_DIR/bin-idle/lsof"
+cat > "$PG_DIR/bin-diag/lsof" <<'STUB'
+#!/bin/sh
+echo "lsof: WARNING: can't stat() /fixture: Permission denied" >&2
+exit 1
+STUB
+chmod +x "$PG_DIR/bin-error/lsof" "$PG_DIR/bin-held/lsof" "$PG_DIR/bin-idle/lsof" "$PG_DIR/bin-diag/lsof"
 
 pg_run() { # pg_run <PATH> -- runs the extracted sweep in a subshell
   (
@@ -1466,6 +1489,19 @@ OUT="$(pg_run "$PG_DIR/bin-idle:$PATH" 2>&1 || true)"
 grep -q "^$PG_DIR/base/pgdata$" "$PG_DIR/deleted" \
   || fail "working lsof with no holder: postgres sweep no longer removes an idle data dir (deleted: $(cat "$PG_DIR/deleted"); out: $OUT)"
 echo "ok: working lsof with no holder still removes the idle postgres data dir"
+
+# #2236: exit 1 with a stderr diagnostic is an incomplete scan, not a
+# clean no-match -- the sweep must keep the data dir, unlike the silent
+# exit-1 (bin-idle) case above. Mutation check: discarding stderr in
+# dir_has_open_handles makes this case record a deletion.
+: > "$PG_DIR/deleted"
+OUT="$(pg_run "$PG_DIR/bin-diag:$PATH" 2>&1 || true)"
+[ ! -s "$PG_DIR/deleted" ] \
+  || fail "lsof diagnostic exit 1: postgres sweep deleted a data dir it could not verify (#2236)"
+case "$OUT" in
+  *"keeping (cannot verify open handles; lsof unavailable)"*) echo "ok: lsof diagnostic exit 1 keeps the postgres data dir with a cannot-verify note" ;;
+  *) fail "lsof diagnostic exit 1: no cannot-verify note (got: $OUT)" ;;
+esac
 rm -rf "$PG_DIR"
 
 # ─── #2035: short-lived scratch sweep fails closed when lsof cannot run ──

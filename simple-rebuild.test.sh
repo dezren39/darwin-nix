@@ -315,9 +315,16 @@ EOF
   # A timeout must also stop descendants, not just the shell running the
   # probe; otherwise each failed switch can leave another long-lived child.
   rm -f "$TMP_ROOT/health-child.pid"
-  agent_case "cmd:sleep 30 & echo \\\$! > '$TMP_ROOT/health-child.pid'; wait" "1"
+  agent_case "cmd:sleep 30 & echo \$! > '$TMP_ROOT/health-child.pid'; wait" "1"
   if [ -s "$TMP_ROOT/health-child.pid" ]; then
     HEALTH_CHILD=$(cat "$TMP_ROOT/health-child.pid")
+    case "$HEALTH_CHILD" in
+      ''|*[!0-9]*) fail "invalid health child pid: $HEALTH_CHILD"; exit 1 ;;
+    esac
+    command -v ps >/dev/null || { fail "ps required to verify child cleanup"; exit 1; }
+    if [ "$AGENT_STATUS" -ne 1 ] || [ "$AGENT_ELAPSED" -ge 10 ]; then
+      fail "descendant probe exited $AGENT_STATUS after ${AGENT_ELAPSED}s (want 1, under 10s)"
+    fi
     HEALTH_CHILD_STATE=""
     for _ in 1 2 3 4 5; do
       HEALTH_CHILD_STATE=$(ps -o stat= -p "$HEALTH_CHILD" 2>/dev/null | tr -d ' ')
@@ -328,7 +335,8 @@ EOF
     done
     case "$HEALTH_CHILD_STATE" in
       ''|Z*) ok "agent_answers timeout terminates spawned child processes (#2221)" ;;
-      *) fail "agent_answers left child $HEALTH_CHILD alive after timeout (state: $HEALTH_CHILD_STATE)" ;;
+      *) fail "agent_answers left child $HEALTH_CHILD alive after timeout (state: $HEALTH_CHILD_STATE)"
+         kill "$HEALTH_CHILD" 2>/dev/null || true ;;
     esac
   else
     fail "agent_answers descendant test did not record a child pid"

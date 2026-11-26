@@ -601,10 +601,7 @@ agent_answers() {
       limit=$(( SECONDS + bound ))
       # Give the probe its own process group so a timeout can stop children
       # too, rather than only killing the shell that eval started.
-      # zsh is resolved by the test harness the same way it is found in the
-      # switch: by name on PATH, so this also works on minimal test PATHs
-      # that may not have the interpreter resolved elsewhere.
-      perl -e 'setpgrp(0, 0); exec "zsh", "-c", $ARGV[0] or die "exec: $!"' "$cmd" >/dev/null 2>&1 &
+      perl -e 'setpgrp(0, 0) or die "setpgrp: $!"; exec "zsh", "-c", $ARGV[0] or die "exec: $!"' "$cmd" >/dev/null 2>&1 &
       pid=$!
       while kill -0 "$pid" 2>/dev/null; do
         if (( SECONDS >= limit )); then

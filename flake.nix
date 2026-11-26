@@ -660,7 +660,8 @@ rec {
                 # group via perl setpgrp (#2221); perl is stock macOS on the
                 # laptop, but the sandbox needs it provided explicitly.
                 pkgs.perl
-              ];
+              ]
+              ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.procps ];
             }
             ''
               cp ${./simple-rebuild.sh} simple-rebuild.sh

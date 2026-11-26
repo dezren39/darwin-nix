@@ -216,7 +216,12 @@ jobs:
           Reproduce the failing workflow jobs from that run, find the root cause, and land a fix so the workflow passes on main again. Keep the fix scoped to the breakage.
           EOF
           )"
-          oidc_token="$(curl -fsS -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+          # Both requests in this step are bounded like the helper's
+          # (#1997): a stalled OIDC or pm-dispatch request fails the
+          # step instead of holding the job until its 10-minute
+          # timeout (#2068). tests/workflow-dispatch-timeouts.sh pins
+          # the bounds.
+          oidc_token="$(curl -fsS --connect-timeout 10 --max-time 60 -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
             "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=pm-dispatch" | jq -r '.value // empty')"
           if [ -z "$oidc_token" ]; then
             echo "::error::pm-dispatch enqueue: failed to mint a GitHub Actions OIDC token (audience pm-dispatch)." >&2
@@ -230,7 +235,7 @@ jobs:
             --arg kind "ci_investigation" \
             --argjson issue_number "$ISSUE_NUMBER" \
             '{repo: $repo, title: $title, prompt: $prompt, issue: true, priority: $priority, kind: $kind, issue_number: $issue_number}')"
-          response="$(curl -sS -w $'\n%{http_code}' -X POST "https://dispatch.security.cab/v1/tasks" \
+          response="$(curl -sS --connect-timeout 10 --max-time 300 -w $'\n%{http_code}' -X POST "https://dispatch.security.cab/v1/tasks" \
             -H "Authorization: Bearer $oidc_token" \
             -H "Content-Type: application/json" \
             -d "$payload")"

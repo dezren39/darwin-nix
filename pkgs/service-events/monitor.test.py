@@ -258,7 +258,120 @@ check(
 monitor.run = lambda argv: None
 check("1659 failed lsof sampler still returns None", monitor.sockets({123}) is None)
 
+
+def _pid_reuse_probes():
+    # #1985: a pid reused by a different watched role between ticks must
+    # emit process.exit for the old (role, program) and process.start for
+    # the new one, and the old role's connection state must be dropped
+    # with the exit -- not carried into the new role, where its closing
+    # would be logged as a conn.close under a role that never held it,
+    # with the old connection's lived_s.
+    import time as _time
+
+    conn = "127.0.0.1:3000->127.0.0.1:51324"
+    proc_samples = iter([
+        {4242: ("opencode", 1, "opencode")},
+        {4242: ("openchamber-server", 1, "openchamber")},
+    ])
+    sock_samples = iter([
+        {4242: ({"3000"}, {conn})},
+        {4242: ({"4000"}, set())},
+    ])
+    saved = (monitor.launchd_jobs, monitor.processes, monitor.sockets)
+    monitor.launchd_jobs = lambda: {}
+    monitor.processes = lambda: next(proc_samples)
+    monitor.sockets = lambda pids: next(sock_samples)
+    try:
+        m = monitor.Monitor()
+        events = []
+        m.emit = lambda event, **fields: events.append((event, fields))
+        m.last_rotate = _time.time()
+        m.tick()
+        for c in list(m.conns.get(4242, {})):
+            m.conns[4242][c] = _time.time() - 100
+        before = len(events)
+        m.tick()
+    finally:
+        monitor.launchd_jobs, monitor.processes, monitor.sockets = saved
+    tick2 = events[before:]
+    check(
+        "1985 pid reuse emits exit for old role",
+        any(e == "process.exit" and f.get("role") == "opencode" and f.get("pid") == 4242 for e, f in tick2),
+        repr(tick2),
+    )
+    check(
+        "1985 pid reuse emits start for new role",
+        any(e == "process.start" and f.get("role") == "openchamber-server" and f.get("pid") == 4242 for e, f in tick2),
+        repr(tick2),
+    )
+    check(
+        "1985 pid reuse drops old conns with old role",
+        any(e == "conn.drop" and f.get("role") == "opencode" for e, f in tick2),
+        repr(tick2),
+    )
+    check(
+        "1985 no conn.close mis-attributed to new role",
+        not any(e == "conn.close" for e, f in tick2),
+        repr(tick2),
+    )
+    check(
+        "1985 old conn state not carried into new role",
+        conn not in m.conns.get(4242, {}),
+        repr(m.conns),
+    )
+
+
 _rotate_probes()
+_pid_reuse_probes()
+
+
+def _concurrent_append_probes():
+    # #2015: concurrent append_event writers crossing rotations must
+    # not drop an accepted event. Small LOG_BYTES forces constant
+    # rotation while 8 threads append unique seq numbers; afterwards
+    # every seq must be present in the active log or a retained
+    # rotated file, and every append must have reported success.
+    import json as _json
+    import threading as _threading
+
+    with tempfile.TemporaryDirectory() as d:
+        saved = (_event.LOG_DIR, _event.LOG, _event.LOG_BYTES, _event.LOG_KEEP)
+        _event.LOG_DIR = d
+        _event.LOG = os.path.join(d, "events.jsonl")
+        _event.LOG_BYTES = 400
+        _event.LOG_KEEP = 1000
+        try:
+            n_threads, per_thread = 8, 25
+            results = []
+
+            def worker(tid):
+                for seq in range(per_thread):
+                    results.append(_event.append_event("probe", "probe.event", seq=tid * 1000 + seq))
+
+            threads = [_threading.Thread(target=worker, args=(t,)) for t in range(n_threads)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            check("2015 concurrent appends: all accepted", len(results) == n_threads * per_thread and all(results), f"{len(results)} results")
+            seen = set()
+            for name in os.listdir(d):
+                if name.startswith("events.jsonl."):
+                    suffix = name[len("events.jsonl."):]
+                    if not suffix.isdigit():
+                        continue
+                elif name != "events.jsonl":
+                    continue
+                with open(os.path.join(d, name)) as fh:
+                    for line in fh:
+                        seen.add(_json.loads(line)["seq"])
+            expected = {t * 1000 + s for t in range(n_threads) for s in range(per_thread)}
+            check("2015 concurrent appends: no event dropped", seen == expected, f"missing {sorted(expected - seen)[:5]} extra {sorted(seen - expected)[:5]}")
+        finally:
+            _event.LOG_DIR, _event.LOG, _event.LOG_BYTES, _event.LOG_KEEP = saved
+
+
+_concurrent_append_probes()
 
 print(f"\n{'ALL PASS' if not FAILURES else 'FAILURES: ' + ', '.join(FAILURES)}")
 sys.exit(1 if FAILURES else 0)

@@ -61,13 +61,16 @@ _harness_ensure_bin_dir() {
 
 # harness_stub NAME BODY [ARGS...]
 #   Write an executable stub NAME into the suite's stub bin dir. BODY is
-#   the script text after the shebang; ARGS are passed to printf as
-#   format arguments when BODY contains %s. The shebang is the resolved
-#   bash path (never /usr/bin/env).
+#   the script text after the shebang. With no ARGS the body is written
+#   literally: a % in it (a date(1) format, a percentage, an inner
+#   printf) is data, not a format directive (#2078). When ARGS are
+#   supplied, BODY is a printf format and ARGS are its format arguments;
+#   a failed expansion fails the stub instead of writing the mangled
+#   body. The shebang is the resolved bash path (never /usr/bin/env).
 harness_stub() {
   local name="$1" body="$2"
   shift 2
-  local dir bash_path
+  local dir bash_path rendered
   _harness_ensure_bin_dir || return 1
   dir="$HARNESS_STUB_BIN"
   bash_path="$(command -v bash)" || { echo "harness: bash not found" >&2; return 1; }
@@ -75,8 +78,16 @@ harness_stub() {
     echo "harness: refusing a bash path with a newline" >&2
     return 1
   fi
-  # shellcheck disable=SC2059 # deliberate: caller passes printf args
-  printf '#!%s\n%s\n' "$bash_path" "$(printf "$body" "$@")" >"$dir/$name"
+  if [ "$#" -gt 0 ]; then
+    # shellcheck disable=SC2059 # deliberate: caller passes printf args
+    rendered="$(printf "$body" "$@")" || {
+      echo "harness: stub body for $name failed printf expansion" >&2
+      return 1
+    }
+  else
+    rendered="$body"
+  fi
+  printf '#!%s\n%s\n' "$bash_path" "$rendered" >"$dir/$name" || return 1
   chmod +x "$dir/$name"
 }
 

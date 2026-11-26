@@ -29,23 +29,51 @@ if [ ! -f "$PATCH_SCRIPT" ]; then
 fi
 chmod +x "$PATCH_SCRIPT"
 
-# Unload existing agent if present
-launchctl unload "$PLIST_PATH" 2>/dev/null
+# Preserve the loaded agent across a failed update (#2151): until now
+# the script unloaded the existing agent before it knew the directory
+# could be created or the replacement plist written, so a transient
+# failure left a working agent stopped. Instead: snapshot the current
+# plist, stage and validate the replacement, and only then unload and
+# swap. If the new load fails, restore the snapshot and reload it.
+PLIST_DIR="$(dirname "$PLIST_PATH")"
+PLIST_TMP="$PLIST_PATH.new.$$"
+PREV_PLIST=""
+
+cleanup_staging() {
+  rm -f "$PLIST_TMP"
+  if [ -n "$PREV_PLIST" ]; then
+    rm -f "$PREV_PLIST"
+  fi
+}
+trap cleanup_staging EXIT
+
+if [ -f "$PLIST_PATH" ]; then
+  if ! PREV_PLIST=$(mktemp "${TMPDIR:-/tmp}/install-vscode-patch-agent-prev.XXXXXX"); then
+    echo "ERROR: Could not create a temporary snapshot of the existing plist" >&2
+    exit 1
+  fi
+  if ! cp "$PLIST_PATH" "$PREV_PLIST"; then
+    echo "ERROR: Could not snapshot the existing plist at $PLIST_PATH" >&2
+    exit 1
+  fi
+fi
 
 # Create the LaunchAgents directory when it is missing (a fresh account
 # may not have one yet); without this the write below fails -- and until
 # #945 the failure was invisible, because the script still printed the
 # success banner and exited 0.
-if ! mkdir -p "$(dirname "$PLIST_PATH")"; then
-  echo "ERROR: Could not create LaunchAgents directory $(dirname "$PLIST_PATH")" >&2
+if ! mkdir -p "$PLIST_DIR"; then
+  echo "ERROR: Could not create LaunchAgents directory $PLIST_DIR" >&2
   exit 1
 fi
 
-# Write the plist. The heredoc is unquoted so $PATCH_SCRIPT expands:
-# the plist must name the exact script existence-checked and chmod'd
-# above - a hardcoded absolute path here once pointed the agent at
-# a different user's home regardless of $HOME (#1366).
-if ! cat > "$PLIST_PATH" << EOF
+# Write the replacement plist to a staging file in the same directory
+# (so the swap below is a same-filesystem rename). The heredoc is
+# unquoted so $PATCH_SCRIPT expands: the plist must name the exact
+# script existence-checked and chmod'd above - a hardcoded absolute
+# path here once pointed the agent at a different user's home
+# regardless of $HOME (#1366).
+if ! cat > "$PLIST_TMP" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -76,9 +104,48 @@ then
   exit 1
 fi
 
+# Validate the staged plist before disturbing the running agent: it
+# must be non-empty and name this agent's label (and pass plutil where
+# available, i.e. on the macOS hosts this installer targets).
+if [ ! -s "$PLIST_TMP" ] || ! grep -q "<string>com.drewry.patch-vscode-insiders</string>" "$PLIST_TMP"; then
+  echo "ERROR: Staged plist for $PLIST_PATH failed validation" >&2
+  exit 1
+fi
+if command -v plutil >/dev/null 2>&1 && ! plutil -lint "$PLIST_TMP" >/dev/null; then
+  echo "ERROR: Staged plist for $PLIST_PATH failed plutil validation" >&2
+  exit 1
+fi
+
+# The replacement is staged and validated; only now unload the current
+# agent and swap the plist in.
+launchctl unload "$PLIST_PATH" 2>/dev/null
+
+if ! mv "$PLIST_TMP" "$PLIST_PATH"; then
+  echo "ERROR: Could not install the staged plist to $PLIST_PATH" >&2
+  if [ -n "$PREV_PLIST" ]; then
+    # The previous plist is still in place (the rename failed); reload
+    # the agent this update unloaded.
+    if launchctl load "$PLIST_PATH"; then
+      echo "ERROR: Previous agent reloaded; it was left as it was before this update" >&2
+    else
+      echo "ERROR: Reloading the previous agent also failed; reinstall once the filesystem problem is fixed" >&2
+    fi
+  fi
+  exit 1
+fi
+
 # Load the agent; a failed load must not be reported as success (#945).
 if ! launchctl load "$PLIST_PATH"; then
   echo "ERROR: launchctl load failed for $PLIST_PATH" >&2
+  if [ -n "$PREV_PLIST" ]; then
+    # Roll back: restore the previous plist and reload the agent that
+    # was working before this update.
+    if cp "$PREV_PLIST" "$PLIST_PATH" && launchctl load "$PLIST_PATH"; then
+      echo "ERROR: Restored and reloaded the previous agent; the new plist was not installed" >&2
+    else
+      echo "ERROR: Rollback failed: the previous agent could not be restored and reloaded" >&2
+    fi
+  fi
   exit 1
 fi
 

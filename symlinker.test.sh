@@ -69,6 +69,15 @@
 #          the flag and that it is undo-only) when no --undo is given,
 #          in either argument order; --undo <ts> --skip-restore and
 #          --skip-restore --undo <ts> stay valid. Scenario Q pins this.
+#   #2016 — the v3 undo header wrote skip-conflict/strict but the undo
+#          reader never parsed them, and it parsed input-dir/output-dir/
+#          force into variables nothing consumed. The contract is now
+#          recorded in symlinker.sh: all header keys are audit metadata
+#          (parsed + logged on undo, never behaviour inputs; undo is
+#          governed only by the undo invocation's own flags, with
+#          skip-backup keeping its DELETE-diagnostic effect). Scenario
+#          T pins the writer/reader round-trip, including undo-of-undo
+#          and a hand-written header whose strict=true is not adopted.
 # This drives the REAL symlinker.sh (no pasted copies) against temp dirs.
 # The #886 scenario stubs `date` so every invocation lands in the same
 # "second" deterministically.
@@ -799,6 +808,83 @@ check "R2: dry-run counts exactly one deletion" grep -qF "1 deleted" "$RD/log"
 check "R2: dry-run left the previous backup untouched" grep -qx previous-backup "$RD/out/item.old"
 check "R2: dry-run left the conflict untouched" grep -qx conflict "$RD/out/item"
 
+
+# ─── Scenario T (#2016): undo-header metadata round-trip ─────────────────
+# Contract: every v3 header key (ORIGINAL_CMD, input-dir, output-dir,
+# force, skip-backup, skip-conflict, strict) is audit metadata. The
+# writer emits all of them, the undo reader parses and logs all of
+# them, and none of them changes undo behaviour — undo is governed
+# only by the undo invocation's own flags (skip-backup's one defined
+# effect is the DELETE-record diagnostic reason). Before this, the
+# reader never parsed skip-conflict/strict and silently dropped the
+# parsed input-dir/output-dir/force values.
+T="$TMP_ROOT/t"; mkdir -p "$T/in" "$T/out" "$T/cache"
+printf 'new\n' > "$T/in/plain.txt"
+printf 'new\n' > "$T/in/conflict.txt"; printf 'old\n' > "$T/out/conflict.txt"
+XDG_CACHE_HOME="$T/cache" bash "$SCRIPT" --input-dir "$T/in" --output-dir "$T/out" \
+  --force --strict --no-input >"$T/run.log" 2>&1 || fail "T: link run exited non-zero"
+ts_t="$(undo_ts_of "$T/cache")"
+[[ -n "$ts_t" ]] || fail "T: no undo file written"
+for key in "# ORIGINAL_CMD:" "# input-dir: $T/in" "# output-dir: $T/out" \
+           "# force: true" "# skip-backup: false" "# skip-conflict: false" "# strict: true"; do
+  grep -qF -- "$key" "$T/cache/symlinker/$ts_t.undo" \
+    || fail "T: undo header missing key: $key"
+done
+echo "ok: T: writer emits every v3 header key"
+sleep 1
+# Undo WITHOUT --force/--strict: the header's force=true/strict=true
+# must not be adopted; the restore needs no force (the link path is
+# freed by unlinking first) and must succeed.
+XDG_CACHE_HOME="$T/cache" bash "$SCRIPT" --undo "$ts_t" >"$T/undo.log" 2>&1 \
+  || fail "T: undo exited non-zero"
+check "T: undo restored the conflict original" cmp -s "$T/out/conflict.txt" <(printf 'old\n')
+grep -qF "Original input-dir: $T/in" "$T/undo.log" || fail "T: undo log does not show original input-dir"
+grep -qF "Original output-dir: $T/out" "$T/undo.log" || fail "T: undo log does not show original output-dir"
+grep -qF "Original flags (audit only): force=true skip-backup=false skip-conflict=false strict=true" "$T/undo.log" \
+  || fail "T: undo log does not show the full original flags audit line: $(cat "$T/undo.log")"
+sleep 1
+# Undo-of-undo round-trip: its file is a minimal v3 header (no flag
+# keys); the reader must default them and still reverse the undo.
+ts_tu=""
+for f in "$T/cache"/symlinker/*.undo; do
+  b="$(basename "$f" .undo)"
+  [[ "$b" != "$ts_t" ]] && ts_tu="$b"
+done
+[[ -n "$ts_tu" ]] || fail "T: no undo-of-undo file written"
+XDG_CACHE_HOME="$T/cache" bash "$SCRIPT" --undo "$ts_tu" >"$T/undo2.log" 2>&1 \
+  || fail "T: undo-of-undo exited non-zero"
+check "T: undo-of-undo recreated the symlink" test -L "$T/out/plain.txt"
+grep -qF "Original flags (audit only): force=false skip-backup=false skip-conflict=false strict=false" "$T/undo2.log" \
+  || fail "T: undo-of-undo log does not show defaulted audit flags"
+# Hand-written v3 file with skip-conflict/strict set: strict=true in
+# the header must NOT make this undo stop at the first error — the
+# later BACKUP restore must still run (undo exits non-zero for the
+# failed record, which is the non-strict outcome).
+T2="$TMP_ROOT/t2"; mkdir -p "$T2/out" "$T2/cache/symlinker"
+printf 'blocker\n' > "$T2/out/blocked.txt"
+printf 'restored\n' > "$T2/out/restore.txt.bak.1600000001"
+{
+  echo "# UNDO_VERSION:3"
+  echo "# symlinker undo — 1600000001"
+  echo "# ORIGINAL_CMD: symlinker.sh --force --skip-conflict --strict"
+  echo "# input-dir: $T2/in"
+  echo "# output-dir: $T2/out"
+  echo "# force: true"
+  echo "# skip-backup: false"
+  echo "# skip-conflict: true"
+  echo "# strict: true"
+  printf 'SYMLINK:%s\t%s\n' "$T2/out/blocked.txt" "$T2/in/blocked.txt"
+  printf 'BACKUP:%s\t%s\n' "$T2/out/restore.txt" "$T2/out/restore.txt.bak.1600000001"
+} > "$T2/cache/symlinker/1600000001.undo"
+if XDG_CACHE_HOME="$T2/cache" bash "$SCRIPT" --undo 1600000001 >"$T2/undo.log" 2>&1; then
+  fail "T: hand-written undo with a failing record should exit non-zero"
+else
+  echo "ok: T: hand-written undo exits non-zero for the failing record"
+fi
+check "T: header strict=true not adopted — restore after the error still ran" \
+  cmp -s "$T2/out/restore.txt" <(printf 'restored\n')
+grep -qF "Original flags (audit only): force=true skip-backup=false skip-conflict=true strict=true" "$T2/undo.log" \
+  || fail "T: hand-written header audit line not logged (skip-conflict/strict not parsed?): $(cat "$T2/undo.log")"
 
 # ─── Scenario S (#1836): the Bash version guard refuses Bash < 4 ────────────
 # CI only has a modern Bash, so the guard's decision is exercised by

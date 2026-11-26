@@ -29,6 +29,18 @@
 # from PIPESTATUS, but its loops only stayed in this shell via
 # that Bash 4.2+ option, so on Bash 3.2 every failure count was
 # lost and the sweep reported success.)
+#
+# The probe alone does not cover the sweep run (#2189): a failure
+# that strikes only the repeated run — an entry removed or
+# re-permissioned between probe and sweep, a transient I/O error,
+# a partial traversal failure mid-run — would run the loop zero
+# or partial times and still exit 0. So the sweep run's status is
+# carried in band: the substitution appends one empty record —
+# a record find itself can never print, since it prints full
+# paths — only when the sweep find exits 0, and the loop notes
+# seeing it. If the record is missing when the loop ends, the
+# enumeration that fed the loop failed, and it is named and
+# counted exactly like a probe failure.
 set -uo pipefail
 
 usage() {
@@ -62,23 +74,41 @@ if [ -d "$folders" ]; then
     failed=$((failed + 1))
     echo "var-folders-clean.sh: failed to enumerate: $folders" >&2
   else
+    sweep_ok=0
     while IFS= read -r -d "" i; do
+      if [ -z "$i" ]; then
+        sweep_ok=1
+        continue
+      fi
       if [ "$(basename "$i")" != "zz" ] && ! rm -rf "$i" 2>/dev/null; then
         failed=$((failed + 1))
         echo "var-folders-clean.sh: failed to delete: $i" >&2
       fi
-    done < <(find "$folders" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
+    done < <(find "$folders" -mindepth 1 -maxdepth 1 -print0 2>/dev/null && printf '\000')
+    if [ "$sweep_ok" -eq 0 ]; then
+      failed=$((failed + 1))
+      echo "var-folders-clean.sh: failed to enumerate: $folders" >&2
+    fi
     if [ -d "$folders/zz" ]; then
       if ! find "$folders/zz" -mindepth 1 -maxdepth 1 -print0 2>/dev/null >/dev/null; then
         failed=$((failed + 1))
         echo "var-folders-clean.sh: failed to enumerate: $folders/zz" >&2
       else
+        sweep_ok=0
         while IFS= read -r -d "" i; do
+          if [ -z "$i" ]; then
+            sweep_ok=1
+            continue
+          fi
           if ! rm -rf "$i" 2>/dev/null; then
             failed=$((failed + 1))
             echo "var-folders-clean.sh: failed to delete: $i" >&2
           fi
-        done < <(find "$folders/zz" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
+        done < <(find "$folders/zz" -mindepth 1 -maxdepth 1 -print0 2>/dev/null && printf '\000')
+        if [ "$sweep_ok" -eq 0 ]; then
+          failed=$((failed + 1))
+          echo "var-folders-clean.sh: failed to enumerate: $folders/zz" >&2
+        fi
       fi
     fi
   fi

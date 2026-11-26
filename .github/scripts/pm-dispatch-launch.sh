@@ -18,7 +18,10 @@
 set -euo pipefail
 # Inlined pm-dispatch-start (#1367): launch a tracked
 # OpenCode session via pm-dispatch (POST /v1/sessions).
-if ! resolved_prompt="$(curl -fsS "$INPUT_PROMPT_URL")"; then
+# Every request has a connect and total deadline shorter than the caller's
+# 10-minute job timeout (agents.yml), so a stalled dependency fails this
+# script with a stage diagnostic instead of consuming the whole job.
+if ! resolved_prompt="$(curl -fsS --connect-timeout 10 --max-time 60 "$INPUT_PROMPT_URL")"; then
   echo "::error::agents dispatch: failed to fetch prompt for task '$INPUT_TASK': $INPUT_PROMPT_URL" >&2
   exit 1
 fi
@@ -32,8 +35,12 @@ if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] || [ -z "${ACTIONS_ID_TOKEN_REQUES
 fi
 task_capitalized="${INPUT_TASK^}"
 title="Scheduled ${task_capitalized} — ${INPUT_REPO}"
-oidc_token="$(curl -sS -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-  "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=pm-dispatch" | jq -r '.value // empty')"
+if ! oidc_response="$(curl -sS --connect-timeout 10 --max-time 60 -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+  "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=pm-dispatch")"; then
+  echo "::error::agents dispatch: OIDC token request failed or timed out (audience pm-dispatch)." >&2
+  exit 1
+fi
+oidc_token="$(printf '%s' "$oidc_response" | jq -r '.value // empty')"
 if [ -z "$oidc_token" ]; then
   echo "::error::agents dispatch: failed to mint a GitHub Actions OIDC token (audience pm-dispatch)." >&2
   exit 1
@@ -44,10 +51,13 @@ payload="$(jq -n \
   --arg prompt "$resolved_prompt" \
   --argjson wait true \
   '{repo: $repo, title: $title, prompt: $prompt, wait: $wait}')"
-response="$(curl -sS -w $'\n%{http_code}' -X POST "https://dispatch.security.cab/v1/sessions" \
+if ! response="$(curl -sS --connect-timeout 10 --max-time 300 -w $'\n%{http_code}' -X POST "https://dispatch.security.cab/v1/sessions" \
   -H "Authorization: Bearer $oidc_token" \
   -H "Content-Type: application/json" \
-  -d "$payload")"
+  -d "$payload")"; then
+  echo "::error::agents dispatch: pm-dispatch POST /v1/sessions failed or timed out (no HTTP response)." >&2
+  exit 1
+fi
 http_code="${response##*$'\n'}"
 body="${response%$'\n'*}"
 if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then

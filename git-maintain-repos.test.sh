@@ -33,7 +33,16 @@ SCRIPT="$SELF_DIR/git-maintain-repos"
 TMP_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TMP_ROOT"' EXIT
 export HOME="$TMP_ROOT/home"
-mkdir -p "$HOME"
+export XDG_CONFIG_HOME="$TMP_ROOT/xdg/config"
+export XDG_CACHE_HOME="$TMP_ROOT/xdg/cache"
+export XDG_DATA_HOME="$TMP_ROOT/xdg/data"
+export XDG_STATE_HOME="$TMP_ROOT/xdg/state"
+mkdir -p "$HOME" "$XDG_CONFIG_HOME/git" "$XDG_CACHE_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME"
+# git chooses the --global write target by existence: the XDG config
+# file when it exists, else $HOME/.gitconfig. Create the fixture file
+# so registrations land in the fixture config even after the suite
+# redirects HOME again below (#1999).
+: > "$XDG_CONFIG_HOME/git/config"
 unset JOBS PACK_THREADS REFLOG_EXPIRE DEPTH SCOPE
 
 failures=0
@@ -228,6 +237,15 @@ for pair in \
       *"git-maintain-repos: --system conflicts with repository-scoped flags:"*) echo "ok: --system $pair ($order) judged at parse time" ;;
       *) fail "--system $pair ($order) was not judged on stderr (got: $ERR)" ;;
     esac
+    # #1926: a parse-time refusal must not leak into stdout, and its explanatory
+    # hint must be on stderr and indented under the "git-maintain-repos: " prefix
+    # (20 columns) like the sibling continuation lines, not one short.
+    [ -z "$OUT" ] || fail "--system $pair ($order) wrote to stdout: $OUT"
+    case "$ERR" in
+      *$'\n                    (--system installs the machine-wide scheduler and opens no repository)'*)
+        echo "ok: --system $pair ($order) hint is on stderr, aligned under the prefix" ;;
+      *) fail "--system $pair ($order) hint missing/misaligned on stderr (got: $ERR)" ;;
+    esac
   done
 done
 if [ -s "$STUB_LOG" ]; then
@@ -237,6 +255,9 @@ else
 fi
 
 # --- --system --dry-run performs no install (#1718) ---
+DRY_RUN_HOME="$TMP_ROOT/system-dry-run-home"
+mkdir -p "$DRY_RUN_HOME"
+export HOME="$DRY_RUN_HOME"
 run --system --dry-run
 [ "$STATUS" -eq 0 ] || fail "--system --dry-run exited $STATUS (want 0)"
 if [ -s "$STUB_LOG" ]; then
@@ -248,6 +269,15 @@ case "$OUT" in
   *"dry-run: would run git maintenance start"*) echo "ok: --system --dry-run reports the skipped install" ;;
   *) fail "--system --dry-run did not report the skipped install (got: $OUT)" ;;
 esac
+if [ "$(find "$HOME" -mindepth 1 -print -quit)" ]; then
+  fail "--system --dry-run changed fresh HOME: $(find "$HOME" -mindepth 1 -print | sort | tr '\n' ' ')"
+else
+  echo "ok: --system --dry-run left fresh HOME unchanged"
+fi
+case "$OUT" in
+  *"dry-run: would create $HOME/.config/git/maintenance.config"*) echo "ok: --system --dry-run reports the skipped config creation" ;;
+  *) fail "--system --dry-run did not report the skipped config creation (got: $OUT)" ;;
+esac
 
 # --- plain --system still installs (#1718) ---
 # From inside a fixture repository: the install step needs one (it runs
@@ -256,6 +286,7 @@ esac
 (cd "$VALID/repo1" && bash "$SCRIPT" --system >"$TMP_ROOT/out" 2>"$TMP_ROOT/err"); STATUS=$?
 OUT="$(cat "$TMP_ROOT/out")"; ERR="$(cat "$TMP_ROOT/err")"
 [ "$STATUS" -eq 0 ] || fail "plain --system exited $STATUS (want 0)"
+[ -f "$HOME/.config/git/maintenance.config" ] || fail "plain --system did not create maintenance.config"
 if [ -s "$STUB_LOG" ]; then
   echo "ok: plain --system still installs the scheduler"
 else
@@ -574,6 +605,27 @@ run --path "$REG" --quick
 [ "$STATUS" -eq 0 ] || fail "full-scope control run exited $STATUS (stderr: $ERR)"
 echo "ok: full-scope control run exits 0"
 unset GIT_STUB_MAINT_START_RC
+
+# ─── Scheduler registration lands in the fixture config (#1999) ────
+# The harness pointed XDG_CONFIG_HOME at a per-run temp dir at startup
+# and created its git/config, so git's --global writes land there (the
+# XDG file wins by existence; see the setup block) instead of in
+# whichever $HOME/.gitconfig is current. A caller-inherited
+# XDG_CONFIG_HOME (read-only in some CI sandboxes) can therefore
+# neither break the registration above nor receive its writes: the
+# registration must have landed in the fixture config even though HOME
+# changed twice since the exports. The flake check's second run starts
+# the whole suite with an external read-only XDG_CONFIG_HOME and
+# asserts that config is left untouched.
+case "${XDG_CONFIG_HOME:-}" in
+  "$TMP_ROOT"/*) echo "ok: harness XDG_CONFIG_HOME is a per-run temp dir (#1999)" ;;
+  *) fail "harness XDG_CONFIG_HOME is not under the temp root (got: ${XDG_CONFIG_HOME:-unset})" ;;
+esac
+REG_ORIGINS="$("$REAL_GIT" config --global --show-origin --get-all maintenance.repo 2>/dev/null)"
+case "$REG_ORIGINS" in
+  *"file:$XDG_CONFIG_HOME/git/config"*) echo "ok: scheduler registration resolved into the fixture config (#1999)" ;;
+  *) fail "scheduler registration did not resolve into the fixture config (origins: $REG_ORIGINS)" ;;
+esac
 
 # ─── Bash 3.2 compatibility: no Bash 4-only constructs (#1834) ────
 # git-maintain-repos is invoked directly by the just git-maintain /

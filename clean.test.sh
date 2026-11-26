@@ -305,6 +305,95 @@ ERR="$(cat "$TMP_ROOT/err")"
 [ -d "$VF_OTHER_ENTRY" ] || fail "vf-root prune (#1865): entry under an UNCONFIGURED root was deleted"
 echo "ok: vf-root prune (#1865): unconfigured root untouched"
 
+# ─── Short-lived / ad-hoc-postgres / pytest sweeps honor VAR_FOLDERS_ROOT (#1977) ───
+# Three more var/folders legs still iterated the literal
+# /private/var/folders/*/*/T after #1865: the pytest tidy base list,
+# the short-lived-scratch loop, and the ad-hoc-postgres loop -- so
+# fixtures could not exercise them through the seam, and a real run
+# could touch host entries outside the caller's intended root.
+# Fixture (mirrors the #1865 twin-root shape): eligible entries under
+# a configured root's */*/T, twins under an unconfigured root. Driven
+# with --system --dry-run like the pytest-guard block below, so del()
+# reports instead of removing: the configured root's entries must be
+# scheduled, the unconfigured root's must not even be named.
+VF1977_ROOT="$TMP_ROOT/vf-root-1977"
+VF1977_T="$VF1977_ROOT/ab/cd/T"
+mkdir -p "$VF1977_T/mcpx-fake-1977" "$VF1977_T/zzpg1977" "$VF1977_T/pytest-of-1977/pytest-1" "$VF1977_T/pytest-of-1977/pytest-2"
+touch "$VF1977_T/zzpg1977/PG_VERSION"
+ln -s pytest-2 "$VF1977_T/pytest-of-1977/pytest-current"
+touch -d '10 hours ago' "$VF1977_T/mcpx-fake-1977" "$VF1977_T/zzpg1977/PG_VERSION" "$VF1977_T/zzpg1977" "$VF1977_T/pytest-of-1977/pytest-1"
+touch -d '6 hours ago' "$VF1977_T/pytest-of-1977/pytest-2"
+VF1977_OTHER_T="$TMP_ROOT/vf-other-1977/ef/gh/T"
+mkdir -p "$VF1977_OTHER_T/mcpx-fake-1977other" "$VF1977_OTHER_T/zzpg1977other" "$VF1977_OTHER_T/pytest-of-1977other/pytest-1" "$VF1977_OTHER_T/pytest-of-1977other/pytest-2"
+touch "$VF1977_OTHER_T/zzpg1977other/PG_VERSION"
+ln -s pytest-2 "$VF1977_OTHER_T/pytest-of-1977other/pytest-current"
+touch -d '10 hours ago' "$VF1977_OTHER_T/mcpx-fake-1977other" "$VF1977_OTHER_T/zzpg1977other/PG_VERSION" "$VF1977_OTHER_T/zzpg1977other" "$VF1977_OTHER_T/pytest-of-1977other/pytest-1"
+touch -d '6 hours ago' "$VF1977_OTHER_T/pytest-of-1977other/pytest-2"
+OUT="$(PATH="$LSOF_STUB_DIR:$PATH" VAR_FOLDERS_ROOT="$VF1977_ROOT" PYTEST_KEEP_HOURS=4 bash "$SCRIPT" --system --dry-run 2>"$TMP_ROOT/err")"; STATUS=$?
+ERR="$(cat "$TMP_ROOT/err")"
+[ "$STATUS" -eq 0 ] || fail "vf-root (#1977): --system --dry-run exited $STATUS (stderr: $ERR)"
+if grep -q 'would delete: .*vf-root-1977/ab/cd/T/mcpx-fake-1977$' <<<"$OUT"; then
+  echo "ok: vf-root (#1977): short-lived sweep scans the configured root"
+else
+  fail "vf-root (#1977): short-lived sweep did not schedule the configured root's entry"
+fi
+if grep -q 'would remove (postgres data dir, idle >8h): .*vf-root-1977/ab/cd/T/zzpg1977$' <<<"$OUT"; then
+  echo "ok: vf-root (#1977): ad-hoc-postgres sweep scans the configured root"
+else
+  fail "vf-root (#1977): ad-hoc-postgres sweep did not schedule the configured root's cluster"
+fi
+if grep -q 'would delete: .*vf-root-1977/ab/cd/T/pytest-of-1977/pytest-1$' <<<"$OUT"; then
+  echo "ok: vf-root (#1977): pytest tidy scans the configured root"
+else
+  fail "vf-root (#1977): pytest tidy did not schedule the configured root's older run"
+fi
+if grep -q 'vf-other-1977' <<<"$OUT"; then
+  fail "vf-root (#1977): unconfigured root was scanned"
+else
+  echo "ok: vf-root (#1977): unconfigured root not scanned"
+fi
+[ -d "$VF1977_OTHER_T/mcpx-fake-1977other" ] && [ -d "$VF1977_OTHER_T/zzpg1977other" ] && [ -d "$VF1977_OTHER_T/pytest-of-1977other/pytest-1" ] || fail "vf-root (#1977): unconfigured root entries were touched"
+echo "ok: vf-root (#1977): unconfigured root untouched"
+
+# ─── Full-run unknown-scratch catch-all honors VAR_FOLDERS_ROOT (#1903) ───
+# #1865 fixed the enumeration at both unknown-scratch call sites, but
+# its section above drives only the --only-unknown-scratch early exit;
+# the full-run catch-all leg (the sweep over "$VAR_FOLDERS_ROOT"/*/*/T
+# in the main body) had no fixture of its own -- #1903's remaining
+# item. Fixture mirrors the twin-root shape: an eligible entry under a
+# configured root's */*/T, a twin under an unconfigured root, driven
+# with --system --dry-run: the configured entry must appear in the
+# end-of-run unknown-scratch report, the twin must not even be named,
+# and the flagged entry must be left in place.
+VFU_ROOT="$TMP_ROOT/vf-root-1903"
+VFU_T="$VFU_ROOT/ab/cd/T"
+mkdir -p "$VFU_T"
+VFU_ENTRY="$VFU_T/zzunk1903"
+mkdir -p "$VFU_ENTRY"
+dd if=/dev/zero of="$VFU_ENTRY/blob" bs=1024 count=1536 2>/dev/null
+touch -d '2020-01-02 03:04:05' "$VFU_ENTRY"
+VFU_OTHER_T="$TMP_ROOT/vf-other-1903/ef/gh/T"
+mkdir -p "$VFU_OTHER_T"
+VFU_OTHER_ENTRY="$VFU_OTHER_T/zzunk1903other"
+mkdir -p "$VFU_OTHER_ENTRY"
+dd if=/dev/zero of="$VFU_OTHER_ENTRY/blob" bs=1024 count=1536 2>/dev/null
+touch -d '2020-01-02 03:04:05' "$VFU_OTHER_ENTRY"
+OUT="$(PATH="$LSOF_STUB_DIR:$PATH" VAR_FOLDERS_ROOT="$VFU_ROOT" UNKNOWN_SCRATCH_MIN_MB=1 UNKNOWN_SCRATCH_STALE_DAYS=1 bash "$SCRIPT" --system --dry-run 2>"$TMP_ROOT/err")"; STATUS=$?
+ERR="$(cat "$TMP_ROOT/err")"
+[ "$STATUS" -eq 0 ] || fail "vf-root (#1903): --system --dry-run exited $STATUS (stderr: $ERR)"
+if grep -q 'vf-root-1903/ab/cd/T/zzunk1903' <<<"$OUT"; then
+  echo "ok: vf-root (#1903): full-run unknown-scratch catch-all reports the configured root's entry"
+else
+  fail "vf-root (#1903): full-run unknown-scratch catch-all did not report the configured root's entry"
+fi
+if grep -q 'vf-other-1903' <<<"$OUT"; then
+  fail "vf-root (#1903): unconfigured root was scanned"
+else
+  echo "ok: vf-root (#1903): unconfigured root not scanned"
+fi
+[ -d "$VFU_ENTRY" ] || fail "vf-root (#1903): flagged-only full run deleted the fixture entry"
+echo "ok: vf-root (#1903): flagged entry left in place"
+
 # Pytest newest-run guard fires under BSD and GNU stat alike. Both
 # runs are older than PYTEST_KEEP_HOURS, so only the guard keeps the
 # newest (pytest-2). --dry-run makes del() report instead of remove:
@@ -881,16 +970,23 @@ echo "ok: mark_dir skips both symlinked markers and marks the clean sibling"
 # Drive the real sweep with a failing find stub. Neither fresh nor stale
 # matching entries may be offered to del when the scan is incomplete.
 SS_DIR="$TMP_ROOT/short-scratch"
-mkdir -p "$SS_DIR/base" "$SS_DIR/bin"
+mkdir -p "$SS_DIR/base" "$SS_DIR/bin" "$SS_DIR/bin-idle"
 touch "$SS_DIR/base/openchamber-fresh-fixture"
 touch -t 200001010000 "$SS_DIR/base/openchamber-stale-fixture"
-sed -n '/^sweep_short_lived_scratch() {/,/^}/p' "$SCRIPT" > "$SS_DIR/sweep.sh"
+{ sed -n '/^dir_has_open_handles() {/,/^}/p' "$SCRIPT"
+  sed -n '/^sweep_short_lived_scratch() {/,/^}/p' "$SCRIPT"; } > "$SS_DIR/sweep.sh"
 [ -s "$SS_DIR/sweep.sh" ] || fail "could not extract sweep_short_lived_scratch"
+grep -q 'dir_has_open_handles' "$SS_DIR/sweep.sh" \
+  || fail "could not extract dir_has_open_handles from clean.sh (#1803)"
 cat > "$SS_DIR/bin/find" <<'STUB'
 #!/bin/sh
 exit 1
 STUB
-chmod +x "$SS_DIR/bin/find"
+cat > "$SS_DIR/bin-idle/lsof" <<'STUB'
+#!/bin/sh
+exit 1
+STUB
+chmod +x "$SS_DIR/bin/find" "$SS_DIR/bin-idle/lsof"
 SHORT_SCRATCH_GLOBS=('openchamber-*')
 SHORT_SCRATCH_STALE_HOURS=8
 CALLER_USER_HOME="$SS_DIR"
@@ -917,8 +1013,22 @@ grep -q 'freshness scan failed; skipping this base' "$SS_DIR/failure.err" \
   || fail "failed freshness scan did not warn and skip the base"
 
 # Successful scan still deletes stale matching entries but keeps fresh ones.
+# The real sweep now uses indexed arrays and string comparisons, the Bash 3.2
+# semantics this fixture pins: one fresh name must not mask the stale name.
+# The #2035 open-handle guard runs before del, so drive it with a working
+# lsof that reports no holder (bin-idle), under the same set +e capture as
+# the failed-scan call above: the guard's nonzero return is data, not an
+# error, and this section runs under set -e.
 rm -f "$SS_DIR/deleted"
+PATH="$SS_DIR/bin-idle:$SS_OLD_PATH"
+export PATH
+set +e
 sweep_short_lived_scratch "$SS_DIR/base"
+SS_RC=$?
+set -e
+PATH="$SS_OLD_PATH"
+export PATH
+[ "$SS_RC" -eq 0 ] || fail "successful freshness scan returned $SS_RC"
 grep -Fxq "$SS_DIR/base/openchamber-stale-fixture" "$SS_DIR/deleted" \
   || fail "successful freshness scan did not offer stale entry to del"
 if grep -Fxq "$SS_DIR/base/openchamber-fresh-fixture" "$SS_DIR/deleted"; then
@@ -985,6 +1095,72 @@ fi
 echo "ok: flake GC-root sweep preserves both paths on failed freshness scan; stale released and active preserved on success"
 rm -rf "$GC_DIR"
 
+# ─── #2167: failed eval-cache freshness probe keeps the cache ──────
+# Drive the extracted Tier-3 sweep with a find stub that fails only
+# for the eval-cache-broken entry: that entry must be kept (its only
+# file is old, so the pre-fix predicate read the failed probe's empty
+# output as "stale" and deleted it), the failure must warn naming the
+# probe, surface find's stderr, and be counted in EVAL_CACHE_FAILURES.
+# Controls through the real find in the same run: a stale entry is
+# still deleted, a fresh entry is still kept.
+EC_DIR="$TMP_ROOT/eval-cache"
+mkdir -p "$EC_DIR/home/.cache/nix/eval-cache-broken" "$EC_DIR/home/.cache/nix/eval-cache-stale" "$EC_DIR/home/.cache/nix/eval-cache-fresh" "$EC_DIR/bin"
+printf 'old\n' > "$EC_DIR/home/.cache/nix/eval-cache-broken/blob"
+printf 'old\n' > "$EC_DIR/home/.cache/nix/eval-cache-stale/blob"
+printf 'new\n' > "$EC_DIR/home/.cache/nix/eval-cache-fresh/blob"
+touch -t 200001010000 "$EC_DIR/home/.cache/nix/eval-cache-broken/blob" "$EC_DIR/home/.cache/nix/eval-cache-stale/blob"
+sed -n '/^sweep_eval_caches() {/,/^}/p' "$SCRIPT" > "$EC_DIR/sweep.sh"
+[ -s "$EC_DIR/sweep.sh" ] || fail "could not extract sweep_eval_caches"
+REAL_FIND="$(command -v find)"
+export REAL_FIND
+cat > "$EC_DIR/bin/find" <<'STUB'
+#!/bin/sh
+case " $* " in
+  *"eval-cache-broken"*) echo "find: eval-cache-broken: Permission denied" >&2; exit 1 ;;
+  *) exec "$REAL_FIND" "$@" ;;
+esac
+STUB
+chmod +x "$EC_DIR/bin/find"
+CACHE_STALE_DAYS=3
+EVAL_CACHE_FAILURES=0
+del() { for _a in "$@"; do printf '%s\n' "$_a" >> "$EC_DIR/deleted"; done; }
+warn() { printf '%s\n' "$*" >&2; }
+# shellcheck disable=SC1091
+. "$EC_DIR/sweep.sh"
+EC_OLD_PATH="$PATH"
+PATH="$EC_DIR/bin:$PATH"
+export PATH
+# Section-local TMPDIR (the #1918 precedent below): an earlier section
+# exports a TMPDIR it later removes, and the sweep's mktemp would fail
+# against the removed dir -- every probe would then read as failed,
+# which is the defect under test wearing a disguise. Point TMPDIR at
+# this section's live dir for the call and restore it after.
+EC_TMPDIR_SAVE="${TMPDIR:-}"
+TMPDIR="$EC_DIR"
+export TMPDIR
+EC_RC=0
+sweep_eval_caches "$EC_DIR/home" 2> "$EC_DIR/failure.err" || EC_RC=$?
+if [ -n "$EC_TMPDIR_SAVE" ]; then TMPDIR="$EC_TMPDIR_SAVE"; else unset TMPDIR; fi
+export TMPDIR
+PATH="$EC_OLD_PATH"
+export PATH
+[ "$EC_RC" -eq 0 ] || fail "eval-cache sweep returned $EC_RC on a failed probe"
+[ "$EVAL_CACHE_FAILURES" -eq 1 ] || fail "failed eval-cache probe not counted (EVAL_CACHE_FAILURES=$EVAL_CACHE_FAILURES)"
+grep -q 'eval-cache freshness probe failed' "$EC_DIR/failure.err" \
+  || fail "failed eval-cache probe did not warn"
+grep -q 'Permission denied' "$EC_DIR/failure.err" \
+  || fail "failed eval-cache probe did not surface find's stderr"
+if grep -Fxq "$EC_DIR/home/.cache/nix/eval-cache-broken" "$EC_DIR/deleted"; then
+  fail "failed freshness probe offered eval-cache-broken to del"
+fi
+grep -Fxq "$EC_DIR/home/.cache/nix/eval-cache-stale" "$EC_DIR/deleted" \
+  || fail "successful probe did not offer stale eval-cache to del"
+if grep -Fxq "$EC_DIR/home/.cache/nix/eval-cache-fresh" "$EC_DIR/deleted"; then
+  fail "successful probe offered fresh eval-cache to del"
+fi
+echo "ok: Tier-3 eval-cache sweep keeps the cache and counts the failure on a failed freshness probe; stale deleted and fresh kept on success"
+rm -rf "$EC_DIR"
+
 # ─── Bash 3.2 compatibility: no associative-array cache (#1829) ─────
 # clean.sh's supported entrypoints (./clean.sh via its env-bash shebang,
 # just clean) can resolve to the Bash 3.2 macOS ships at /bin/bash, and
@@ -993,8 +1169,8 @@ rm -rf "$GC_DIR"
 # and the path-keyed cache decisions still happen in a real dry-run walk
 # (idle git repo judged by its repo path; non-repo artifact judged by
 # its parent path — the cache's two key sites).
-if grep -nE 'declare -A|mapfile|readarray' "$SCRIPT" > /dev/null; then
-  fail "clean.sh uses a Bash-4-only construct: $(grep -nE 'declare -A|mapfile|readarray' "$SCRIPT" | head -1)"
+if grep -nE '(local|declare)[[:space:]]+-[^[:space:]]*A|mapfile|readarray' "$SCRIPT" > /dev/null; then
+  fail "clean.sh uses a Bash-4-only construct: $(grep -nE '(local|declare)[[:space:]]+-[^[:space:]]*A|mapfile|readarray' "$SCRIPT" | head -1)"
 else
   echo "ok: clean.sh has no Bash-4-only constructs (#1829)"
 fi
@@ -1292,6 +1468,98 @@ grep -q "^$PG_DIR/base/pgdata$" "$PG_DIR/deleted" \
 echo "ok: working lsof with no holder still removes the idle postgres data dir"
 rm -rf "$PG_DIR"
 
+# ─── #2035: short-lived scratch sweep fails closed when lsof cannot run ──
+# sweep_short_lived_scratch deleted stale known-tool scratch (and stale
+# uv locks) with no open-handle check at all, unlike its sibling sweeps
+# (#1803): a tool holding an old-mtime directory open lost it anyway, and
+# an lsof that never ran could not keep anything. Extract the real sweep
+# + its dir_has_open_handles helper and drive four PATH-stub scenarios
+# against a stale glob-matched fixture dir and a stale uv lock. Oracle:
+# the del recorder + the "cannot verify" note -- missing/erroring lsof
+# keeps, a holder keeps, a working lsof with no holder still removes.
+# Mutation check: reverting the sweep to the unguarded del makes the
+# missing/erroring cases record a deletion.
+SG_DIR="$TMP_ROOT/short-scratch-fail-closed"
+mkdir -p "$SG_DIR/base/opencode-stale-fixture" "$SG_DIR/bin-missing" \
+  "$SG_DIR/bin-error" "$SG_DIR/bin-held" "$SG_DIR/bin-idle"
+touch -t 200001010000 "$SG_DIR/base/opencode-stale-fixture"
+touch "$SG_DIR/base/uv-fixture.lock"
+touch -t 200001010000 "$SG_DIR/base/uv-fixture.lock"
+{ sed -n '/^dir_has_open_handles() {/,/^}/p' "$SCRIPT"
+  sed -n '/^sweep_short_lived_scratch() {/,/^}/p' "$SCRIPT"; } > "$SG_DIR/fn.sh"
+grep -q 'sweep_short_lived_scratch' "$SG_DIR/fn.sh" \
+  || fail "could not extract sweep_short_lived_scratch from clean.sh (#2035)"
+grep -q 'dir_has_open_handles' "$SG_DIR/fn.sh" \
+  || fail "extracted sweep has no dir_has_open_handles helper to test (#2035)"
+# bin-missing gets the real find/mktemp/rm and NO lsof at all.
+ln -s "$(command -v find)" "$SG_DIR/bin-missing/find"
+ln -s "$(command -v mktemp)" "$SG_DIR/bin-missing/mktemp"
+ln -s "$(command -v rm)" "$SG_DIR/bin-missing/rm"
+cat > "$SG_DIR/bin-error/lsof" <<'STUB'
+#!/bin/sh
+exit 2
+STUB
+cat > "$SG_DIR/bin-held/lsof" <<'STUB'
+#!/bin/sh
+echo "opencode 4242 user 9r DIR 1,5 0 0 /fixture"
+exit 0
+STUB
+cat > "$SG_DIR/bin-idle/lsof" <<'STUB'
+#!/bin/sh
+exit 1
+STUB
+chmod +x "$SG_DIR/bin-error/lsof" "$SG_DIR/bin-held/lsof" "$SG_DIR/bin-idle/lsof"
+
+sg_run() { # sg_run <PATH> -- runs the extracted sweep in a subshell
+  (
+    # shellcheck disable=SC2034 # consumed by the sourced sweep
+    SHORT_SCRATCH_STALE_HOURS=8; CALLER_USER_HOME="$HOME"
+    # shellcheck disable=SC2034 # consumed by the sourced sweep
+    SHORT_SCRATCH_GLOBS=('opencode-*'); _ss_total_removed=0
+    TMPDIR="$SG_DIR"
+    PATH="$1"
+    del() { printf '%s\n' "$1" >> "$SG_DIR/deleted"; }
+    warn() { printf '%s\n' "$*" >&2; }
+    info() { :; }
+    short_scratch_is_kept() { return 1; }
+    . "$SG_DIR/fn.sh"
+    sweep_short_lived_scratch "$SG_DIR/base"
+  )
+}
+
+: > "$SG_DIR/deleted"
+OUT="$(sg_run "$SG_DIR/bin-missing" 2>&1 || true)"
+[ ! -s "$SG_DIR/deleted" ] \
+  || fail "lsof missing: short-lived scratch sweep deleted an entry it could not verify (#2035)"
+case "$OUT" in
+  *"keeping (cannot verify open handles; lsof unavailable)"*) echo "ok: lsof missing keeps the short-lived scratch entry with a cannot-verify note" ;;
+  *) fail "lsof missing: no cannot-verify note (got: $OUT)" ;;
+esac
+
+: > "$SG_DIR/deleted"
+OUT="$(sg_run "$SG_DIR/bin-error:$PATH" 2>&1 || true)"
+[ ! -s "$SG_DIR/deleted" ] \
+  || fail "lsof erroring: short-lived scratch sweep deleted an entry it could not verify (#2035)"
+case "$OUT" in
+  *"keeping (cannot verify open handles; lsof unavailable)"*) echo "ok: lsof erroring keeps the short-lived scratch entry with a cannot-verify note" ;;
+  *) fail "lsof erroring: no cannot-verify note (got: $OUT)" ;;
+esac
+
+: > "$SG_DIR/deleted"
+OUT="$(sg_run "$SG_DIR/bin-held:$PATH" 2>&1 || true)"
+[ ! -s "$SG_DIR/deleted" ] \
+  || fail "lsof reporting a holder: short-lived scratch sweep deleted a held entry (#2035)"
+echo "ok: lsof reporting a holder keeps the short-lived scratch entry"
+
+: > "$SG_DIR/deleted"
+OUT="$(sg_run "$SG_DIR/bin-idle:$PATH" 2>&1 || true)"
+grep -q "^$SG_DIR/base/opencode-stale-fixture$" "$SG_DIR/deleted" \
+  || fail "working lsof with no holder: short-lived scratch sweep no longer removes a stale entry (deleted: $(cat "$SG_DIR/deleted"); out: $OUT)"
+grep -q "^$SG_DIR/base/uv-fixture.lock$" "$SG_DIR/deleted" \
+  || fail "working lsof with no holder: short-lived scratch sweep no longer removes a stale uv lock (deleted: $(cat "$SG_DIR/deleted"); out: $OUT)"
+echo "ok: working lsof with no holder still removes the stale short-lived scratch entry and uv lock"
+rm -rf "$SG_DIR"
+
 # ─── #1904: del() must not skip dangling symlinks ─────────────────────
 # del() gated every deletion on [ -e "$p" ], which is false for a
 # dangling symlink, so stale dangling links in caches/logs/Trash were
@@ -1389,7 +1657,9 @@ chmod +x "$SW_DIR/no-holder-bin/lsof"
   warn() { printf '%s\n' "$*" >&2; }
   info() { printf '%s\n' "$*"; }
   short_scratch_is_kept() { return 1; }
+  PATH="$SW_DIR/no-holder-bin:$PATH"
   . "$SW_DIR/del.sh"
+  . "$SW_DIR/dir_has_open_handles.sh"
   . "$SW_DIR/sweep_short_lived_scratch.sh"
   mkdir -p "$SW_DIR/short"
   ln -s "$SW_DIR/no-such-target" "$SW_DIR/short/opencode-stale123"
@@ -1570,6 +1840,103 @@ esac
 case "$DRIFT_OUT_OK" in
   *"orphan-cask"*) echo "ok: drift check control reports the orphan cask" ;;
   *) fail "drift check control did not report orphan-cask (got: $DRIFT_OUT_OK / $DRIFT_ERR_OK) (#1918)" ;;
+esac
+
+# ─── mas_app_drift_check fails closed when mas list fails (#2018) ───
+# Same fail-open shape as #1918, adjacent code: the App Store drift check
+# ran `as_user mas list 2>/dev/null` in a process substitution, so a
+# present-but-failing mas looked exactly like a successful empty listing.
+# Pin the fail-closed contract with a stub mas, extracting the real
+# mas_app_drift_check from clean.sh at test time (the #1918 extraction
+# pattern, sourced and driven in this shell): a failing enumeration warns
+# naming the step, surfaces mas's stderr, and records MAS_DRIFT_FAILURES;
+# successful-with-orphan reports the orphan with no failure recorded;
+# successful-empty records no failure and reports no orphans.
+MAS_DIR="$TMP_ROOT/mas-drift"
+mkdir -p "$MAS_DIR/bin"
+cat > "$MAS_DIR/masApps.nix" <<'NIX'
+_: {
+  masApps = {
+    "Known App" = 111;
+  };
+}
+NIX
+printf '#!%s\n' "$(command -v bash)" > "$MAS_DIR/bin/mas"
+cat >> "$MAS_DIR/bin/mas" <<'STUB'
+if [ "$1" = "list" ]; then
+  case "${MAS_STUB_MODE:-empty}" in
+    fail)
+      echo "Error: mas exploded" >&2
+      exit 1
+      ;;
+    orphan)
+      printf '111 Known App (1.0)\n222 Orphan App (2.0)\n'
+      exit 0
+      ;;
+    *)
+      printf '111 Known App (1.0)\n'
+      exit 0
+      ;;
+  esac
+fi
+exit 0
+STUB
+chmod +x "$MAS_DIR/bin/mas"
+sed -n '/^mas_app_drift_check() {/,/^}/p' "$SCRIPT" > "$MAS_DIR/drift.sh"
+[ -s "$MAS_DIR/drift.sh" ] || fail "could not extract mas_app_drift_check from clean.sh (#2018)"
+MAS_SELF_DIR_SAVE="$SELF_DIR"
+SELF_DIR="$MAS_DIR"
+MAS_DRIFT_FAILURES=0
+warn() { printf '%s\n' "$*" >&2; }
+have() { command -v "$1" >/dev/null 2>&1; }
+as_user() { "$@"; }
+. "$MAS_DIR/drift.sh"
+MAS_TMPDIR_SAVE="${TMPDIR:-}"
+TMPDIR="$MAS_DIR"
+export TMPDIR
+MAS_PATH_SAVE="$PATH"
+PATH="$MAS_DIR/bin:$PATH"
+MAS_STUB_MODE=fail mas_app_drift_check >"$MAS_DIR/out-fail" 2>"$MAS_DIR/err-fail"
+MAS_FAILURES_FAIL=$MAS_DRIFT_FAILURES
+MAS_ERR_FAIL="$(cat "$MAS_DIR/err-fail")"
+MAS_DRIFT_FAILURES=0
+MAS_STUB_MODE=orphan mas_app_drift_check >"$MAS_DIR/out-orphan" 2>"$MAS_DIR/err-orphan"
+MAS_FAILURES_ORPHAN=$MAS_DRIFT_FAILURES
+MAS_OUT_ORPHAN="$(cat "$MAS_DIR/out-orphan")"
+MAS_ERR_ORPHAN="$(cat "$MAS_DIR/err-orphan")"
+MAS_DRIFT_FAILURES=0
+MAS_STUB_MODE=empty mas_app_drift_check >"$MAS_DIR/out-empty" 2>"$MAS_DIR/err-empty"
+MAS_FAILURES_EMPTY=$MAS_DRIFT_FAILURES
+MAS_ERR_EMPTY="$(cat "$MAS_DIR/err-empty")"
+PATH="$MAS_PATH_SAVE"
+SELF_DIR="$MAS_SELF_DIR_SAVE"
+if [ -n "$MAS_TMPDIR_SAVE" ]; then TMPDIR="$MAS_TMPDIR_SAVE"; else unset TMPDIR; fi
+export TMPDIR
+[ "$MAS_FAILURES_FAIL" -eq 1 ] \
+  || fail "failing mas list recorded $MAS_FAILURES_FAIL drift failure(s) (want 1) (#2018)"
+case "$MAS_ERR_FAIL" in
+  *"mas list failed"*) echo "ok: mas drift check names the failed step on enumeration failure" ;;
+  *) fail "mas drift check did not name the failed step (got: $MAS_ERR_FAIL) (#2018)" ;;
+esac
+case "$MAS_ERR_FAIL" in
+  *"mas exploded"*) echo "ok: mas drift check surfaces mas's own stderr" ;;
+  *) fail "mas drift check swallowed mas's stderr (got: $MAS_ERR_FAIL) (#2018)" ;;
+esac
+case "$MAS_ERR_FAIL" in
+  *"not in masApps.nix"*) fail "mas drift check reported orphans from a failed enumeration (#2018)" ;;
+  *) echo "ok: mas drift check reports no orphans from a failed enumeration" ;;
+esac
+[ "$MAS_FAILURES_ORPHAN" -eq 0 ] \
+  || fail "successful mas list recorded a drift failure (#2018)"
+case "$MAS_OUT_ORPHAN" in
+  *"Orphan App"*) echo "ok: mas drift check control reports the orphan app" ;;
+  *) fail "mas drift check control did not report Orphan App (got: $MAS_OUT_ORPHAN / $MAS_ERR_ORPHAN) (#2018)" ;;
+esac
+[ "$MAS_FAILURES_EMPTY" -eq 0 ] \
+  || fail "successful empty mas list recorded a drift failure (#2018)"
+case "$MAS_ERR_EMPTY" in
+  *"not in masApps.nix"*) fail "mas drift check reported orphans from a successful empty listing (#2018)" ;;
+  *) echo "ok: mas drift check reports no orphans from a successful empty listing" ;;
 esac
 
 # --- Colima recreation requires two complete Docker listings (#1831) --------
@@ -1755,6 +2122,60 @@ case "$DC_OUT" in
   *) fail "single-word dead cask was not flagged (got: $DC_OUT)" ;;
 esac
 
+# ─── #2190: dead-cask extraction stops at the first .app ────────────────
+# PR #1978's multi-word fix (#1902) made the extraction greedy: .* extends
+# to the LAST .app on the brew info line, so a line naming a second bundle
+# after the path (source and target artifacts, e.g.
+# "/Applications/Present Multi.app (Present Multi.app)") extracted a
+# non-path and a present cask was falsely flagged MISSING. Same extracted-
+# block harness as the #1902 section; pin: with that line shape a present
+# multi-word cask is NOT flagged, and a dead one still is.
+DT_DIR="$TMP_ROOT/dead-cask-second-app"
+mkdir -p "$DT_DIR/apps/Present Multi.app"
+cat > "$DT_DIR/brew" <<'STUBEOF'
+#!/bin/sh
+if [ "$1" = list ]; then printf '%s\n' dead-multi present-multi; exit 0; fi
+if [ "$1" = info ]; then
+  case "$3" in
+    dead-multi)    printf '%s (%s)\n' "$CLEAN_APPS_DIR/Dead Multi.app" "Dead Multi.app" ;;
+    present-multi) printf '%s (%s)\n' "$CLEAN_APPS_DIR/Present Multi.app" "Present Multi.app" ;;
+  esac
+  exit 0
+fi
+exit 0
+STUBEOF
+chmod +x "$DT_DIR/brew"
+sed -n '/^  _dead=""/,/MISSING from disk/p' "$SCRIPT" > "$DT_DIR/block.sh"
+[ -s "$DT_DIR/block.sh" ] || fail "could not extract the dead-cask block from clean.sh (#2190)"
+grep -q 'info --cask' "$DT_DIR/block.sh" || fail "extracted dead-cask block lacks the brew info extraction (#2190)"
+# Same set -e / section-local TMPDIR handling as the #1902 section above.
+DT_TMPDIR_SAVE="${TMPDIR:-}"
+TMPDIR="$DT_DIR"
+export TMPDIR
+DT_OUT="$(
+  as_user() { "$@"; }
+  warn() { printf 'WARN: %s\n' "$*"; }
+  _b="$DT_DIR/brew"
+  _cask_list="dead-multi present-multi"
+  export CLEAN_APPS_DIR="$DT_DIR/apps"
+  . "$DT_DIR/block.sh"
+  exit 0
+)"
+if [ -n "$DT_TMPDIR_SAVE" ]; then TMPDIR="$DT_TMPDIR_SAVE"; else unset TMPDIR; fi
+export TMPDIR
+case "$DT_OUT" in
+  *"MISSING from disk"*) echo "ok: second-.app block warns on missing apps" ;;
+  *) fail "second-.app block produced no MISSING warning (got: $DT_OUT)" ;;
+esac
+case "$DT_OUT" in
+  *dead-multi*) echo "ok: multi-word dead cask with a second .app token is flagged" ;;
+  *) fail "multi-word dead cask with a second .app token was not flagged (got: $DT_OUT)" ;;
+esac
+case "$DT_OUT" in
+  *present-multi*) fail "present multi-word cask with a second .app token was flagged (got: $DT_OUT)" ;;
+  *) echo "ok: present multi-word cask with a second .app token is not flagged" ;;
+esac
+
 # ─── #2066: dead-cask per-cask `brew info --cask` failure fails closed ──
 # The dead-cask half enumerated each cask's app path with `brew info
 # --cask` inside a 2>/dev/null pipeline whose status is head's, not
@@ -1871,6 +2292,7 @@ sed -n '/^# The oseries checkout is a real working repo/,/^unset _oseries_reason
 [ -s "$OS_HELPERS" ] || fail "could not extract the oseries guard helpers from clean.sh"
 [ -s "$OS_CALL" ] || fail "could not extract the oseries call site from clean.sh"
 grep -q 'status --porcelain' "$OS_HELPERS" || fail "extracted guard lacks the dirty check"
+grep -q 'stash list' "$OS_HELPERS" || fail "extracted guard lacks the stash check"
 grep -q 'rev-list' "$OS_HELPERS" || fail "extracted guard lacks the unpushed check"
 grep -q 'git_checkout_keep_reason' "$OS_CALL" || fail "extracted call site does not call the guard"
 grep -q 'del "$OSERIES_DIR"' "$OS_CALL" || fail "extracted call site does not delete via del"
@@ -1946,6 +2368,64 @@ mkdir -p "$OS_DIR"
 echo junk > "$OS_DIR/junk.txt"
 oseries_run 0
 [ ! -e "$OS_DIR" ] && echo "ok: non-repo oseries directory is deleted as before" || fail "non-repo oseries directory was kept"
+# ─── #2110: the stash probe fails closed like its sibling probes ───
+# The rev-list probe can never see stash commits (refs/stash is neither a
+# branch nor HEAD), so the stash probe is the only thing protecting
+# stashed work; it used to read any empty `git stash list` output as
+# "no stash" with no exit-status check, so a damaged stash ref turned
+# the guard into a deletion.
+oseries_run_stash_fails() { # <dry-run 0|1> — like oseries_run, but git stash list exits nonzero
+  OUT="$(
+    HOME="$OS_HOME"
+    CALLER_USER_HOME="$OS_HOME"
+    DRY_RUN="$1"
+    warn() { printf 'WARN: %s\n' "$*"; }
+    git() {
+      _os_prev=""
+      for _os_a in "$@"; do
+        if [ "$_os_prev" = "stash" ] && [ "$_os_a" = "list" ]; then return 1; fi
+        _os_prev="$_os_a"
+      done
+      command git "$@"
+    }
+    . "$OS_HELPERS"
+    . "$OS_CALL"
+    exit 0
+  )"
+}
+# Clean tree, everything pushed, one stash entry: kept, stash reason named.
+oseries_fresh_repo
+echo stashed > "$OS_DIR/stash.txt"
+git -C "$OS_DIR" stash push -q -u -m test-stash || fail "oseries fixture: stash push failed"
+oseries_run 0
+[ -d "$OS_DIR" ] && echo "ok: stashed oseries checkout is kept (#2110)" || fail "stashed oseries checkout was deleted (#2110)"
+case "$OUT" in
+  *"keeping"*"stash"*) echo "ok: stash keep names the reason (#2110)" ;;
+  *) fail "stash keep did not name the reason (got: $OUT) (#2110)" ;;
+esac
+# Same, but refs/stash removed with the objects and reflog left behind
+# (an interrupted drop, a partial restore): every other probe reads
+# empty, yet the checkout must still be kept, not deleted.
+oseries_fresh_repo
+echo stashed > "$OS_DIR/stash.txt"
+git -C "$OS_DIR" stash push -q -u -m test-stash || fail "oseries fixture: stash push failed"
+OS_GIT_DIR="$(git -C "$OS_DIR" rev-parse --absolute-git-dir)" || fail "oseries fixture: rev-parse --absolute-git-dir failed"
+rm "$OS_GIT_DIR/refs/stash" || fail "oseries fixture: could not remove refs/stash"
+[ -z "$(git -C "$OS_DIR" stash list 2>/dev/null)" ] || fail "oseries fixture: stash list not empty after refs/stash removal (#2110)"
+oseries_run 0
+[ -d "$OS_DIR" ] && echo "ok: damaged-stash-ref oseries checkout is kept (#2110)" || fail "damaged-stash-ref oseries checkout was deleted (#2110)"
+case "$OUT" in
+  *"keeping"*"stash"*) echo "ok: damaged-stash-ref keep names the stash reason (#2110)" ;;
+  *) fail "damaged-stash-ref keep did not name the stash reason (got: $OUT) (#2110)" ;;
+esac
+# git stash list forced to fail (nonzero): kept as unverifiable.
+oseries_fresh_repo
+oseries_run_stash_fails 0
+[ -d "$OS_DIR" ] && echo "ok: unverifiable-stash oseries checkout is kept (#2110)" || fail "unverifiable-stash oseries checkout was deleted (#2110)"
+case "$OUT" in
+  *"keeping"*"cannot be verified"*) echo "ok: unverifiable-stash keep names the reason (#2110)" ;;
+  *) fail "unverifiable-stash keep did not name the reason (got: $OUT) (#2110)" ;;
+esac
 
 
 [ "$failures" -eq 0 ] || { echo "$failures failure(s)" >&2; exit 1; }

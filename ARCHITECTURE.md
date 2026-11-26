@@ -39,10 +39,11 @@ commands/              OpenCode slash commands (/gha-fix, /gha-why)
 .agents/skills/        Repo-local agent skills (see §7)
 opencode-global.jsonc  OpenCode v2 global config, meant to be linked as ~/.config/opencode/opencode.jsonc (currently not; see §5)
 tui.jsonc              v1 TUI config; v2 ignores it (v2 reads ~/.config/opencode/cli.json)
-sounds/                Star Trek notification sounds (opencode-notifier)
+sounds/                Star Trek notification sounds (opencode-notifier); deployed to
+                       ~/.config/opencode/sounds by homeUser.nix (#2060)
 themes/ vibrant-ink.json   Active TUI theme
 justfile               Task runner (rebuild, tidy, share, link-git, mcp logins)
-rebuild.sh r / simple-rebuild.sh s / clean(.sh) / path.sh   Rebuild + cleanup scripts
+rebuild.sh r / simple-rebuild.sh s / clean(.sh)   Rebuild + cleanup scripts (each sets its nix PATH inline)
 symlinker.sh           Large bash symlink manager (source for pkgs/symlinker)
 .aerospace.toml        AeroSpace tiling WM config
 mcpx.config.nix        Every MCP server, and how mcpx pools it
@@ -140,7 +141,12 @@ that list to change which providers are managed.
 linker pinned to `/usr/bin/cc`, credential helpers, an aerospace+fzf window
 switcher, and a `setup-opencode()` helper that symlinks a central `.opencode`
 into projects). Also atuin (Ctrl-R history), starship, direnv+nix-direnv, git
-(work identity, `safe.directory=*`), ghostty (ghostty-bin, synthwave theme).
+(work identity, scoped `safe.directory` trust roots — `~/git`, `~/workspace/github-work`,
+`~/.local/share/opencode/worktree`, `~/.config/nix`; each has an exact entry
+for the root repository and a trailing `/*` entry for descendants, after an
+empty reset of inherited trust. The rest of `~/workspace` is not trusted;
+see `gitSettings.nix` and
+`just git-config-check`), ghostty (ghostty-bin, synthwave theme).
 
 ---
 
@@ -185,6 +191,13 @@ into projects). Also atuin (Ctrl-R history), starship, direnv+nix-direnv, git
   Instructions: `instructions/{worktrees,recordings,work-strategies}.md`.
   Plugins: opencode-notifier only (the v1 plugins fail v2's loader; listed in
   the file for when they are ported). `compaction.buffer = 8192`.
+- **`opencode-notifier.json`** — the notifier plugin's config, deployed by
+  home-manager (`homeUser.nix`) to `~/.config/opencode/opencode-notifier.json`
+  alongside the global config. The plugin plays the `sounds` paths verbatim,
+  so the repo copy names each event's sound by file name only and the
+  deployed file is generated with the home directory completing the paths
+  into `~/.config/opencode/sounds/` (the repo's `sounds/`, deployed beside
+  the config). No per-user absolute path is committed (#2060).
 - **`tui.jsonc`** — v1 TUI config; v2 does not read it (`~/.config/opencode/cli.json`
   instead). Kept only until it is clear nothing else reads it.
 - **`instructions/`** — `worktrees.md` (never create worktrees under /var),

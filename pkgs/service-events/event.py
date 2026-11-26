@@ -7,12 +7,15 @@ integers are stored as numbers, everything else as strings. Never pass a
 secret: this log is meant to be read and pasted into issues. dezren39/darwin-nix#670.
 """
 
+import contextlib
 import datetime
+import fcntl
 import json
 import os
 import re
 import shutil
 import sys
+import threading
 
 LOG_DIR = os.path.expanduser("~/Library/Logs/nix-services")
 LOG = os.path.join(LOG_DIR, "events.jsonl")
@@ -24,6 +27,11 @@ HELP_NOTE = (
     "--help/-h as the sole argument prints this usage and exits 0; "
     "--help/-h is never a SOURCE or EVENT name."
 )
+
+# Pre-compiled: main() runs this per key=value field on every service-event
+# invocation (activation hot path), and re.fullmatch(pattern_str, ...)
+# pays a cache lookup per field. Compile once at import.
+_INT_RE = re.compile(r"-?[0-9]+")
 
 
 def rotate(path, max_bytes, keep, copy_truncate=False):
@@ -95,6 +103,28 @@ def rotate(path, max_bytes, keep, copy_truncate=False):
     return size
 
 
+# #2015: append_event's rotate+append must be one critical section.
+# Two writers crossing a rotation raced on rename mode's os.replace:
+# both saw the oversized log, one replaced it to .1, the other's
+# replace (or its append to the just-renamed path) raised OSError and
+# the event was dropped. A module threading.Lock covers threads in
+# this process; an flock on a sidecar lock file covers separate
+# processes (the CLI is one process per event). Each caller opens its
+# own lock fd, so flock also contends correctly between threads.
+_APPEND_THREAD_LOCK = threading.Lock()
+
+
+@contextlib.contextmanager
+def _append_critical_section():
+    with _APPEND_THREAD_LOCK:
+        lock_fh = open(LOG + ".lock", "a")
+        try:
+            fcntl.flock(lock_fh, fcntl.LOCK_EX)
+            yield
+        finally:
+            lock_fh.close()
+
+
 def append_event(source, event, **fields):
     record = {
         "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds"),
@@ -104,9 +134,10 @@ def append_event(source, event, **fields):
     record.update({k: v for k, v in fields.items() if v is not None})
     try:
         os.makedirs(LOG_DIR, exist_ok=True)
-        rotate(LOG, LOG_BYTES, LOG_KEEP)
-        with open(LOG, "a") as fh:
-            fh.write(json.dumps(record, sort_keys=False) + "\n")
+        with _append_critical_section():
+            rotate(LOG, LOG_BYTES, LOG_KEEP)
+            with open(LOG, "a") as fh:
+                fh.write(json.dumps(record, sort_keys=False) + "\n")
     except OSError as exc:
         # #934: report failure to the caller (the CLI turns it into a
         # non-zero exit) but never raise — monitor.py imports this and
@@ -193,9 +224,12 @@ def main(argv):
         # rejects (superscript/subscript digits), which used to crash
         # here with a traceback and lose the event. Digit-like Unicode
         # values are stored as strings, like any other non-integer.
+        # Perf: len() first so over-long values short-circuit before
+        # the regex runs, and the pre-compiled _INT_RE avoids the
+        # per-field re.fullmatch cache lookup (~3x on this check).
         fields[key] = (
             int(value)
-            if re.fullmatch(r"-?[0-9]+", value) and len(value) < 19
+            if len(value) < 19 and _INT_RE.fullmatch(value)
             else value
         )
     # #934: a failed write is not success — callers that guard with

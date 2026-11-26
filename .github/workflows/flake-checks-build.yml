@@ -5,12 +5,14 @@ name: flake checks build
 #
 # #1134: flake-packages-build.yml covers .#packages and mcpx-nixbuild.yml
 # covers only .#packages.x86_64-linux.mcpx — no workflow ever built the
-# flake's `checks` output, so the 23 *-tests derivations (plus formatting,
-# tidy, and mcpx-darwin-skip) failed on clean main silently and were found
+# flake's `checks` output, so the 23 *-tests derivations (plus formatting
+# and tidy) failed on clean main silently and were found
 # by hand, one at a time (#1094, #1099, #1047, #978). This workflow covers
-# every check the flake exposes, partitioned by system (#1832): the
+# every check the flake exposes (mcpx-darwin-skip is no longer an
+# in-repo check — removed in the #1384 mcpx consolidation, fbfe162),
+# partitioned by system (#1832): the
 # x86_64-linux checks build on ubuntu-latest and the aarch64-darwin
-# checks on macos-14, each list enumerated from the flake for its own
+# checks on macos-15, each list enumerated from the flake for its own
 # system. x86_64-darwin gets no checks from the flake itself
 # (flake.nix excludes it), so it has no partition here.
 #
@@ -93,7 +95,7 @@ jobs:
   nix-build-darwin:
     name: nix build (aarch64-darwin) ${{ matrix.check }}
     needs: list-checks
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -180,7 +182,12 @@ jobs:
             echo "::error::ci-fix dispatch requires 'permissions: id-token: write' to mint a pm-dispatch OIDC token." >&2
             exit 1
           fi
-          oidc_token="$(curl -sS -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+          # Both requests in this step are bounded like the helper's
+          # (#1997): a stalled OIDC or pm-dispatch request fails the
+          # step instead of holding the job until its 30-minute
+          # timeout (#2068). tests/workflow-dispatch-timeouts.sh pins
+          # the bounds.
+          oidc_token="$(curl -sS --connect-timeout 10 --max-time 60 -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
             "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=pm-dispatch" | jq -r '.value // empty')"
           if [ -z "$oidc_token" ]; then
             echo "::error::ci-fix dispatch failed to mint a pm-dispatch OIDC token." >&2
@@ -213,7 +220,7 @@ jobs:
             endpoint=tasks
           fi
 
-          response="$(curl -sS -w $'\n%{http_code}' -X POST "https://dispatch.security.cab/v1/$endpoint" \
+          response="$(curl -sS --connect-timeout 10 --max-time 300 -w $'\n%{http_code}' -X POST "https://dispatch.security.cab/v1/$endpoint" \
             -H "Authorization: Bearer $oidc_token" \
             -H "Content-Type: application/json" -d "$payload")"
           http_code="${response##*$'\n'}"

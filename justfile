@@ -324,6 +324,29 @@ spotlight-system:
     ./spotlight-exclude-artifacts --system
     sudo ./spotlight-exclude-artifacts --system
 
+# Git: #2012 — isolated real-Git ownership/repair regression tests first,
+# then inspect THIS user's managed config separately. A pre-deployment
+# bare wildcard fails this live check; scoped trailing /* entries are valid.
+[group('maintenance')]
+git-config-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bash ./git-safe-directory.test.sh
+    managed="$HOME/.config/git/config"
+    if [ ! -f "$managed" ]; then echo "no managed gitconfig at $managed — repo checks above are the verdict"; exit 0; fi
+    if git config --file "$managed" --get-all safe.directory | grep -qx '\*'; then echo "FAIL: managed gitconfig still trusts '*'" >&2; exit 1; fi
+    if ! git config --file "$managed" --get-all safe.directory | grep -q .; then echo "FAIL: managed gitconfig has no safe.directory entries" >&2; exit 1; fi
+    git config --file "$managed" --get-all safe.directory
+    # #2096: the managed config's own default identity (includes NOT
+    # followed, so a work checkout cannot mask it) must not be the work
+    # email — the work identity arrives only via gitIncludes.nix includeIf.
+    default_email="$(git config --file "$managed" --no-includes --get user.email || true)"
+    case "$default_email" in
+        *@vertexinc.com) echo "FAIL: managed gitconfig default identity is the work email ($default_email) — see #2096" >&2; exit 1 ;;
+        "") echo "FAIL: managed gitconfig sets no default user.email" >&2; exit 1 ;;
+    esac
+    echo "default identity: $default_email"
+
 # Git: deep maintenance across ~/git (reflog expiry + prune + repack)
 [group('maintenance')]
 git-maintain *args:

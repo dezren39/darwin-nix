@@ -206,6 +206,197 @@ else
   esac
 fi
 
+# --- brew_upgrade skip branch survives a missing Brewfile (#2031) ----
+# grep finds no Brewfile path in ./result/activate, so the pipeline exits 1;
+# under pipefail + errexit that aborted ./s before the documented skip
+# branch ran, leaving a completed switch unrecorded. The real function is
+# extracted and run under the script's own shell options.
+BREW_FN="$TMP_ROOT/brew-upgrade.sh"
+awk '/^brew_upgrade\(\) \{$/ { capture=1 } capture { print } capture && /^}$/ { exit }' "$SCRIPT" >"$BREW_FN"
+if [ ! -s "$BREW_FN" ]; then
+  fail "could not extract brew_upgrade from simple-rebuild.sh"
+else
+  BREW_RUN="$TMP_ROOT/brew-upgrade-run"
+  mkdir -p "$BREW_RUN/result"
+  printf '#!/bin/sh\necho activation-with-no-brewfile\n' >"$BREW_RUN/result/activate"
+  cat >"$BREW_RUN/driver.sh" <<EOF
+set -exuo pipefail
+cd "$BREW_RUN"
+source "$BREW_FN"
+brew_upgrade
+echo "after-brew-upgrade"
+EOF
+  BREW_OUT="$(bash "$BREW_RUN/driver.sh" 2>"$TMP_ROOT/brew.err")"; BREW_STATUS=$?
+  if [ "$BREW_STATUS" -ne 0 ]; then
+    fail "brew_upgrade with no Brewfile path exited $BREW_STATUS (want 0)"
+  else
+    ok "brew_upgrade with no Brewfile path exits 0"
+  fi
+  case "$(cat "$TMP_ROOT/brew.err")" in
+    *"skipping brew upgrade: no Brewfile"*) ok "brew_upgrade prints the skip message" ;;
+    *) fail "brew_upgrade did not print the skip message" ;;
+  esac
+  case "$BREW_OUT" in
+    *after-brew-upgrade*) ok "script continues after brew_upgrade (record_activation still reached)" ;;
+    *) fail "script aborted inside brew_upgrade before the skip branch returned" ;;
+  esac
+fi
+
+# --- agent_answers cmd branch is time-bounded (#2101) ---------------
+# The cmd:* branch ran a bare (eval ...) with no timeout, so one hung
+# command check pinned check_services past HEALTH_TIMEOUT -- the
+# deadline there is only tested after agent_answers returns. The real
+# function is extracted from simple-rebuild.sh and run under zsh, the
+# script's interpreter. curl is stubbed so the HTTP branch is exercised
+# without a network.
+AGENT_FN="$TMP_ROOT/agent-answers.zsh"
+awk '/^agent_answers\(\) \{$/ { capture=1 } capture { print } capture && /^}$/ { exit }' "$SCRIPT" >"$AGENT_FN"
+if [ ! -s "$AGENT_FN" ]; then
+  fail "could not extract agent_answers from simple-rebuild.sh"
+else
+  AGENT_RUN="$TMP_ROOT/agent-answers-run"
+  mkdir -p "$AGENT_RUN/bin"
+  cat >"$AGENT_RUN/bin/curl" <<'EOF'
+#!/bin/sh
+printf '%s' "${FAKE_HTTP_CODE:-000}"
+EOF
+  chmod +x "$AGENT_RUN/bin/curl"
+  cat >"$AGENT_RUN/driver.zsh" <<EOF
+source "$AGENT_FN"
+agent_answers "\$1"
+EOF
+  # agent_case <check> <HEALTH_TIMEOUT or "">: sets AGENT_STATUS,
+  # AGENT_ELAPSED (whole seconds) and AGENT_ERR for the run.
+  agent_case() {
+    local check="$1" ht="$2" start
+    start=$(date +%s)
+    if [ -n "$ht" ]; then
+      PATH="$AGENT_RUN/bin:$PATH" HEALTH_TIMEOUT="$ht" zsh "$AGENT_RUN/driver.zsh" "$check" 2>"$TMP_ROOT/agent.err"
+    else
+      PATH="$AGENT_RUN/bin:$PATH" zsh "$AGENT_RUN/driver.zsh" "$check" 2>"$TMP_ROOT/agent.err"
+    fi
+    AGENT_STATUS=$?
+    AGENT_ELAPSED=$(( $(date +%s) - start ))
+    AGENT_ERR="$(cat "$TMP_ROOT/agent.err")"
+  }
+
+  agent_case "cmd:true" ""
+  if [ "$AGENT_STATUS" -eq 0 ] && [ "$AGENT_ELAPSED" -lt 10 ]; then
+    ok "agent_answers cmd:true answers 0 promptly (#2101)"
+  else
+    fail "agent_answers cmd:true gave status $AGENT_STATUS after ${AGENT_ELAPSED}s (want 0, fast)"
+  fi
+
+  agent_case "cmd:false" ""
+  if [ "$AGENT_STATUS" -eq 1 ] && [ "$AGENT_ELAPSED" -lt 10 ]; then
+    ok "agent_answers cmd:false answers 1 promptly (#2101)"
+  else
+    fail "agent_answers cmd:false gave status $AGENT_STATUS after ${AGENT_ELAPSED}s (want 1, fast)"
+  fi
+
+  agent_case "-" ""
+  if [ "$AGENT_STATUS" -eq 0 ]; then
+    ok "agent_answers - still answers 0 (#2101)"
+  else
+    fail "agent_answers - gave status $AGENT_STATUS (want 0)"
+  fi
+
+  agent_case "cmd:sleep 30" ""
+  if [ "$AGENT_STATUS" -eq 1 ] && [ "$AGENT_ELAPSED" -lt 20 ]; then
+    ok "agent_answers hung cmd:sleep 30 fails within the bound, not after 30s (#2101)"
+  else
+    fail "agent_answers cmd:sleep 30 gave status $AGENT_STATUS after ${AGENT_ELAPSED}s (want 1, well under 30)"
+  fi
+  case "$AGENT_ERR" in
+    *"timed out"*"sleep 30"*) ok "agent_answers timeout diagnostic names the hung check (#2101)" ;;
+    *) fail "agent_answers timeout diagnostic did not name the hung check (got: $AGENT_ERR)" ;;
+  esac
+
+  agent_case "cmd:sleep 30" "3"
+  if [ "$AGENT_STATUS" -eq 1 ] && [ "$AGENT_ELAPSED" -lt 15 ]; then
+    ok "agent_answers hung check is bounded by HEALTH_TIMEOUT=3 when that is smaller (#2101)"
+  else
+    fail "agent_answers cmd:sleep 30 with HEALTH_TIMEOUT=3 gave status $AGENT_STATUS after ${AGENT_ELAPSED}s (want 1, well under 30)"
+  fi
+
+  FAKE_HTTP_CODE=200 agent_case "http://127.0.0.1:9/" ""
+  if [ "$AGENT_STATUS" -eq 0 ]; then
+    ok "agent_answers HTTP branch still answers 0 on a 200 (#2101)"
+  else
+    fail "agent_answers HTTP branch gave status $AGENT_STATUS on a stubbed 200 (want 0)"
+  fi
+
+  FAKE_HTTP_CODE=000 agent_case "http://127.0.0.1:9/" ""
+  if [ "$AGENT_STATUS" -eq 1 ]; then
+    ok "agent_answers HTTP branch still answers 1 on a 000 (#2101)"
+  else
+    fail "agent_answers HTTP branch gave status $AGENT_STATUS on a stubbed 000 (want 1)"
+  fi
+fi
+
+# --- check_services enforces the HEALTH_TIMEOUT deadline (#2020) ----
+# The polling loop ran its PID/health success test before the deadline
+# check, so a service first seen healthy in the 3s settle sleep --
+# already past HEALTH_TIMEOUT -- was still reported up. The real
+# function is extracted from simple-rebuild.sh and run under zsh with
+# agent_pid / agent_answers / report_agent / print_error stubbed: the
+# pid is stable and health always answers, so in the late case the
+# deadline itself is the only thing that can refuse acceptance.
+SVC_FN="$TMP_ROOT/check-services.zsh"
+awk '/^check_services\(\) \{$/ { capture=1 } capture { print } capture && /^}$/ { exit }' "$SCRIPT" >"$SVC_FN"
+if [ ! -s "$SVC_FN" ]; then
+  fail "could not extract check_services from simple-rebuild.sh"
+else
+  SVC_RUN="$TMP_ROOT/check-services-run"
+  mkdir -p "$SVC_RUN"
+  cat >"$SVC_RUN/driver.zsh" <<EOF
+agent_pid() { echo 1234; }
+agent_answers() { return 0; }
+report_agent() { echo "not up: \$1" >&2; }
+print_error() { echo "\$*" >&2; }
+health_services=("org.example.test -")
+source "$SVC_FN"
+check_services
+EOF
+  # svc_case <HEALTH_TIMEOUT>: sets SVC_STATUS, SVC_OUT and SVC_ERR.
+  svc_case() {
+    SVC_OUT="$(HEALTH_TIMEOUT="$1" zsh "$SVC_RUN/driver.zsh" 2>"$TMP_ROOT/svc.err")"
+    SVC_STATUS=$?
+    SVC_ERR="$(cat "$TMP_ROOT/svc.err")"
+  }
+
+  # Late success: HEALTH_TIMEOUT=1 expires during the settle sleep, so
+  # the (stubbed, succeeding) health check is first observed after the
+  # deadline and must not be accepted as on-time.
+  svc_case 1
+  if [ "$SVC_STATUS" -ne 0 ]; then
+    ok "check_services refuses a first health success observed after the deadline (#2020)"
+  else
+    fail "check_services accepted a health success after HEALTH_TIMEOUT=1 expired (status 0, out: $SVC_OUT)"
+  fi
+  case "$SVC_OUT" in
+    *"up: org.example.test"*) fail "check_services printed 'up:' for a post-deadline success (#2020)" ;;
+    *) ok "check_services prints no 'up:' line for a post-deadline success (#2020)" ;;
+  esac
+  case "$SVC_ERR" in
+    *"not up: org.example.test"*) ok "check_services reports the late agent as not up (#2020)" ;;
+    *) fail "check_services did not report the late agent as not up (stderr: $SVC_ERR)" ;;
+  esac
+
+  # Control: the same always-healthy service, well inside the
+  # deadline, is accepted.
+  svc_case 30
+  if [ "$SVC_STATUS" -eq 0 ]; then
+    ok "check_services accepts a service healthy before the deadline (#2020)"
+  else
+    fail "check_services refused an on-time healthy service (status $SVC_STATUS, out: $SVC_OUT, err: $SVC_ERR)"
+  fi
+  case "$SVC_OUT" in
+    *"up: org.example.test (pid 1234)"*) ok "check_services prints 'up:' for an on-time healthy service (#2020)" ;;
+    *) fail "check_services did not print the expected 'up:' line (got: $SVC_OUT)" ;;
+  esac
+fi
+
 if [ "$failures" -gt 0 ]; then
   echo "$failures simple-rebuild parser check(s) failed" >&2
   exit 1

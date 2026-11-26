@@ -1490,11 +1490,6 @@ def resolve_follows(
     return current
 
 
-def path_to_follows_decl(path: list[tuple[str, str, bool]]) -> str:
-    """Convert a path to a dotted follows path like 'home-manager.nixpkgs'."""
-    return ".".join(inp for inp, _child, _is_f in path)
-
-
 def path_depth(path: list[tuple[str, str, bool]]) -> int:
     """Return the depth of a follows path."""
     return len(path)
@@ -1982,24 +1977,6 @@ def _nested_relative_path(follows_parts: list[str], prefix: list[str]) -> str | 
         return None
     rest = follows_parts[len(prefix) :]
     return rest[0] + "".join(f".inputs.{p}" for p in rest[1:])
-
-
-def _nested_segment(normalized: str) -> str:
-    """Segment of a nested ``inputs = {`` opening line after the ``{``.
-
-    For an ordinary line inside the block this is the line itself; for a
-    one-line ``inputs = { nixpkgs.follows = "x"; };`` it is the
-    declaration between the braces.
-    """
-    m = re.match(r"inputs\s*=\s*\{", normalized)
-    if not m:
-        return normalized
-    seg = normalized[m.end() :].strip()
-    if seg.endswith("}"):
-        seg = seg[:-1].strip()
-    if seg.endswith(";"):
-        seg = seg[:-1].strip()
-    return seg
 
 
 def _nested_segments(normalized: str) -> list[str]:

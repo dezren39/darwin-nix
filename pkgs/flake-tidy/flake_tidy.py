@@ -1581,6 +1581,36 @@ _DOTTED_BLOCK_OPEN_RE = re.compile(
 _INPUTS_DOTTED_NAME_RE = re.compile(rf"inputs\.{_NAME_TOKEN}\s*[.=]")
 _BARE_NAME_DECL_RE = re.compile(rf"{_NAME_TOKEN}\s*[.=]")
 _INPUTS_BLOCK_OPEN_RE = re.compile(r"inputs\s*=\s*\{")
+# Bolt Optimization (2026-11-24): hoist every other static line-loop pattern
+# to module level. `re.match`/`re.search` with an inline pattern string pays
+# a cache lookup per call (plus an f-string interpolation for token-based
+# patterns), and the scanners below run per line over the whole file on every
+# analysis pass. Compiling once at import removes that per-line overhead with
+# identical match semantics.
+_INDENT_RE = re.compile(r"^(\s*)")
+_INDENT_PLUS_RE = re.compile(r"^(\s+)")
+_OUTPUTS_RE = re.compile(r"outputs\s*=")
+_INPUTS_DOT_RE = re.compile(r"inputs\.")
+_INPUTS_DOTTED_START_RE = re.compile(r"inputs\.(?:[a-zA-Z_]|\"[^\"])")
+_URL_ASSIGN_RE = re.compile(r"\burl\s*=")
+_URL_LINE_RE = re.compile(r"url\s*=")
+_EQ_RE = re.compile(r"\s*=\s*")
+_FOLLOWS_VAL_SEARCH_RE = re.compile(r'\bfollows\s*=\s*"([^"]+)"')
+_FOLLOWS_VAL_MATCH_RE = re.compile(r'follows\s*=\s*"([^"]+)"')
+_SEG_BLOCK_OPEN_RE = re.compile(rf"{_SEG_TOKEN}\s*=\s*\{{")
+_INPUTS_SEG_BLOCK_OPEN_RE = re.compile(rf"inputs\.{_SEG_TOKEN}\s*=\s*\{{")
+_SEG_URL_RE = re.compile(rf"(?:inputs\.)?{_SEG_TOKEN}\.url\s*=")
+_SEG_FOLLOWS_RE = re.compile(rf"(?:inputs\.)?{_SEG_TOKEN}\.follows\s*=")
+_DEEP_INPUTS_RE = re.compile(rf"inputs\.{_SEG_TOKEN}(?:\.inputs\.{_SEG_TOKEN})+")
+_INPUTS_SEG_RE = re.compile(rf"inputs\.{_SEG_TOKEN}")
+_SHALLOW_INPUTS_RE = re.compile(rf"inputs\.{_SEG_TOKEN}\.(follows|url)\b")
+_SEG_NESTED_FOLLOWS_RE = re.compile(rf"{_SEG_TOKEN}\.inputs\.{_SEG_TOKEN}\.follows\s*=\s*\"([^\"]+)\"")
+_INPUTS_NESTED_FOLLOWS_RE = re.compile(rf"inputs\.{_SEG_TOKEN}\.inputs\.{_SEG_TOKEN}\.follows\s*=\s*\"([^\"]+)\"")
+_INDENTED_URL_FOLLOWS_RE = re.compile(r"^(\s+)\S+\.(url|follows)\s*=")
+_DOTTED_URL_FOLLOWS_RE = re.compile(r"\s*(inputs\.)?\S+\.(url|follows)\s*=")
+_INPUTS_DEEP3_FOLLOWS_RE = re.compile(rf"inputs\.{_SEG_TOKEN}\.inputs\.{_SEG_TOKEN}\.inputs\.{_SEG_TOKEN}\.follows\s*=\s*\"([^\"]+)\"")
+_SEG_URL_STMT_RE = re.compile(r"(?:^|;)\s*url\s*=")
+_SEG_FOLLOWS_STMT_RE = re.compile(r"(?:^|;)\s*follows\s*=")
 
 
 @functools.lru_cache(maxsize=512)
@@ -1989,7 +2019,7 @@ def _nested_segments(normalized: str) -> list[str]:
     segment on ``;`` outside double-quoted strings so each declaration
     is judged on its own. Ordinary lines return a single-element list.
     """
-    m = re.match(r"inputs\s*=\s*\{", normalized)
+    m = _INPUTS_BLOCK_OPEN_RE.match(normalized)
     if not m:
         return [normalized] if normalized else []
     seg = normalized[m.end() :].strip()
@@ -2331,7 +2361,7 @@ def find_input_block_end(content: str, input_name: str) -> tuple[int, str] | Non
             block_start = i
             break
 
-        if not in_inputs_block and re.match(r"inputs\s*=\s*\{", stripped):
+        if not in_inputs_block and _INPUTS_BLOCK_OPEN_RE.match(stripped):
             in_inputs_block = True
             inputs_brace_depth = _brace_delta(stripped)
             continue
@@ -2357,7 +2387,7 @@ def find_input_block_end(content: str, input_name: str) -> tuple[int, str] | Non
         if depth <= 0:
             indent = "    "
             for j in range(block_start + 1, i):
-                m = re.match(r"^(\s+)", lines[j])
+                m = _INDENT_PLUS_RE.match(lines[j])
                 if m:
                     indent = m.group(1)
                     break
@@ -2378,14 +2408,14 @@ def detect_inputs_style(
         stripped = line.strip()
         if stripped.startswith("#"):
             continue
-        if re.match(r"inputs\s*=\s*\{", stripped):
+        if _INPUTS_BLOCK_OPEN_RE.match(stripped):
             depth = _brace_delta(stripped)
             for j in range(i + 1, len(lines)):
                 depth += _brace_delta(lines[j])
                 if depth <= 0:
                     return ("block", i, j)
             return ("block", i, len(lines) - 1)
-        if re.match(r"inputs\.(?:[a-zA-Z_]|\"[^\"])", stripped):
+        if _INPUTS_DOTTED_START_RE.match(stripped):
             return ("dotted", None, None)
     return ("dotted", None, None)
 
@@ -2464,7 +2494,7 @@ def find_input_url_line(content: str, input_name: str) -> int | None:
                     # shared with the block header, so callers must not
                     # delete it whole (#700; remove_input_url_line
                     # excises just the assignment).
-                    if re.search(r"\burl\s*=", stripped):
+                    if _URL_ASSIGN_RE.search(stripped):
                         return i
                     if depth <= 0:
                         # One-line block without a url on the line itself
@@ -2475,7 +2505,7 @@ def find_input_url_line(content: str, input_name: str) -> int | None:
             if in_target:
                 depth += _brace_delta(stripped)
                 # Only the block's own top-level url counts (depth 1)
-                if depth == 1 and re.match(r"url\s*=", stripped):
+                if depth == 1 and _URL_LINE_RE.match(stripped):
                     return i
                 if depth <= 0:
                     break
@@ -2552,7 +2582,7 @@ def _excise_url_assignment(line: str, input_name: str) -> str | None:
             ):
                 prev = line[:i].rstrip()
                 if not prev or prev.endswith("{") or prev.endswith(";"):
-                    vm = re.match(r"\s*=\s*", line[i + 3 :])
+                    vm = _EQ_RE.match(line[i + 3 :])
                     if vm:
                         start = i
                         value_start = i + 3 + vm.end()
@@ -2650,7 +2680,7 @@ def _follows_target_for_input(content: str, input_name: str) -> str | None:
                 if depth == 0 and pat_header.match(stripped):
                     in_target = True
                     depth = _brace_delta(stripped)
-                    m = re.search(r'\bfollows\s*=\s*"([^"]+)"', stripped)
+                    m = _FOLLOWS_VAL_SEARCH_RE.search(stripped)
                     if m:
                         return m.group(1)
                     if depth <= 0:
@@ -2663,7 +2693,7 @@ def _follows_target_for_input(content: str, input_name: str) -> str | None:
                 depth += _brace_delta(stripped)
                 # Only the block's own top-level follows counts (depth 1)
                 if depth == 1:
-                    m = re.match(r'follows\s*=\s*"([^"]+)"', stripped)
+                    m = _FOLLOWS_VAL_MATCH_RE.match(stripped)
                     if m:
                         return m.group(1)
                 if depth <= 0:
@@ -2709,7 +2739,7 @@ def insert_follows_in_content(
 
         last_line, is_inside = find_input_dotted_line(content, parent_input)
         if last_line is not None:
-            indent = re.match(r"^(\s*)", lines[last_line]).group(1)
+            indent = _INDENT_RE.match(lines[last_line]).group(1)
             if is_inside:
                 nix_line = f'{_quote_name(parent_input)}.follows = "{target}";'
             else:
@@ -2747,7 +2777,7 @@ def insert_follows_in_content(
 
     last_line, is_inside = find_input_dotted_line(content, parent_input)
     if last_line is not None:
-        indent = re.match(r"^(\s*)", lines[last_line]).group(1)
+        indent = _INDENT_RE.match(lines[last_line]).group(1)
         if is_inside:
             lines.insert(last_line + 1, f"{indent}{relative_to_inputs}")
         else:
@@ -2777,10 +2807,10 @@ def _last_dotted_anchor(lines: list[str], content: str) -> int:
         if stripped.startswith("#"):
             continue
         if block_ctx[i] is None:
-            if re.match(r"inputs\.", stripped):
+            if _INPUTS_DOT_RE.match(stripped):
                 anchor = i
             continue
-        m = re.match(rf"inputs\.{_SEG_TOKEN}\s*=\s*\{{", stripped)
+        m = _INPUTS_SEG_BLOCK_OPEN_RE.match(stripped)
         if m and block_ctx[i] == _unquote_name(m.group(1)):
             end = find_input_block_end(content, _unquote_name(m.group(1)))
             if end is not None:
@@ -2806,7 +2836,7 @@ def insert_root_input(
         indent = "    "
         if block_start is not None:
             for i in range(block_start + 1, block_end):
-                m = re.match(r"^(\s+)", lines[i])
+                m = _INDENT_PLUS_RE.match(lines[i])
                 if m and lines[i].strip():
                     indent = m.group(1)
                     break
@@ -2820,7 +2850,7 @@ def insert_root_input(
         last_input_line = _last_dotted_anchor(lines, content)
         indent = "    "
         if last_input_line > 0:
-            m = re.match(r"^(\s*)", lines[last_input_line])
+            m = _INDENT_RE.match(lines[last_input_line])
             if m:
                 indent = m.group(1)
         new_line = f'{indent}inputs.{_quote_name(input_name)}.url = "{url}";'
@@ -2848,7 +2878,7 @@ def _insert_before_inputs_end(
             # A nested `inputs = {` inside another input's override is not
             # the root block: re-entering here would reset the depth and
             # insert the new line inside the override instead (#640).
-            if not in_inputs and re.match(r"inputs\s*=\s*\{", stripped):
+            if not in_inputs and _INPUTS_BLOCK_OPEN_RE.match(stripped):
                 in_inputs = True
                 depth = _brace_delta(stripped)
                 continue
@@ -2859,7 +2889,7 @@ def _insert_before_inputs_end(
                     return "\n".join(lines)
 
     for i, line in enumerate(lines):
-        if re.match(r"\s*outputs\s*=", line.strip()):
+        if _OUTPUTS_RE.match(line.strip()):
             lines.insert(i, new_line)
             return "\n".join(lines)
 
@@ -3557,7 +3587,7 @@ def _add_deep_follows_overrides(
         # another input's override is not the root section: re-entering
         # here would reset the brace depth and drop every deep path
         # declared after the nested block (#640).
-        if not in_inputs_section and re.match(r"inputs\s*=\s*\{", stripped):
+        if not in_inputs_section and _INPUTS_BLOCK_OPEN_RE.match(stripped):
             in_inputs_section = True
             brace_depth = 1
             continue
@@ -3568,7 +3598,7 @@ def _add_deep_follows_overrides(
 
             # Detect named input block: <name> = {
             if current_block is None and brace_depth == 1:
-                m = re.match(rf"{_SEG_TOKEN}\s*=\s*\{{", stripped)
+                m = _SEG_BLOCK_OPEN_RE.match(stripped)
                 if m:
                     current_block = _unquote_name(m.group(1))
                     brace_depth += opens  # count the { we just matched
@@ -3581,13 +3611,13 @@ def _add_deep_follows_overrides(
             if current_block is not None:
                 # Look for: inputs.X.inputs.Y.follows (or .url, etc.)
                 m_deep = re.match(
-                    rf"inputs\.{_SEG_TOKEN}(?:\.inputs\.{_SEG_TOKEN})+",
+                    _DEEP_INPUTS_RE,
                     stripped,
                 )
                 if m_deep:
                     parts = [
                         _unquote_name(t)
-                        for t in re.findall(rf"inputs\.{_SEG_TOKEN}", stripped)
+                        for t in _INPUTS_SEG_RE.findall(stripped)
                     ]
                     # Full path is current_block / parts[0] / parts[1] / ...
                     # The transitive inputs that need resolving are the
@@ -3598,9 +3628,7 @@ def _add_deep_follows_overrides(
                         deep_paths.add(path)
 
                 # Also catch: inputs.X.follows (X is transitive of current_block)
-                m_shallow = re.match(
-                    rf"inputs\.{_SEG_TOKEN}\.(follows|url)\b", stripped
-                )
+                m_shallow = _SHALLOW_INPUTS_RE.match(stripped)
                 if m_shallow and not m_deep:
                     # inputs.X.follows inside block = current_block/X is transitive
                     # But this is only relevant if X is NOT the root input itself
@@ -3622,12 +3650,12 @@ def _add_deep_follows_overrides(
         if stripped.startswith("#"):
             continue
         m = re.match(
-            rf"inputs\.{_SEG_TOKEN}(?:\.inputs\.{_SEG_TOKEN})+",
+            _DEEP_INPUTS_RE,
             stripped,
         )
         if m and not in_inputs_section:
             parts = [
-                _unquote_name(t) for t in re.findall(rf"inputs\.{_SEG_TOKEN}", stripped)
+                _unquote_name(t) for t in _INPUTS_SEG_RE.findall(stripped)
             ]
             if len(parts) >= 2:
                 for i in range(2, len(parts) + 1):
@@ -4382,7 +4410,7 @@ def _parse_deep_follows(content: str) -> list[dict[str, Any]]:
         # another input's override is not the root block: re-entering here
         # would reset the brace depth and drop every deep follows declared
         # after the nested block (#640).
-        if not in_inputs_section and re.match(r"inputs\s*=\s*\{", stripped):
+        if not in_inputs_section and _INPUTS_BLOCK_OPEN_RE.match(stripped):
             in_inputs_section = True
             brace_depth = _brace_delta(stripped)
             continue
@@ -4392,7 +4420,7 @@ def _parse_deep_follows(content: str) -> list[dict[str, Any]]:
 
             # Detect named input block at depth 1
             if current_block is None and brace_depth == 1:
-                m = re.match(rf"{_SEG_TOKEN}\s*=\s*\{{", stripped)
+                m = _SEG_BLOCK_OPEN_RE.match(stripped)
                 if m:
                     current_block = _unquote_name(m.group(1))
 
@@ -4404,7 +4432,7 @@ def _parse_deep_follows(content: str) -> list[dict[str, Any]]:
                 if nested_prefixes[i] == [current_block]:
                     for seg in _nested_segments(stripped):
                         m = re.match(
-                            rf'{_SEG_TOKEN}\.inputs\.{_SEG_TOKEN}\.follows\s*=\s*"([^"]+)"',
+                            _SEG_NESTED_FOLLOWS_RE,
                             seg,
                         )
                         if m:
@@ -4419,7 +4447,7 @@ def _parse_deep_follows(content: str) -> list[dict[str, Any]]:
                                 }
                             )
                 m = re.match(
-                    rf'inputs\.{_SEG_TOKEN}\.inputs\.{_SEG_TOKEN}\.follows\s*=\s*"([^"]+)"',
+                    _INPUTS_NESTED_FOLLOWS_RE,
                     stripped,
                 )
                 if m:
@@ -4444,7 +4472,7 @@ def _parse_deep_follows(content: str) -> list[dict[str, Any]]:
 
         # Dotted-style: inputs.PARENT.inputs.CHILD.inputs.SUB.follows
         m = re.match(
-            rf'inputs\.{_SEG_TOKEN}\.inputs\.{_SEG_TOKEN}\.inputs\.{_SEG_TOKEN}\.follows\s*=\s*"([^"]+)"',
+            _INPUTS_DEEP3_FOLLOWS_RE,
             stripped,
         )
         if m and not in_inputs_section:
@@ -4528,7 +4556,7 @@ def insert_root_input_block(
     indent = "    "
     if style == "block" and block_start is not None and block_end is not None:
         for k in range(block_start + 1, block_end):
-            m = re.match(r"^(\s+)", lines[k])
+            m = _INDENT_PLUS_RE.match(lines[k])
             if m and lines[k].strip():
                 indent = m.group(1)
                 break
@@ -5113,7 +5141,7 @@ def insert_flatten_failure_comments(content: str, failed: list[dict[str, Any]]) 
     # Detect indent from existing input lines
     indent = "    "
     for line in lines:
-        m = re.match(r"^(\s+)\S+\.(url|follows)\s*=", line)
+        m = _INDENTED_URL_FOLLOWS_RE.match(line)
         if m:
             indent = m.group(1)
             break
@@ -5151,7 +5179,7 @@ def insert_flatten_failure_comments(content: str, failed: list[dict[str, Any]]) 
             # Insert after last input line
             last_input = 0
             for i, line in enumerate(lines):
-                if re.match(r"\s*(inputs\.)?\S+\.(url|follows)\s*=", line):
+                if _DOTTED_URL_FOLLOWS_RE.match(line):
                     last_input = i
             lines.insert(last_input + 1, block)
 
@@ -5239,9 +5267,9 @@ def check_url_follows_conflicts(content: str) -> list[str]:
 
         def _judge(segment: str) -> None:
             nonlocal has_url, has_follows
-            if re.search(r"(?:^|;)\s*url\s*=", segment):
+            if _SEG_URL_STMT_RE.search(segment):
                 has_url = True
-            if re.search(r"(?:^|;)\s*follows\s*=", segment):
+            if _SEG_FOLLOWS_STMT_RE.search(segment):
                 has_follows = True
 
         def _finish_block() -> None:
@@ -5258,7 +5286,7 @@ def check_url_follows_conflicts(content: str) -> list[str]:
             if stripped.startswith("#"):
                 continue
             # Detect block start: ``name = {``
-            m = re.match(rf"{_SEG_TOKEN}\s*=\s*\{{", stripped)
+            m = _SEG_BLOCK_OPEN_RE.match(stripped)
             if m and depth == 0:
                 current_block = _unquote_name(m.group(1))
                 has_url = False
@@ -5303,10 +5331,10 @@ def check_url_follows_conflicts(content: str) -> list[str]:
             if depth > 0:
                 continue
             depth = max(depth, 0)
-        m = re.match(rf"(?:inputs\.)?{_SEG_TOKEN}\.url\s*=", stripped)
+        m = _SEG_URL_RE.match(stripped)
         if m:
             url_names.add(_unquote_name(m.group(1)))
-        m = re.match(rf"(?:inputs\.)?{_SEG_TOKEN}\.follows\s*=", stripped)
+        m = _SEG_FOLLOWS_RE.match(stripped)
         if m:
             follows_names.add(_unquote_name(m.group(1)))
 

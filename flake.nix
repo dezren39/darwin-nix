@@ -158,7 +158,12 @@ rec {
       # mcpx-src) carry every fix this flake used to pin forward
       # (opencode #1547 route overrides, the #1791 node_modules hash,
       # code #11443/#11453/#11476 for mcpx on aarch64-darwin), as of
-      # openchamber 1f22216 / opencode cd2ce27 / code 2dc8cb8 (2026-11-24).
+      # openchamber 1f22216 / opencode cd2ce27 / code 0a5f870f (2026-11-24).
+      # Pin code at 0a5f870f, the commit that fixes the supervised takeover
+      # ordering race seen on 2dc8cb8. Do not float to code main: later
+      # unrelated test and documentation changes in 54626513 fail this flake's
+      # full mcpx check. The takeover test passed 10 times on current code main
+      # in Fleet run 45864210459; the fixed commit is the minimal stable pin.
       # The opencode bump moves past the #2712 restamp: dfa989e was the
       # stale pre-restamp pin behind the #1991 flake-build failures.
       # If the chain regresses, pin here again with
@@ -932,6 +937,7 @@ rec {
               cp $src/lib/test-harness.sh lib/
               chmod u+w ./opencode-db-vacuum.sh ./opencode-db-vacuum.test.sh
               export HARNESS_CHECK=1
+              export VACUUM_TEST_SECOND_FS_DIR="$TMPDIR/vacuum-test-second-fs"
               bash ./opencode-db-vacuum.test.sh
               touch $out
             '';
@@ -2074,7 +2080,18 @@ rec {
         # has no darwin evaluation of its own.
         mcpx-agent-restart =
           let
-            activation = inputs.self.darwinConfigurations.MGM9JJ4V3R.config.system.activationScripts;
+            # The separate mcpx check runs the complete Go suite. This
+            # activation-text check needs the runtime package path, but
+            # rebuilding its 30-minute Go suite alongside OpenChamber can
+            # hit the Go timeout on a loaded Darwin runner. Keep the same
+            # package output and skip only that duplicate check here.
+            mcpx-runtime = inputs.openchamber.inputs.opencode.packages.aarch64-darwin.mcpx.override {
+              doCheck = false;
+            };
+            host = inputs.self.darwinConfigurations.MGM9JJ4V3R.extendModules {
+              modules = [ { services.mcpx.package = pkgs.lib.mkForce mcpx-runtime; } ];
+            };
+            activation = host.config.system.activationScripts;
             extra = pkgs.writeText "extra-activation" activation.extraActivation.text;
             post = pkgs.writeText "post-activation" activation.postActivation.text;
           in

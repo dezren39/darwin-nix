@@ -417,7 +417,7 @@ cmp -s "$db" "$fx/stagefail.before" || fail "staging cp failure changed the DB (
 rm -f "$xdir/stagefail-$$.compact"
 ok_if_clean "$before" "injected staging cp failure (cross-filesystem --into) aborts before any rename, original untouched, no partial staging file"
 else
-  harness_skip "staging cp failure case (no second filesystem available)"
+  harness_environment_waiver "second-filesystem" "staging copy failure" "no second filesystem available on this runner"
 fi
 
 # --- Same-filesystem swap never copies (Codex review on #1781).
@@ -507,7 +507,7 @@ if [ -n "$xdir" ]; then
   rm -f "$into"
   ok_if_clean "$before" "cross-filesystem --into (DB on one volume, copy on /dev/shm) swaps in via staging, backup kept, no leftovers"
 else
-  harness_skip "cross-filesystem --into case (no second filesystem available)"
+  harness_environment_waiver "second-filesystem" "cross-filesystem --into" "no second filesystem available on this runner"
 fi
 
 # --- Failing ps snapshot: real run refuses, DB byte-identical (#1816). -

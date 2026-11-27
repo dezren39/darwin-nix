@@ -52,7 +52,7 @@ TIDY_MOVE_FAILURES=0   # incremented by tidy_file_to_bucket/tidy_dir_to_bucket w
 BREW_DRIFT_FAILURES=0  # incremented by brew_cask_drift_check when `brew list --cask` fails (#1918)
 MAS_DRIFT_FAILURES=0   # incremented by mas_app_drift_check when `mas list` fails (#2018)
 EVAL_CACHE_FAILURES=0  # incremented by sweep_eval_caches when the Tier-3 freshness `find` fails (#2167)
-IDLE_PROBE_FAILURES=0  # incremented by fresh_probe when an idleness freshness `find` fails (#2253)
+IDLE_PROBE_FAILURES=0  # incremented by fresh_probe when a freshness `find` fails (#2253, #2286)
 EXPIRE_REFLOG="${EXPIRE_REFLOG:-0}" # opt-in: force reflog expiry during maintenance
 DOCKER_AGE_DAYS="${DOCKER_AGE_DAYS:-}"  # set = age-scoped docker prune, VM preserved
 PRUNE_UNKNOWN_SCRATCH="${PRUNE_UNKNOWN_SCRATCH:-0}" # opt-in: delete, not just flag, the name-blind catch-all
@@ -653,6 +653,39 @@ short_scratch_is_kept() {
   esac
 }
 
+# Fail-closed freshness probe (#2253, #2286): run `find` with the caller's args
+# and leave the first match in FRESH_PROBE_RESULT, exactly like the inline
+# probes this replaces -- but capture find's exit status (temp-file
+# stderr, not a pipe, so the status survives; same shape as #2167). A
+# failed scan (I/O error, permission denied mid-traversal, bad path) also
+# yields empty output, and the idleness callers read empty as "nothing
+# fresh" = idle = deletable. On failure: warn naming the probed path,
+# surface find's stderr, count the failure in IDLE_PROBE_FAILURES so the
+# run exits non-zero at the end, and return 1 -- callers treat that as
+# "active" (keep). The result travels in a variable, not stdout, because
+# a command substitution would run the probe in a subshell and lose the
+# counter increment.
+FRESH_PROBE_RESULT=""
+fresh_probe() {
+  local _label="$1" _path="$2"; shift 2
+  local _err
+  _err=$(mktemp)
+  FRESH_PROBE_RESULT="$(find "$@" 2>"$_err")"
+  if [ $? -ne 0 ]; then
+    warn "$_label freshness probe failed for $_path -- idleness unverifiable; treating as active (keeping)"
+    [ -s "$_err" ] && sed 's/^/     /' "$_err" >&2
+    rm -f "$_err"
+    IDLE_PROBE_FAILURES=$((IDLE_PROBE_FAILURES + 1))
+    return 1
+  fi
+  rm -f "$_err"
+  return 0
+}
+
+# Defined before the sweeps that call it: the unknown-scratch,
+# ad-hoc postgres, in-repo postgres, and home-artifact sweeps (#2286)
+# run earlier in this file than the idleness callers below.
+
 # Name-blind catch-all: generic mktemp output (tmp.XXXXXXXX), random
 # throwaway dirs (oc-XXXXXX), anything SHORT_SCRATCH_GLOBS above doesn't
 # recognize. FLAGGED ONLY by default -- a known tool's own naming convention
@@ -686,7 +719,8 @@ sweep_unknown_large_scratch() {
     size_kb=$(du -sk "$entry" 2>/dev/null | cut -f1); size_kb=${size_kb:-0}
     size_mb=$((size_kb / 1024))
     [ "$size_mb" -ge "$UNKNOWN_SCRATCH_MIN_MB" ] || continue
-    [ -n "$(find "$entry" -maxdepth 0 -mmin "-${age_cutoff_min}" -print 2>/dev/null)" ] && continue  # too fresh
+    fresh_probe unknown-scratch "$entry" "$entry" -maxdepth 0 -mmin "-${age_cutoff_min}" -print || continue  # freshness unverifiable (#2286): keep
+    [ -n "$FRESH_PROBE_RESULT" ] && continue  # too fresh
     dir_has_open_handles "$entry"; handles_rc=$?
     [ "$handles_rc" -eq 0 ] && continue  # something has it open
     if [ "$handles_rc" -eq 2 ]; then echo "  keeping (cannot verify open handles; lsof unavailable): ${entry/#$CALLER_USER_HOME/\~}"; continue; fi
@@ -1565,7 +1599,8 @@ sweep_ad_hoc_postgres_dirs() {
   while IFS= read -r marker; do
     pgdir="$(dirname "$marker")"
     case "$pgdir" in "$base/opencode"/*) continue ;; esac # owned by the tidy pass, not here
-    if [ -z "$(find "$pgdir" -type f -not -name "$SPOTLIGHT_MARKER" -mmin "-$((PG_SCRATCH_STALE_HOURS * 60))" -print -quit 2>/dev/null)" ]; then
+    fresh_probe ad-hoc-postgres "$pgdir" "$pgdir" -type f -not -name "$SPOTLIGHT_MARKER" -mmin "-$((PG_SCRATCH_STALE_HOURS * 60))" -print -quit || continue  # freshness unverifiable (#2286): keep
+    if [ -z "$FRESH_PROBE_RESULT" ]; then
       dir_has_open_handles "$pgdir"; handles_rc=$?
       if [ "$handles_rc" -eq 2 ]; then
         echo "  keeping (cannot verify open handles; lsof unavailable): ${pgdir/#$CALLER_USER_HOME/\~}"
@@ -1696,34 +1731,6 @@ echo "   $n_repos repos, $n_wt worktrees, $n_found artifact dirs"
 git_tree_is_clean() {
   [ -e "$1/.git" ] || return 0     # not a repo/worktree: nothing git can say
   [ -z "$(git -C "$1" status --porcelain 2>/dev/null | head -1)" ]
-}
-# Fail-closed freshness probe (#2253): run `find` with the caller's args
-# and leave the first match in FRESH_PROBE_RESULT, exactly like the inline
-# probes this replaces -- but capture find's exit status (temp-file
-# stderr, not a pipe, so the status survives; same shape as #2167). A
-# failed scan (I/O error, permission denied mid-traversal, bad path) also
-# yields empty output, and the idleness callers read empty as "nothing
-# fresh" = idle = deletable. On failure: warn naming the probed path,
-# surface find's stderr, count the failure in IDLE_PROBE_FAILURES so the
-# run exits non-zero at the end, and return 1 -- callers treat that as
-# "active" (keep). The result travels in a variable, not stdout, because
-# a command substitution would run the probe in a subshell and lose the
-# counter increment.
-FRESH_PROBE_RESULT=""
-fresh_probe() {
-  local _label="$1" _path="$2"; shift 2
-  local _err
-  _err=$(mktemp)
-  FRESH_PROBE_RESULT="$(find "$@" 2>"$_err")"
-  if [ $? -ne 0 ]; then
-    warn "$_label freshness probe failed for $_path -- idleness unverifiable; treating as active (keeping)"
-    [ -s "$_err" ] && sed 's/^/     /' "$_err" >&2
-    rm -f "$_err"
-    IDLE_PROBE_FAILURES=$((IDLE_PROBE_FAILURES + 1))
-    return 1
-  fi
-  rm -f "$_err"
-  return 0
 }
 
 repo_is_idle() {
@@ -1965,30 +1972,35 @@ echo "   $TRASHED .trash removed, $PRUNED artifact dirs pruned ($NONGIT outside 
 # a marker whose cluster was already removed as part of an enclosing
 # cluster earlier in this same pass.
 _repo_pg_removed=0
-while IFS= read -r _owner; do
-  [ -d "$_owner" ] || continue
-  while IFS= read -r _marker; do
-    _pgdir="$(dirname "$_marker")"
-    [ -d "$_pgdir" ] || continue
-    if [ -z "$(find "$_pgdir" -type f -not -name "$SPOTLIGHT_MARKER" -mmin "-$((PG_SCRATCH_STALE_HOURS * 60))" -print -quit 2>/dev/null)" ]; then
-      dir_has_open_handles "$_pgdir"; _handles_rc=$?
-      if [ "$_handles_rc" -eq 2 ]; then
-        echo "  keeping (cannot verify open handles; lsof unavailable): ${_pgdir/#$CALLER_USER_HOME/\~}"
-      elif [ "$_handles_rc" -eq 1 ]; then
-        if [ "$DRY_RUN" = "1" ]; then echo "  would remove (postgres data dir in repo, idle >${PG_SCRATCH_STALE_HOURS}h): ${_pgdir/#$CALLER_USER_HOME/\~}"
-        else echo "  removing (postgres data dir in repo, idle >${PG_SCRATCH_STALE_HOURS}h): ${_pgdir/#$CALLER_USER_HOME/\~}"; del "$_pgdir"; fi
-        _repo_pg_removed=$((_repo_pg_removed + 1))
+sweep_repo_postgres_dirs() {
+  local _owner _marker _pgdir _handles_rc
+  while IFS= read -r _owner; do
+    [ -d "$_owner" ] || continue
+    while IFS= read -r _marker; do
+      _pgdir="$(dirname "$_marker")"
+      [ -d "$_pgdir" ] || continue
+      fresh_probe repo-postgres "$_pgdir" "$_pgdir" -type f -not -name "$SPOTLIGHT_MARKER" -mmin "-$((PG_SCRATCH_STALE_HOURS * 60))" -print -quit || continue  # freshness unverifiable (#2286): keep
+      if [ -z "$FRESH_PROBE_RESULT" ]; then
+        dir_has_open_handles "$_pgdir"; _handles_rc=$?
+        if [ "$_handles_rc" -eq 2 ]; then
+          echo "  keeping (cannot verify open handles; lsof unavailable): ${_pgdir/#$CALLER_USER_HOME/\~}"
+        elif [ "$_handles_rc" -eq 1 ]; then
+          if [ "$DRY_RUN" = "1" ]; then echo "  would remove (postgres data dir in repo, idle >${PG_SCRATCH_STALE_HOURS}h): ${_pgdir/#$CALLER_USER_HOME/\~}"
+          else echo "  removing (postgres data dir in repo, idle >${PG_SCRATCH_STALE_HOURS}h): ${_pgdir/#$CALLER_USER_HOME/\~}"; del "$_pgdir"; fi
+          _repo_pg_removed=$((_repo_pg_removed + 1))
+        fi
       fi
-    fi
-  done < <(find "$_owner" \( -type d \( -name .git -o -name node_modules -o -name .worktrees \) -prune \) -o -name PG_VERSION -type f -print 2>/dev/null)
-done < "$OWNERS_FILE"
+    done < <(find "$_owner" \( -type d \( -name .git -o -name node_modules -o -name .worktrees \) -prune \) -o -name PG_VERSION -type f -print 2>/dev/null)
+  done < "$OWNERS_FILE"
+}
+sweep_repo_postgres_dirs
 [ "$_repo_pg_removed" -gt 0 ] && info "postgres data dirs inside repos/worktrees: removed $_repo_pg_removed"
 
 # --- Artifact dirs directly in ~, outside any repo --------------------------
 # ~/.cache is deliberately skipped: it is the shared XDG cache (uv, nix, gh,
 # huggingface, opencode) with its own policy above, not a build artifact.
-if [ -z "$TARGET_PATH" ]; then
-  echo "🏠 artifact dirs directly in ~"
+sweep_home_artifact_dirs() {
+  local _n _d _skip _s
   HOME_ARTIFACT_SKIP=(.cache)
   for _n in "${CACHE_NAMES[@]}"; do
     _d="$CALLER_USER_HOME/$_n"
@@ -1996,12 +2008,18 @@ if [ -z "$TARGET_PATH" ]; then
     _skip=0
     for _s in "${HOME_ARTIFACT_SKIP[@]}"; do [ "$_n" = "$_s" ] && _skip=1; done
     [ "$_skip" = "1" ] && { info "~/$_n skipped by policy"; continue; }
-    if [ -z "$(find "$_d" -type f -mtime "-${HOME_ARTIFACT_STALE_DAYS}" -print -quit 2>/dev/null)" ]; then
+    if ! fresh_probe home-artifact "$_d" "$_d" -type f -mtime "-${HOME_ARTIFACT_STALE_DAYS}" -print -quit; then
+      continue  # freshness unverifiable (#2286): keep, do not even mark
+    elif [ -z "$FRESH_PROBE_RESULT" ]; then
       del_and_stub "$_d"
     else
       mark_dir "$_d"
     fi
   done
+}
+if [ -z "$TARGET_PATH" ]; then
+  echo "🏠 artifact dirs directly in ~"
+  sweep_home_artifact_dirs
 fi
 
 # --- opencode scratch dirs: tmp/opencode entries & worktree/ ---------------
@@ -2555,12 +2573,12 @@ if [ "$EVAL_CACHE_FAILURES" -gt 0 ]; then
   exit 1
 fi
 
-# A failed idleness freshness probe fails the run (#2253), same
+# A failed freshness probe fails the run (#2253, #2286), same
 # convention: fresh_probe kept the unverifiable entries (read them as
 # active) and recorded the failures in IDLE_PROBE_FAILURES at the probe
 # sites above.
 if [ "$IDLE_PROBE_FAILURES" -gt 0 ]; then
-  warn "idleness probes: $IDLE_PROBE_FAILURES freshness probe failure(s) -- clean.sh exiting non-zero"
+  warn "freshness probes: $IDLE_PROBE_FAILURES freshness probe failure(s) -- clean.sh exiting non-zero"
   exit 1
 fi
 outcome_finish

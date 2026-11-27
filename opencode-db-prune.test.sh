@@ -331,6 +331,43 @@ out="$(PATH="$shimdir:$processbin:$PATH" bash "$PRUNE" --db "$db" --protect-days
 cmp -s "$db" "$fx/lsofholder.before" || fail "positive-holder lsof: apply mutated fixture DB"
 [ "$failures" -eq "$before" ] && ok "successful positive lsof result preserves behavior: apply refuses and DB is unchanged"
 
+# --- Writer appearing after the first guard check refuses (#2290). ----
+# The first check_not_running runs before the prompt/backup/stage/archive
+# window, so a writer starting inside that window used to be invisible
+# to the delete loop -- the guard verdict was minutes stale (unbounded
+# at the prompt). Stateful ps stub: the first snapshot is empty, every
+# later one reports an opencode process, and the lsof stub confirms it
+# holds THIS db. --apply must refuse at the pre-delete re-check:
+# non-zero exit, zero rows deleted, staging table dropped, and the
+# archive (built before the re-check) named in the output and left in
+# place.
+before=$failures
+latebin="$HOME/latebin"; mkdir -p "$latebin"
+echo 0 >"$HOME/late-ps-count"
+cat >"$latebin/ps" <<EOF
+#!/bin/sh
+case "\$*" in
+  *"-eo pid=,ppid=,args="*)
+    n=\$(cat "$HOME/late-ps-count"); n=\$((n + 1)); echo \$n >"$HOME/late-ps-count"
+    [ \$n -ge 2 ] && printf '424242 1 opencode\n' ;;
+  *"-o pid=,args="*) printf '424242 opencode\n' ;;
+  *) exit 0 ;;
+esac
+EOF
+chmod +x "$latebin/ps"
+mk_lsof "$latebin" holder
+db="$fx/latewriter.db"; mk_fixture "$db"
+arch="$fx/latewriter.ndjson.gz"
+out="$(PATH="$latebin:$PATH" bash "$PRUNE" --db "$db" --protect-days 0 --apply -y --no-backup --archive "$arch" 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] || fail "late writer: --apply exited 0, expected refusal at the pre-delete re-check: $out"
+case "$out" in *"opencode process(es) running"*) ;; *) fail "late writer: refusal does not name the running writer: $out" ;; esac
+[ "$(count_of "$db")" = "10" ] || fail "late writer: event count $(count_of "$db"), expected 10 (zero deletes)"
+staged="$(sqlite3 "$db" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='opencode_db_prune_targets';")"
+[ "$staged" = "0" ] || fail "late writer: staging table left behind after refusal"
+[ -f "$arch" ] || fail "late writer: archive $arch missing (built before the re-check; left in place on refusal)"
+case "$out" in *"$arch"*) ;; *) fail "late writer: refusal output does not name the archive left in place: $out" ;; esac
+[ "$failures" -eq "$before" ] && ok "writer starting after the first guard check: --apply refuses before any DELETE; DB untouched, staging dropped, archive named and kept"
+
 if [ "$failures" -ne 0 ]; then
   echo "$failures failure(s)" >&2
   exit 1

@@ -60,7 +60,7 @@ health_check() {
     openchamber)
       # The managed serve answers on loopback; the triage probe for
       # epic #973 recorded HTTP 200 on the root path.
-      curl -fsS -o /dev/null "http://127.0.0.1:3000/" 2>/dev/null
+      curl -fsS -m 5 -o /dev/null "http://127.0.0.1:3000/" 2>/dev/null
       ;;
     mcpx)
       systemctl --user is-active --quiet "$unit" || return 1

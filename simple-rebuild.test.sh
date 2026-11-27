@@ -428,6 +428,126 @@ EOF
   esac
 fi
 
+# --- reclaim_root_owned: detector and action cover one set (#2281) --
+# The detector used to exclude ./.git/* while the action chowned the
+# whole tree, so .git-internal strays read as clean and one outside
+# stray rewrote the object store; a failed find also read as clean.
+# The real function is extracted and run under zsh with sudo stubbed
+# to record its argv: ownership is simulated by pointing USER at
+# `nobody` (who owns nothing in the fixture, so every path is a stray)
+# versus the invoking user (who owns everything: the clean control).
+RECLAIM_FN="$TMP_ROOT/reclaim.zsh"
+awk '/^reclaim_root_owned\(\) \{$/ { capture=1 } capture { print } capture && /^}$/ { exit }' "$SCRIPT" >"$RECLAIM_FN"
+if [ ! -s "$RECLAIM_FN" ]; then
+  fail "could not extract reclaim_root_owned from simple-rebuild.sh"
+else
+  RECLAIM_RUN="$TMP_ROOT/reclaim-run"
+  mkdir -p "$RECLAIM_RUN/tree/.git/objects" "$RECLAIM_RUN/tree/sub"
+  printf 'x\n' >"$RECLAIM_RUN/tree/.git/config"
+  printf 'x\n' >"$RECLAIM_RUN/tree/.git/objects/pack-1"
+  printf 'x\n' >"$RECLAIM_RUN/tree/normal.txt"
+  printf 'x\n' >"$RECLAIM_RUN/tree/sub/file.txt"
+  cat >"$RECLAIM_RUN/driver.zsh" <<EOF
+cd "$RECLAIM_RUN/tree"
+sudo() { print -r -- "\$@" >> "$RECLAIM_RUN/sudo.log"; }
+source "$RECLAIM_FN"
+reclaim_root_owned
+EOF
+  # reclaim_case <USER>: sets RECLAIM_STATUS, RECLAIM_OUT, RECLAIM_ERR
+  # and truncates the sudo log.
+  reclaim_case() {
+    : >"$RECLAIM_RUN/sudo.log"
+    RECLAIM_OUT="$(USER="$1" zsh "$RECLAIM_RUN/driver.zsh" 2>"$TMP_ROOT/reclaim.err")"
+    RECLAIM_STATUS=$?
+    RECLAIM_ERR="$(cat "$TMP_ROOT/reclaim.err")"
+  }
+
+  # Clean control: the invoking user owns the whole fixture.
+  reclaim_case "$(id -un)"
+  if [ "$RECLAIM_STATUS" -eq 0 ]; then
+    ok "reclaim exits 0 on a fully owned tree (#2281)"
+  else
+    fail "reclaim on a fully owned tree exited $RECLAIM_STATUS (err: $RECLAIM_ERR)"
+  fi
+  case "$RECLAIM_OUT" in
+    *"no root-owned files; skipping chown"*) ok "reclaim reports a fully owned tree as clean (#2281)" ;;
+    *) fail "reclaim on a fully owned tree printed '$RECLAIM_OUT'" ;;
+  esac
+  if [ ! -s "$RECLAIM_RUN/sudo.log" ]; then
+    ok "reclaim does not call sudo on a fully owned tree (#2281)"
+  else
+    fail "reclaim called sudo on a fully owned tree: $(cat "$RECLAIM_RUN/sudo.log")"
+  fi
+
+  if id nobody >/dev/null 2>&1; then
+    # Every fixture path is a stray: chown must receive exactly the
+    # find set -- .git internals included, no -R, no bare tree root
+    # beyond its own entry in the set.
+    reclaim_case nobody
+    if [ "$RECLAIM_STATUS" -eq 0 ]; then
+      ok "reclaim exits 0 when strays exist (#2281)"
+    else
+      fail "reclaim with strays exited $RECLAIM_STATUS (err: $RECLAIM_ERR)"
+    fi
+    case "$RECLAIM_OUT" in
+      *"reclaiming root-owned files"*) ok "reclaim triggers when only-and-also .git-internal strays exist (#2281)" ;;
+      *) fail "reclaim with strays printed '$RECLAIM_OUT'" ;;
+    esac
+    SUDO_WORDS="$(cat "$RECLAIM_RUN/sudo.log")"
+    case "$SUDO_WORDS" in
+      "chown -- nobody "*) ok "reclaim chowns to the invoking owner with -- before paths (#2281)" ;;
+      *) fail "reclaim sudo argv was '$SUDO_WORDS' (want: chown -- nobody <strays...>)" ;;
+    esac
+    case " $SUDO_WORDS " in
+      *" -R "*) fail "reclaim still passes -R to chown (full-tree rewrite) (#2281)" ;;
+      *) ok "reclaim chown has no -R: it cannot rewrite paths outside the detected set (#2281)" ;;
+    esac
+    case " $SUDO_WORDS " in
+      *" ./.git/objects/pack-1 "*) ok "reclaim chown set includes .git-internal strays (#2281)" ;;
+      *) fail "reclaim chown set lacks ./.git/objects/pack-1 (argv: $SUDO_WORDS)" ;;
+    esac
+    EXPECTED_SET="$(cd "$RECLAIM_RUN/tree" && find . -print | sort)"
+    ACTUAL_SET="$(printf '%s' "$SUDO_WORDS" | tr ' ' '\n' | tail -n +4 | sort)"
+    if [ "$ACTUAL_SET" = "$EXPECTED_SET" ]; then
+      ok "reclaim chown set equals the detected stray set exactly (#2281)"
+    else
+      fail "reclaim chown set differs from the detected set: got [$ACTUAL_SET] want [$EXPECTED_SET]"
+    fi
+  else
+    ok "reclaim stray-set cases skipped: no 'nobody' user to simulate foreign ownership"
+  fi
+
+  # A failing find must not read as clean. An unreadable directory
+  # makes find exit non-zero; root can read anything, so skip there.
+  if [ "$(id -u)" -ne 0 ]; then
+    mkdir -p "$RECLAIM_RUN/tree/locked"
+    printf 'x\n' >"$RECLAIM_RUN/tree/locked/secret"
+    chmod 000 "$RECLAIM_RUN/tree/locked"
+    reclaim_case "$(id -un)"
+    chmod 755 "$RECLAIM_RUN/tree/locked"
+    if [ "$RECLAIM_STATUS" -ne 0 ]; then
+      ok "reclaim fails when find fails (#2281)"
+    else
+      fail "reclaim exited 0 when find failed (out: $RECLAIM_OUT)"
+    fi
+    case "$RECLAIM_OUT" in
+      *"no root-owned files"*) fail "reclaim reported a failed find as 'no root-owned files' (#2281)" ;;
+      *) ok "reclaim does not report a failed find as clean (#2281)" ;;
+    esac
+    case "$RECLAIM_ERR" in
+      *"find failed"*) ok "reclaim surfaces the find failure on stderr (#2281)" ;;
+      *) fail "reclaim find-failure stderr lacked the diagnostic (got: $RECLAIM_ERR)" ;;
+    esac
+    if [ ! -s "$RECLAIM_RUN/sudo.log" ]; then
+      ok "reclaim does not call sudo when find fails (#2281)"
+    else
+      fail "reclaim called sudo when find failed: $(cat "$RECLAIM_RUN/sudo.log")"
+    fi
+  else
+    ok "reclaim find-failure case skipped: running as root, find cannot be made to fail with permissions"
+  fi
+fi
+
 if [ "$failures" -gt 0 ]; then
   echo "$failures simple-rebuild parser check(s) failed" >&2
   exit 1

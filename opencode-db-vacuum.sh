@@ -21,7 +21,8 @@
 #   2. measure: size, page/freelist counts, projected reclaim
 #   3. integrity_check + wal_checkpoint(TRUNCATE)
 #   4. optional auto_vacuum=INCREMENTAL (must be set BEFORE the vacuum)
-#   5. VACUUM INTO a scratch copy, verify it, then swap
+#   5. VACUUM INTO a scratch copy, verify it, re-check the writer guard
+#      and row counts immediately before the swap (#2251), then swap
 #
 #   VACUUM INTO is used rather than plain VACUUM because it writes the compacted
 #   copy to a path you choose (possibly another volume), never mutates the
@@ -169,6 +170,71 @@ opencode_running_count() {
     printf '0\n'
   else
     printf '%s\n' "$pids" | wc -l | tr -d ' '
+  fi
+}
+
+# Per-table row-count comparison between the original and the compacted
+# copy. A failed query on either side aborts (#1386), as does a mismatch.
+# Called once right after VACUUM INTO and again immediately before the
+# swap (#2251), so a write landing after the first pass is caught by the
+# second instead of being silently discarded by the renames.
+verify_row_counts() {
+  local t old_n new_n
+  for t in session message part event; do
+    old_n="$(sqlite3 -readonly "file:$(uri_escape_path "$DB")?mode=ro" "SELECT COUNT(*) FROM $t;" 2>/dev/null || echo skip)"
+    new_n="$(sqlite3 -readonly "file:$(uri_escape_path "$COMPACT")?mode=ro" "SELECT COUNT(*) FROM $t;" 2>/dev/null || echo skip)"
+    [ "$old_n" = skip ] && die "row count query failed for $t on the original database; original untouched at $DB"
+    [ "$new_n" = skip ] && die "row count query failed for $t on the compacted copy; original untouched at $DB"
+    note "$(printf '%-8s %12s -> %12s' "$t" "$old_n" "$new_n")"
+    [ "$old_n" = "$new_n" ] || die "row count mismatch in $t; original untouched at $DB"
+  done
+}
+
+# Pre-swap writer re-check (#2251). The preflight guard runs minutes
+# before the swap (VACUUM INTO, verification, and an unbounded
+# interactive prompt sit between them), so a writer that starts in that
+# window would have its writes silently discarded by the swap. Re-run
+# the guard immediately before the renames, with the same semantics as
+# preflight: a failed ps snapshot or a failed lsof holder query is
+# UNKNOWN, never zero (#1816, #1824), and any process holding THIS
+# database aborts the run with the original untouched.
+assert_no_writer_before_swap() {
+  local running_now lsof_err_file lsof_pids lsof_status holders lsof_state
+  running_now="$(opencode_running_count)"
+  if [ "$running_now" = "unknown" ]; then
+    die "could not read the process table (ps snapshot failed) -- refusing to swap while the opencode writer state is unknown; original untouched at $DB, compacted copy left at $COMPACT"
+  fi
+  if [ "$running_now" -gt 0 ] && command -v lsof >/dev/null 2>&1; then
+    lsof_err_file="$(mktemp "${TMPDIR:-/tmp}/opencode-db-vacuum-lsof.XXXXXX" 2>/dev/null || true)"
+    if [ -n "$lsof_err_file" ]; then
+      lsof_pids="$(lsof -t -- "$DB" 2>"$lsof_err_file")" && lsof_status=0 || lsof_status=$?
+    else
+      lsof_pids="$(lsof -t -- "$DB" 2>/dev/null)" && lsof_status=0 || lsof_status=$?
+    fi
+    holders="$(printf '%s\n' "$lsof_pids" | awk 'NF { n++ } END { print n+0 }')"
+    if [ "$holders" -gt 0 ]; then
+      lsof_state=holders
+    elif [ -n "$lsof_err_file" ] && [ -s "$lsof_err_file" ]; then
+      lsof_state=unknown
+    elif [ -z "$lsof_err_file" ] && [ "$lsof_status" -ne 0 ]; then
+      lsof_state=unknown
+    elif [ "$lsof_status" -gt 1 ]; then
+      lsof_state=unknown
+    else
+      lsof_state=empty
+    fi
+    [ -n "$lsof_err_file" ] && rm -f "$lsof_err_file"
+    if [ "$lsof_state" = unknown ]; then
+      die "could not check database holders (lsof exited $lsof_status) -- refusing to swap while holder state is unknown; original untouched at $DB, compacted copy left at $COMPACT"
+    elif [ "$holders" -eq 0 ]; then
+      note "note: $running_now opencode process(es) running, but none has $DB open"
+      return 0
+    else
+      running_now="$holders"
+    fi
+  fi
+  if [ "$running_now" -gt 0 ]; then
+    die "$running_now opencode process(es) started after the first check -- refusing to swap; original untouched at $DB, compacted copy left at $COMPACT"
   fi
 }
 
@@ -511,14 +577,7 @@ new_integrity="${new_integrity%%$'\n'*}"
 note "integrity_check: $new_integrity"
 [ "$new_integrity" = "ok" ] || die "compacted copy failed integrity check; original untouched at $DB"
 
-for t in session message part event; do
-  old_n="$(sqlite3 -readonly "file:$(uri_escape_path "$DB")?mode=ro" "SELECT COUNT(*) FROM $t;" 2>/dev/null || echo skip)"
-  new_n="$(sqlite3 -readonly "file:$(uri_escape_path "$COMPACT")?mode=ro" "SELECT COUNT(*) FROM $t;" 2>/dev/null || echo skip)"
-  [ "$old_n" = skip ] && die "row count query failed for $t on the original database; original untouched at $DB"
-  [ "$new_n" = skip ] && die "row count query failed for $t on the compacted copy; original untouched at $DB"
-  note "$(printf '%-8s %12s -> %12s' "$t" "$old_n" "$new_n")"
-  [ "$old_n" = "$new_n" ] || die "row count mismatch in $t; original untouched at $DB"
-done
+verify_row_counts
 
 if [ "$ASSUME_YES" -eq 0 ]; then
   printf '\nSwap the compacted copy in? Original kept as %s.old [y/N] ' "$DB"
@@ -555,6 +614,15 @@ else
     die "staged copy does not match the verified compacted copy; original untouched at $DB, compacted copy left at $COMPACT"
   fi
 fi
+
+# Last check before the renames (#2251): the preflight writer guard and
+# the row-count verification above are both stale by now -- VACUUM INTO,
+# the verification itself, the interactive prompt, and the staging copy
+# all sit between them and the swap, and a write landing in that window
+# would be silently discarded. Re-run both; either one failing aborts
+# here, with the original still untouched at the active path.
+assert_no_writer_before_swap
+verify_row_counts
 
 # From here the swap is two renames on one filesystem. Arm a rollback
 # for the window between them: any exit in that window (a failed rename,

@@ -479,6 +479,100 @@ out_q3="$(bash "$SCRIPT" --dry-run --help 2>&1)"; rc_q3=$?
 grep -q "must be the sole argument" <<<"$out_q3" || fail "Q: --dry-run --help did not explain the sole-argument rule"
 [[ $failures -eq $start ]] && ok "Q: help/version succeed alone, fail as usage errors with unaccounted arguments (#1894)"
 
+# ─── Scenario R (#2244): a mount from a different --source is not kept ────
+# do_mount never compared the requested $SOURCE with the live base
+# mount's source: fully mounted from A + --source B printed "Already
+# fully mounted" and exited 0 (bindfs never invoked, target kept serving
+# A), and partially mounted from A + --source B overlaid plans on A's
+# mount and created $SOURCE/plans (B) based on a probe through A.
+# Documented behavior: error naming both sources, exit non-zero, counted
+# in the dispatch summary, before any overlay or $SOURCE mutation.
+# This drives the REAL (non-dry-run) mount path with a stateful stub
+# mount table whose lines are "<source> <mountpoint>", reusing scenario
+# K's macFUSE-marker mode.
+start=$failures
+STUB_BIN_R="$TMP_ROOT/stub-bin-r"; mkdir -p "$STUB_BIN_R"
+export MOUNT_STATE_R="$TMP_ROOT/mount-state-r"
+export BINDFS_LOG="$TMP_ROOT/bindfs-calls.log"
+write_bash_stub "$STUB_BIN_R/mount" <<'STUB'
+while read -r src mp; do
+  [[ -n "$mp" ]] && printf '%s on %s (fuse, local)\n' "$src" "$mp"
+done < "$MOUNT_STATE_R"
+STUB
+write_bash_stub "$STUB_BIN_R/bindfs" <<'STUB'
+echo "bindfs $*" >> "$BINDFS_LOG"
+printf '%s %s\n' "$1" "$2" >> "$MOUNT_STATE_R"
+exit 0
+STUB
+write_bash_stub "$STUB_BIN_R/umount" <<'STUB'
+exit 0
+STUB
+chmod +x "$STUB_BIN_R/mount" "$STUB_BIN_R/bindfs" "$STUB_BIN_R/umount"
+SRC_A_R="$TMP_ROOT/src-a-r"; mkdir -p "$SRC_A_R/plans"
+SRC_B_FULL_R="$TMP_ROOT/src-b-full-r"; mkdir -p "$SRC_B_FULL_R"
+SRC_B_PART_R="$TMP_ROOT/src-b-part-r"; mkdir -p "$SRC_B_PART_R"
+SRC_C_R="$TMP_ROOT/src-c-r"; mkdir -p "$SRC_C_R"
+SRC_D_R="$TMP_ROOT/src-d-r"; mkdir -p "$SRC_D_R"
+R_TGT_FULL="$TMP_ROOT/r-tgt-full"; mkdir -p "$R_TGT_FULL/.opencode"
+R_TGT_PART="$TMP_ROOT/r-tgt-part"; mkdir -p "$R_TGT_PART/.opencode"
+R_TGT_OK_FULL="$TMP_ROOT/r-tgt-ok-full"; mkdir -p "$R_TGT_OK_FULL/.opencode"
+R_TGT_OK_PART="$TMP_ROOT/r-tgt-ok-part"; mkdir -p "$R_TGT_OK_PART/.opencode"
+run_r() {
+  local src="$1" target="$2"
+  : > "$BINDFS_LOG"
+  if [[ "$k_mode" == "direct" ]]; then
+    env -u OPENCODE_SHARE_TEST_MACFUSE_MARKER PATH="$STUB_BIN_R:$PATH" \
+      bash "$SCRIPT" --source "$src" "$target" 2>&1
+  elif [[ "$k_mode" == "namespace" ]]; then
+    local up="$TMP_ROOT/ov-up-r-$RANDOM" work="$TMP_ROOT/ov-work-r-$RANDOM"
+    mkdir -p "$up" "$work"
+    unshare -rm bash "$TMP_ROOT/fake-macfuse.sh" "$up" "$work" \
+      env -u OPENCODE_SHARE_TEST_MACFUSE_MARKER PATH="$STUB_BIN_R:$PATH" \
+      bash "$SCRIPT" --source "$src" "$target" 2>&1
+  else
+    OPENCODE_SHARE_TEST_MACFUSE_MARKER="$FAKE_MACFUSE_MARKER" \
+      PATH="$STUB_BIN_R:$PATH" bash "$SCRIPT" --source "$src" "$target" 2>&1
+  fi
+}
+# R1: fully mounted from A, requested B -> error naming both, no bindfs.
+printf '%s %s\n%s %s\n' "$SRC_A_R" "$R_TGT_FULL/.opencode" "$R_TGT_FULL/plans" "$R_TGT_FULL/.opencode/plans" > "$MOUNT_STATE_R"
+out_r1="$(run_r "$SRC_B_FULL_R" "$R_TGT_FULL")"; rc_r1=$?
+[[ $rc_r1 -ne 0 ]] || fail "R: fully-mounted-from-A + --source B expected non-zero exit, got $rc_r1"
+grep -q "serves a different source" <<<"$out_r1" || fail "R: fully-mounted mismatch not named; output: $out_r1"
+grep -qF "mounted source is $SRC_A_R" <<<"$out_r1" || fail "R: fully-mounted error did not name the mounted source A"
+grep -qF "requested source is $SRC_B_FULL_R" <<<"$out_r1" || fail "R: fully-mounted error did not name the requested source B"
+grep -q "1 target(s) had errors" <<<"$out_r1" || fail "R: fully-mounted mismatch not counted in the summary"
+if grep -q "Already fully mounted" <<<"$out_r1"; then
+  fail "R: fully-mounted-from-A still claimed as Already fully mounted for B (regression)"
+fi
+[[ ! -s "$BINDFS_LOG" ]] || fail "R: bindfs invoked on the fully-mounted mismatch path"
+[[ ! -d "$SRC_B_FULL_R/plans" ]] || fail "R: fully-mounted mismatch created requested source B's plans/"
+# R2: partially mounted from A (base only), requested B -> same error,
+# and B must not be mutated based on observations through A.
+printf '%s %s\n' "$SRC_A_R" "$R_TGT_PART/.opencode" > "$MOUNT_STATE_R"
+out_r2="$(run_r "$SRC_B_PART_R" "$R_TGT_PART")"; rc_r2=$?
+[[ $rc_r2 -ne 0 ]] || fail "R: partially-mounted-from-A + --source B expected non-zero exit, got $rc_r2"
+grep -q "serves a different source" <<<"$out_r2" || fail "R: partially-mounted mismatch not named; output: $out_r2"
+grep -qF "mounted source is $SRC_A_R" <<<"$out_r2" || fail "R: partially-mounted error did not name the mounted source A"
+grep -qF "requested source is $SRC_B_PART_R" <<<"$out_r2" || fail "R: partially-mounted error did not name the requested source B"
+[[ ! -s "$BINDFS_LOG" ]] || fail "R: bindfs invoked on the partially-mounted mismatch path (plans overlaid on foreign mount)"
+[[ ! -d "$SRC_B_PART_R/plans" ]] || fail "R: partially-mounted mismatch mutated source B (created plans/) based on observations through A (regression)"
+[[ ! -d "$R_TGT_PART/plans" ]] || fail "R: partially-mounted mismatch created the target's project-local plans/"
+# R3 control: fully mounted from the REQUESTED source is still a
+# successful skip.
+printf '%s %s\n%s %s\n' "$SRC_C_R" "$R_TGT_OK_FULL/.opencode" "$R_TGT_OK_FULL/plans" "$R_TGT_OK_FULL/.opencode/plans" > "$MOUNT_STATE_R"
+out_r3="$(run_r "$SRC_C_R" "$R_TGT_OK_FULL")"; rc_r3=$?
+[[ $rc_r3 -eq 0 ]] || fail "R: same-source fully-mounted control expected exit 0, got $rc_r3; output: $out_r3"
+grep -q "Already fully mounted" <<<"$out_r3" || fail "R: same-source control lost the Already fully mounted skip"
+# R4 control: partially mounted from the REQUESTED source still
+# completes the plans overlay (and may create that source's plans/).
+printf '%s %s\n' "$SRC_D_R" "$R_TGT_OK_PART/.opencode" > "$MOUNT_STATE_R"
+out_r4="$(run_r "$SRC_D_R" "$R_TGT_OK_PART")"; rc_r4=$?
+[[ $rc_r4 -eq 0 ]] || fail "R: same-source partially-mounted control expected exit 0, got $rc_r4; output: $out_r4"
+grep -q "Shared .opencode mounted at $R_TGT_OK_PART/.opencode" <<<"$out_r4" || fail "R: same-source partial control did not complete the mount"
+grep -q "bindfs $R_TGT_OK_PART/plans $R_TGT_OK_PART/.opencode/plans" "$BINDFS_LOG" || fail "R: same-source partial control never overlaid plans via bindfs"
+[[ $failures -eq $start ]] && ok "R: fully/partially mounted from A + --source B errors naming both sources, counted, no bindfs, no B mutation; same-source full/partial controls unchanged"
+
 if [[ $failures -gt 0 ]]; then
   echo "$failures failure(s)" >&2
   exit 1

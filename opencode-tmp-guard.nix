@@ -38,6 +38,10 @@
 # scan root (the repo list may be partial), and a repo counts as refreshed
 # only when its refresh pass succeeds -- a failed one logs a WARN naming
 # the repo and the run ends by reporting that protection is incomplete.
+# The working-file freshness probe is under the same contract (#2288):
+# its exit status is checked (no head pipe to mask it), and a failed probe
+# logs a WARN naming the repo and counts toward incomplete protection --
+# an unverifiable repo is skipped, never silently read as unchanged.
 #
 # clean.sh is unaffected: touch -a changes access time (and ctime) only, and
 # every age test in clean.sh reads modification time (-mtime, -mmin, date -r,
@@ -111,10 +115,20 @@ let
     # traversals prune node_modules (#1843), like the repo-discovery scan
     # above: dependency trees are neither probed nor kept alive.
     refreshed=0
+    probe_failed=0
     while IFS= read -r g; do
       [ -n "$g" ] || continue
       r=''${g%/.git}
-      [ -n "$(/usr/bin/find "$r" -name node_modules -prune -o -mtime -14 -print 2>/dev/null | /usr/bin/head -1)" ] || continue
+      # Fail closed (#2288): read the probe's full output and check find's
+      # own exit status -- piping through head would report head's status
+      # and read a failed scan's empty output as "unchanged in 14 days".
+      changed=$(/usr/bin/find "$r" -name node_modules -prune -o -mtime -14 -print 2>/dev/null)
+      if [ $? -ne 0 ]; then
+        probe_failed=$((probe_failed + 1))
+        log "WARN working-file freshness probe failed for $r; skipping its working-file refresh, so that repo may be unprotected"
+        continue
+      fi
+      [ -n "$changed" ] || continue
       /usr/bin/find "$r" -name node_modules -prune -o -exec /usr/bin/touch -a -h {} + 2>/dev/null
       refreshed=$((refreshed + 1))
     done <<EOF
@@ -122,6 +136,7 @@ let
     EOF
     [ "$meta" -eq 0 ] || log "refreshed .git metadata in $meta repo(s), working files in $refreshed (changed <14d), under $T"
     [ "$meta_failed" -eq 0 ] || log "WARN .git metadata refresh failed for $meta_failed repo(s) under $T; protection is incomplete"
+    [ "$probe_failed" -eq 0 ] || log "WARN working-file freshness probe failed for $probe_failed repo(s) under $T; protection is incomplete"
   '';
 in
 {

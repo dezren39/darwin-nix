@@ -45,6 +45,11 @@ HOW IT WORKS:
   own plans), while everything else in .opencode is shared from the source.
   No absolute paths are baked into symlinks — bindfs mounts resolve correctly.
 
+  If a target is already mounted from a DIFFERENT source than the one
+  requested, the mount fails with an error naming both sources (exit
+  non-zero) instead of silently keeping the old mount: unmount the
+  target first, or re-run with --source naming the mounted source.
+
 OPTIONS:
   --source DIR      Source .opencode directory
                     (default: \$OPENCODE_SHARE_SOURCE or ~/.config/nix/.opencode)
@@ -131,6 +136,12 @@ is_mounted() {
   mount | grep -F " on $1 (" >/dev/null 2>&1
 }
 
+mount_source() {
+  # The source of the live mount at $1, extracted exactly as do_status
+  # does (#2244). Full-read grep for the same #1455 SIGPIPE reason.
+  mount | grep -F " on $1 (" | awk 'NR==1 {print $1}'
+}
+
 check_deps() {
   local missing=()
 
@@ -187,6 +198,25 @@ do_mount() {
   if [[ -L "$target_opencode" ]]; then
     warn "Unlinking existing symlink: $target_opencode"
     run unlink "$target_opencode"
+  fi
+
+  # NOTE (#2244): a live base mount serving a DIFFERENT source than the
+  # requested $SOURCE must not be silently kept. Both paths below used
+  # to proceed on any base mount: the fully-mounted path logged
+  # "Already fully mounted" and returned 0, and the partially-mounted
+  # path overlaid plans on the foreign mount and created $SOURCE/plans
+  # based on probes through the foreign source's tree -- the run
+  # reported success for a source the filesystem was not serving.
+  # Documented behavior: error naming both sources, return non-zero so
+  # the target counts in the dispatch summary; the operator unmounts
+  # and remounts, or re-runs with the mounted source.
+  if is_mounted "$target_opencode"; then
+    local live_source
+    live_source="$(mount_source "$target_opencode")"
+    if [[ -n "$live_source" && "$live_source" != "$SOURCE" ]]; then
+      err "Base mount at $target_opencode serves a different source: mounted source is $live_source, requested source is $SOURCE (unmount it first with: $PROG --unmount $target, or re-run with --source $live_source)"
+      return 1
+    fi
   fi
 
   # If already fully mounted, skip

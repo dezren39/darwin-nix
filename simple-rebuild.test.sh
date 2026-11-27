@@ -321,13 +321,14 @@ EOF
     case "$HEALTH_CHILD" in
       ''|*[!0-9]*) fail "invalid health child pid: $HEALTH_CHILD"; exit 1 ;;
     esac
-    command -v ps >/dev/null || { fail "ps required to verify child cleanup"; exit 1; }
+    PS_BIN=$(command -v ps || { [ -x /bin/ps ] && printf '%s' /bin/ps; })
+    [ -n "$PS_BIN" ] || { fail "ps required to verify child cleanup (not on PATH or /bin/ps)"; exit 1; }
     if [ "$AGENT_STATUS" -ne 1 ] || [ "$AGENT_ELAPSED" -ge 10 ]; then
       fail "descendant probe exited $AGENT_STATUS after ${AGENT_ELAPSED}s (want 1, under 10s)"
     fi
     HEALTH_CHILD_STATE=""
     for _ in 1 2 3 4 5; do
-      HEALTH_CHILD_STATE=$(ps -o stat= -p "$HEALTH_CHILD" 2>/dev/null | tr -d ' ')
+      HEALTH_CHILD_STATE=$("$PS_BIN" -o stat= -p "$HEALTH_CHILD" 2>/dev/null | tr -d ' ')
       case "$HEALTH_CHILD_STATE" in
         ''|Z*) break ;;
       esac

@@ -719,8 +719,7 @@ sweep_unknown_large_scratch() {
     size_kb=$(du -sk "$entry" 2>/dev/null | cut -f1); size_kb=${size_kb:-0}
     size_mb=$((size_kb / 1024))
     [ "$size_mb" -ge "$UNKNOWN_SCRATCH_MIN_MB" ] || continue
-    fresh_probe unknown-scratch "$entry" "$entry" -maxdepth 0 -mmin "-${age_cutoff_min}" -print || continue  # freshness unverifiable (#2286): keep
-    [ -n "$FRESH_PROBE_RESULT" ] && continue  # too fresh
+    [ -n "$(find "$entry" -maxdepth 0 -mmin "-${age_cutoff_min}" -print 2>/dev/null)" ] && continue  # too fresh
     dir_has_open_handles "$entry"; handles_rc=$?
     [ "$handles_rc" -eq 0 ] && continue  # something has it open
     if [ "$handles_rc" -eq 2 ]; then echo "  keeping (cannot verify open handles; lsof unavailable): ${entry/#$CALLER_USER_HOME/\~}"; continue; fi
@@ -1599,8 +1598,7 @@ sweep_ad_hoc_postgres_dirs() {
   while IFS= read -r marker; do
     pgdir="$(dirname "$marker")"
     case "$pgdir" in "$base/opencode"/*) continue ;; esac # owned by the tidy pass, not here
-    fresh_probe ad-hoc-postgres "$pgdir" "$pgdir" -type f -not -name "$SPOTLIGHT_MARKER" -mmin "-$((PG_SCRATCH_STALE_HOURS * 60))" -print -quit || continue  # freshness unverifiable (#2286): keep
-    if [ -z "$FRESH_PROBE_RESULT" ]; then
+    if [ -z "$(find "$pgdir" -type f -not -name "$SPOTLIGHT_MARKER" -mmin "-$((PG_SCRATCH_STALE_HOURS * 60))" -print -quit 2>/dev/null)" ]; then
       dir_has_open_handles "$pgdir"; handles_rc=$?
       if [ "$handles_rc" -eq 2 ]; then
         echo "  keeping (cannot verify open handles; lsof unavailable): ${pgdir/#$CALLER_USER_HOME/\~}"

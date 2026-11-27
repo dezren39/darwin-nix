@@ -669,7 +669,12 @@ FRESH_PROBE_RESULT=""
 fresh_probe() {
   local _label="$1" _path="$2"; shift 2
   local _err
-  _err=$(mktemp)
+  # Explicit /tmp template, never bare mktemp -- same lesson as
+  # dir_has_open_handles: extraction harnesses can carry a TMPDIR that
+  # points at an already-removed scratch dir, and a bare-mktemp failure
+  # there would misread every probe as failed (keeping everything and
+  # failing the run) in exactly the harnesses that test the keeping.
+  _err=$(mktemp /tmp/clean-fresh-probe-err.XXXXXX)
   FRESH_PROBE_RESULT="$(find "$@" 2>"$_err")"
   if [ $? -ne 0 ]; then
     warn "$_label freshness probe failed for $_path -- idleness unverifiable; treating as active (keeping)"

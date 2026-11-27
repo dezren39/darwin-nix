@@ -75,6 +75,18 @@
 #
 #   ./opencode-db-prune.sh --restore-session ses_X --from <archive|backup>
 #                                          # put one session's rows back
+#
+# THE WRITER GUARD RUNS TWICE (#2290)
+#   check_not_running refuses every write mode while a writer holds the
+#   database. On the --apply path the first call runs up front -- and
+#   then a long window opens before the first DELETE: eligibility and
+#   estimate queries, an integrity check, an unbounded confirmation
+#   prompt, a full-size .backup, staging, and the archive build with
+#   its decompress-verify. A writer starting anywhere in that window
+#   makes the first verdict stale, so the guard runs a SECOND time
+#   (assert_no_writer_before_delete) immediately before the delete
+#   loop -- the same shape as the vacuum swap re-check (#2251/#2257).
+#   Keep the second call adjacent to the deletes.
 
 set -euo pipefail
 
@@ -414,6 +426,32 @@ check_not_running() {
   fi
   note "NOTE: $running opencode process(es) running. Dry run is read-only and safe;"
   note "      --apply would refuse until they are stopped."
+}
+
+# The --apply path's second writer guard (#2290), mirroring
+# opencode-db-vacuum.sh's assert_no_writer_before_swap (#2251/#2257).
+# The first check_not_running call sits at the top of the apply path;
+# between it and the first DELETE sit the eligibility/estimate queries,
+# the integrity check, an UNBOUNDED confirmation prompt (`read` with no
+# timeout -- it can sit forever), the full-size backup, staging, and the
+# archive build with its decompress-verify. That window is minutes long
+# and unbounded at the prompt, so the first verdict is stale by the time
+# the deletes run. Re-run the guard immediately before the delete loop
+# (the call site is below, next to the loop -- keep it there). A refusal
+# deletes nothing: the staging table is dropped by the EXIT trap, and
+# the backup/archive are NAMED here and left in place on purpose -- the
+# backup is a retry's crash insurance and the archive holds exactly the
+# staged rows; remove them by hand if the run is abandoned.
+assert_no_writer_before_delete() {
+  step "Re-checking for a live writer before deleting"
+  if [ "$DO_BACKUP" -eq 1 ] && [ -n "${BACKUP:-}" ]; then
+    note "if this refuses: nothing is deleted; backup left at $BACKUP"
+  fi
+  if [ -n "$ARCHIVE" ]; then
+    note "if this refuses: nothing is deleted; archive left at $ARCHIVE"
+  fi
+  check_not_running
+  note "no live writer -- proceeding to delete"
 }
 
 # zstd is preferred purely on measured ratio (4.5x vs 3.0x on real event rows).
@@ -1124,6 +1162,14 @@ trap cleanup_prune_tmp EXIT
 if [ -n "$ARCHIVE" ]; then
   archive_targets "$ARCHIVE" "${staged:-0}"
 fi
+
+# Final writer re-check (#2290): everything since the first guard call --
+# the prompt, the backup, staging, the archive -- is the stale window
+# named in assert_no_writer_before_delete. PRUNE_STAGED is re-armed
+# first (archive_targets cleared it) so a refusal here drops the staging
+# table via the EXIT trap and leaves the database exactly as found.
+PRUNE_STAGED=1
+assert_no_writer_before_delete
 
 # Past this point the staging table is deliberately left alone: the delete loop
 # is batched, and an interrupted delete is resumed by the next run, not undone.

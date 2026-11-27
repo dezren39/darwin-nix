@@ -120,6 +120,17 @@ class StartupEnvValidationTest(unittest.TestCase):
                 self.assertIn(repr(value), p.stderr)
                 self.assertNotIn("Traceback", p.stderr)
 
+    def test_invalid_body_timeout_refuses_to_start(self):
+        for value in ("abc", "0", "-1"):
+            with self.subTest(LAPTOP_AGENT_BODY_TIMEOUT_S=value):
+                p = self._run_with_env(
+                    {"LAPTOP_AGENT_BODY_TIMEOUT_S": value})
+                self.assertEqual(p.returncode, 3, p.stderr)
+                self.assertIn(
+                    "invalid LAPTOP_AGENT_BODY_TIMEOUT_S=", p.stderr)
+                self.assertIn(repr(value), p.stderr)
+                self.assertNotIn("Traceback", p.stderr)
+
 
 class AuthHeaderTest(unittest.TestCase):
     """A request without the header must be rejected, not treated as ""."""
@@ -1371,6 +1382,118 @@ class StalledHeaderTest(unittest.TestCase):
         self._assert_stalled_client_closed(b"GET /hea")
         self._assert_stalled_client_closed(
             b"GET /health HTTP/1.1\r\nHost:")
+        status, body = self._call("GET", "/health")
+        self.assertEqual(status, 200)
+        self.assertTrue(body["ok"])
+
+
+class StalledBodyTest(unittest.TestCase):
+    """Issue #2291: a client that sends complete headers fast and
+    then trickles the body must not pin a handler thread -- the
+    #2067 header deadline stops at the headers.
+
+    Oracle: with LAPTOP_AGENT_BODY_TIMEOUT_S=1, a raw socket that
+    sends full authenticated headers (Content-Length: 100) plus a
+    single body byte gets a 400 naming the timed-out body read,
+    with the connection closed by the server well within the
+    client-side 10s wait -- on both the parsed-body path
+    (POST /exec) and the drain path (GET /health). Afterwards a
+    complete fast POST /exec still returns 200: the stall released
+    its thread and complete bodies are unaffected.
+    """
+
+    def setUp(self):
+        self.token = "<MASKED_SECRET_004>"
+        with tempfile.NamedTemporaryFile("w", delete=False) as f:
+            f.write(self.token + "\n")
+            self.token_path = f.name
+        self.port = free_port()
+        env = dict(os.environ,
+                   LAPTOP_AGENT_TOKEN_FILE=self.token_path,
+                   LAPTOP_AGENT_HOST="127.0.0.1",
+                   LAPTOP_AGENT_PORT=str(self.port),
+                   LAPTOP_AGENT_STATE=tempfile.mkdtemp(),
+                   LAPTOP_AGENT_BODY_TIMEOUT_S="1")
+        self.proc = subprocess.Popen([sys.executable, str(AGENT)], env=env,
+                                     stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE)
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            try:
+                status, body = self._call("GET", "/health")
+                if status == 200 and body.get("ok"):
+                    return
+            except Exception:
+                time.sleep(0.1)
+        self.tearDown()
+        self.fail("agent did not start")
+
+    def tearDown(self):
+        self.proc.terminate()
+        self.proc.wait(timeout=10)
+        os.unlink(self.token_path)
+
+    def _call(self, method, path, payload=None):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        body = json.dumps(payload) if payload is not None else None
+        conn.request(method, path, body=body,
+                     headers={"X-Agent-Token": self.token})
+        r = conn.getresponse()
+        data = r.read()
+        conn.close()
+        try:
+            parsed = json.loads(data) if data else {}
+        except ValueError:
+            parsed = {}
+        return r.status, parsed
+
+    def _assert_stalled_body_400(self, head):
+        with socket.create_connection(("127.0.0.1", self.port),
+                                      timeout=10) as s:
+            s.sendall(head)
+            s.sendall(b"{")
+            s.settimeout(10)
+            started = time.monotonic()
+            data = b""
+            try:
+                while True:
+                    chunk = s.recv(4096)
+                    if not chunk:
+                        break
+                    data += chunk
+            except (ConnectionResetError, BrokenPipeError):
+                pass
+            elapsed = time.monotonic() - started
+        # Answered 400 and closed by the server; had the server kept
+        # the connection open, recv would have raised socket.timeout
+        # at the 10s client deadline instead of returning b"".
+        self.assertLess(elapsed, 10)
+        self.assertTrue(data.startswith(b"HTTP/1.1 400"), data)
+        self.assertIn(b"request body read timed out", data)
+
+    def test_stalled_exec_body_gets_400_and_close(self):
+        head = (b"POST /exec HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                b"X-Agent-Token: " + self.token.encode() + b"\r\n"
+                b"Content-Type: application/json\r\n"
+                b"Content-Length: 100\r\n\r\n")
+        self._assert_stalled_body_400(head)
+
+    def test_stalled_drained_body_gets_400_and_close(self):
+        head = (b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                b"X-Agent-Token: " + self.token.encode() + b"\r\n"
+                b"Content-Length: 100\r\n\r\n")
+        self._assert_stalled_body_400(head)
+
+    def test_fast_bodies_unaffected_after_stalled_clients(self):
+        head = (b"POST /exec HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                b"X-Agent-Token: " + self.token.encode() + b"\r\n"
+                b"Content-Type: application/json\r\n"
+                b"Content-Length: 100\r\n\r\n")
+        self._assert_stalled_body_400(head)
+        status, body = self._call(
+            "POST", "/exec",
+            {"cmds": [{"argv": [sys.executable, "-c", "pass"]}]})
+        self.assertEqual(status, 200, body)
         status, body = self._call("GET", "/health")
         self.assertEqual(status, 200)
         self.assertTrue(body["ok"])

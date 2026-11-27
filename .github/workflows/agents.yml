@@ -19,14 +19,13 @@ name: agents
 # download, this job can revert to
 # `uses: developing-today/code/.github/workflows/pm-scheduled.yml@main`.
 #
-# Times are America/Chicago converted from CDT: tasks (bolt + palette)
-# at 00:00 CDT = 05:00 UTC, suggestions at 11:00 CDT = 16:00 UTC.
-# GitHub cron is UTC-only, so during CST the local fire time shifts one
-# hour earlier (tasks 23:00 CST previous day, suggestions 10:00 CST).
+# Times are America/Chicago converted from CDT: suggestions at 11:00 CDT
+# = 16:00 UTC. GitHub cron is UTC-only, so during CST the local fire time
+# shifts one hour earlier (10:00 CST). The 05:00 UTC Bolt/Palette slot was
+# retired for this Nix-only repository (#1881, #1841).
 
 "on":
   schedule:
-    - cron: "0 5 * * *"
     - cron: "0 16 * * *"
   workflow_dispatch:
     inputs:
@@ -120,7 +119,8 @@ jobs:
               "0 1 * * *")   tasks="bolt,palette" ;; # developing-today/code — 20:00 CDT (previous evening)
               "0 2 * * *")   tasks="bolt,palette" ;; # developing-today-forks/openchamber — 21:00 CDT (previous evening)
               "0 0 * * *")   tasks="bolt,palette" ;; # developing-today-forks/opencode — 19:00 CDT (previous evening)
-              "0 5 * * *")   tasks="bolt,palette" ;; # dezren39/darwin-nix + dezren39/dezren39 — 00:00 CDT
+              # The 05:00 UTC Bolt/Palette slot was retired here: this Nix-only repo has no
+              # application performance or UI surface for those prompts (#1881, #1841).
               "30 13 * * *") tasks="bolt,palette" ;; # developing-today/zettel — 08:30 CDT
 
               # --- Suggestions slots -> suggestions ---

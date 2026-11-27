@@ -349,7 +349,7 @@ cat >"$latebin/ps" <<EOF
 case "\$*" in
   *"-eo pid=,ppid=,args="*)
     n=\$(cat "$HOME/late-ps-count"); n=\$((n + 1)); echo \$n >"$HOME/late-ps-count"
-    [ \$n -ge 2 ] && printf '424242 1 opencode\n' ;;
+    if [ \$n -ge 2 ]; then printf '424242 1 opencode\n'; fi ;;
   *"-o pid=,args="*) printf '424242 opencode\n' ;;
   *) exit 0 ;;
 esac

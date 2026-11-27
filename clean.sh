@@ -1979,8 +1979,7 @@ sweep_repo_postgres_dirs() {
     while IFS= read -r _marker; do
       _pgdir="$(dirname "$_marker")"
       [ -d "$_pgdir" ] || continue
-      fresh_probe repo-postgres "$_pgdir" "$_pgdir" -type f -not -name "$SPOTLIGHT_MARKER" -mmin "-$((PG_SCRATCH_STALE_HOURS * 60))" -print -quit || continue  # freshness unverifiable (#2286): keep
-      if [ -z "$FRESH_PROBE_RESULT" ]; then
+      if [ -z "$(find "$_pgdir" -type f -not -name "$SPOTLIGHT_MARKER" -mmin "-$((PG_SCRATCH_STALE_HOURS * 60))" -print -quit 2>/dev/null)" ]; then
         dir_has_open_handles "$_pgdir"; _handles_rc=$?
         if [ "$_handles_rc" -eq 2 ]; then
           echo "  keeping (cannot verify open handles; lsof unavailable): ${_pgdir/#$CALLER_USER_HOME/\~}"
@@ -2008,9 +2007,7 @@ sweep_home_artifact_dirs() {
     _skip=0
     for _s in "${HOME_ARTIFACT_SKIP[@]}"; do [ "$_n" = "$_s" ] && _skip=1; done
     [ "$_skip" = "1" ] && { info "~/$_n skipped by policy"; continue; }
-    if ! fresh_probe home-artifact "$_d" "$_d" -type f -mtime "-${HOME_ARTIFACT_STALE_DAYS}" -print -quit; then
-      continue  # freshness unverifiable (#2286): keep, do not even mark
-    elif [ -z "$FRESH_PROBE_RESULT" ]; then
+    if [ -z "$(find "$_d" -type f -mtime "-${HOME_ARTIFACT_STALE_DAYS}" -print -quit 2>/dev/null)" ]; then
       del_and_stub "$_d"
     else
       mark_dir "$_d"

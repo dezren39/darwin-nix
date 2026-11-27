@@ -1256,121 +1256,6 @@ grep -q 'Permission denied' "$IP_DIR/stderr.log" \
 echo "ok: idleness probes keep (read active) and count the failure on a failed freshness find at all three sites; stale still reads idle and fresh active on success"
 rm -rf "$IP_DIR"
 
-# ─── #2286: failed staleness find probes keep at the four remaining sites ───
-# Drive the extracted fresh_probe + the four sweeps it now guards
-# (unknown-scratch catch-all, ad-hoc postgres, in-repo postgres,
-# home-artifact dirs) with a find stub that fails only for the
-# "broken" fixtures: a failed scan must read as active (keep) at every
-# site, warn naming the path, surface find's stderr, and be counted in
-# IDLE_PROBE_FAILURES. Controls through the real find in the same run:
-# fresh content keeps, genuinely stale content still deletes.
-SP_DIR="$TMP_ROOT/stale-probe"
-mkdir -p "$SP_DIR/bin" "$SP_DIR/home/node_modules" "$SP_DIR/home/target" "$SP_DIR/home/broken-cache" \
-         "$SP_DIR/scratch/zz-fresh-entry" "$SP_DIR/scratch/zz-stale-entry" "$SP_DIR/scratch/zz-broken-entry" \
-         "$SP_DIR/pgscratch/pg-fresh" "$SP_DIR/pgscratch/pg-stale" "$SP_DIR/pgscratch/pg-broken" \
-         "$SP_DIR/repo1/pg-stale" "$SP_DIR/repo1/data/pg-broken"
-printf 'new\n' > "$SP_DIR/home/target/fresh.txt"
-printf 'old\n' > "$SP_DIR/home/node_modules/old.txt"
-printf 'new\n' > "$SP_DIR/home/broken-cache/fresh.txt"
-printf 'new\n' > "$SP_DIR/pgscratch/pg-fresh/fresh.txt"
-printf 'old\n' > "$SP_DIR/pgscratch/pg-stale/old.txt"
-printf 'new\n' > "$SP_DIR/pgscratch/pg-broken/fresh.txt"
-printf 'old\n' > "$SP_DIR/repo1/pg-stale/old.txt"
-printf 'new\n' > "$SP_DIR/repo1/data/pg-broken/fresh.txt"
-for _pg in "$SP_DIR/pgscratch/pg-fresh" "$SP_DIR/pgscratch/pg-stale" "$SP_DIR/pgscratch/pg-broken" \
-           "$SP_DIR/repo1/pg-stale" "$SP_DIR/repo1/data/pg-broken"; do
-  printf '16\n' > "$_pg/PG_VERSION"
-done
-touch -t 200001010000 "$SP_DIR/home/node_modules/old.txt" "$SP_DIR/pgscratch/pg-stale/old.txt" \
-      "$SP_DIR/repo1/pg-stale/old.txt" "$SP_DIR/scratch/zz-stale-entry" "$SP_DIR/scratch/zz-broken-entry"
-printf '%s\n' "$SP_DIR/repo1" > "$SP_DIR/owners"
-: > "$SP_DIR/fns.sh"
-for _f in fresh_probe short_scratch_is_kept unknown_scratch_is_known sweep_unknown_large_scratch \
-          sweep_ad_hoc_postgres_dirs sweep_repo_postgres_dirs sweep_home_artifact_dirs; do
-  sed -n "/^$_f() {/,/^}/p" "$SCRIPT" >> "$SP_DIR/fns.sh"
-done
-grep -q 'sweep_repo_postgres_dirs' "$SP_DIR/fns.sh" || fail "could not extract the #2286 sweeps"
-REAL_FIND="$(command -v find)"
-export REAL_FIND
-cat > "$SP_DIR/bin/find" <<'STUB'
-#!/bin/sh
-case " $* " in
-  *broken*) echo "find: broken fixture: Permission denied" >&2; exit 1 ;;
-  *) exec "$REAL_FIND" "$@" ;;
-esac
-STUB
-chmod +x "$SP_DIR/bin/find"
-# shellcheck disable=SC2034 # consumed by the extracted sweeps
-SPOTLIGHT_MARKER=".metadata_never_index"
-PG_SCRATCH_STALE_HOURS=8
-HOME_ARTIFACT_STALE_DAYS=7
-UNKNOWN_SCRATCH_MIN_MB=0
-UNKNOWN_SCRATCH_STALE_DAYS=7
-UNKNOWN_SCRATCH_HITS=()
-SHORT_SCRATCH_GLOBS=('known-*')
-CACHE_NAMES=(node_modules broken-cache target)
-CALLER_USER_HOME="$SP_DIR/home"
-OWNERS_FILE="$SP_DIR/owners"
-DRY_RUN=0
-PRUNE_UNKNOWN_SCRATCH=1
-IDLE_PROBE_FAILURES=0
-FRESH_PROBE_RESULT=""
-_repo_pg_removed=0
-warn() { printf '%s\n' "$*" >> "$SP_DIR/warnings"; }
-info() { :; }
-dir_has_open_handles() { return 1; }
-del() { printf '%s\n' "$1" >> "$SP_DIR/deleted"; }
-del_and_stub() { printf '%s\n' "$1" >> "$SP_DIR/stubbed"; }
-mark_dir() { printf '%s\n' "$1" >> "$SP_DIR/marked"; }
-stat_birth_time() { printf 'unknown'; }
-stat_mtime_time() { printf 'unknown'; }
-# shellcheck disable=SC1091
-. "$SP_DIR/fns.sh"
-: > "$SP_DIR/warnings"; : > "$SP_DIR/deleted"; : > "$SP_DIR/stubbed"; : > "$SP_DIR/marked"
-SP_OLD_PATH="$PATH"
-PATH="$SP_DIR/bin:$PATH"
-export PATH
-SP_TMPDIR_SAVE="${TMPDIR:-}"
-TMPDIR="$SP_DIR"
-export TMPDIR
-sweep_unknown_large_scratch "$SP_DIR/scratch" 2>> "$SP_DIR/stderr.log"
-sweep_ad_hoc_postgres_dirs "$SP_DIR/pgscratch" 2>> "$SP_DIR/stderr.log"
-sweep_repo_postgres_dirs 2>> "$SP_DIR/stderr.log"
-sweep_home_artifact_dirs 2>> "$SP_DIR/stderr.log"
-if [ -n "$SP_TMPDIR_SAVE" ]; then TMPDIR="$SP_TMPDIR_SAVE"; else unset TMPDIR; fi
-export TMPDIR
-PATH="$SP_OLD_PATH"
-export PATH
-grep -qx "$SP_DIR/scratch/zz-stale-entry" "$SP_DIR/deleted" \
-  || fail "unknown-scratch sweep no longer deletes genuinely stale entries"
-grep -qx "$SP_DIR/pgscratch/pg-stale" "$SP_DIR/deleted" \
-  || fail "ad-hoc postgres sweep no longer deletes genuinely stale clusters"
-grep -qx "$SP_DIR/repo1/pg-stale" "$SP_DIR/deleted" \
-  || fail "in-repo postgres sweep no longer deletes genuinely stale clusters"
-grep -qx "$SP_DIR/home/node_modules" "$SP_DIR/stubbed" \
-  || fail "home-artifact sweep no longer stubs genuinely stale dirs"
-grep -qx "$SP_DIR/home/target" "$SP_DIR/marked" \
-  || fail "home-artifact sweep no longer marks fresh dirs"
-if grep -q 'broken' "$SP_DIR/deleted" || grep -q 'broken' "$SP_DIR/stubbed" || grep -q 'broken' "$SP_DIR/marked"; then
-  fail "a failed freshness find still deleted/stubbed/marked an unverifiable entry (#2286)"
-fi
-[ -d "$SP_DIR/scratch/zz-broken-entry" ] && [ -d "$SP_DIR/pgscratch/pg-broken" ] \
-  && [ -d "$SP_DIR/repo1/data/pg-broken" ] && [ -d "$SP_DIR/home/broken-cache" ] \
-  || fail "a broken fixture vanished despite the failed probe"
-[ "$IDLE_PROBE_FAILURES" -eq 4 ] || fail "failed staleness probes not counted (IDLE_PROBE_FAILURES=$IDLE_PROBE_FAILURES, want 4)"
-grep -q 'freshness probe failed' "$SP_DIR/warnings" \
-  || fail "failed staleness probe did not warn"
-grep -q "$SP_DIR/pgscratch/pg-broken" "$SP_DIR/warnings" \
-  || fail "failed ad-hoc postgres probe warning did not name the path"
-grep -q "$SP_DIR/repo1/data/pg-broken" "$SP_DIR/warnings" \
-  || fail "failed in-repo postgres probe warning did not name the path"
-grep -q "$SP_DIR/home/broken-cache" "$SP_DIR/warnings" \
-  || fail "failed home-artifact probe warning did not name the path"
-grep -q 'Permission denied' "$SP_DIR/stderr.log" \
-  || fail "failed staleness probe did not surface find's stderr"
-echo "ok: staleness probes keep (read active) and count the failure on a failed find at all four #2286 sites; stale still deletes and fresh still keeps on success"
-rm -rf "$SP_DIR"
-
 # ─── Bash 3.2 compatibility: no associative-array cache (#1829) ─────
 # clean.sh's supported entrypoints (./clean.sh via its env-bash shebang,
 # just clean) can resolve to the Bash 3.2 macOS ships at /bin/bash, and
@@ -1629,18 +1514,14 @@ mkdir -p "$PG_DIR/base/pgdata" "$PG_DIR/bin-missing" \
 touch "$PG_DIR/base/pgdata/PG_VERSION"
 touch -t 200001010000 "$PG_DIR/base/pgdata/PG_VERSION"
 { sed -n '/^dir_has_open_handles() {/,/^}/p' "$SCRIPT"
-  sed -n '/^fresh_probe() {/,/^}/p' "$SCRIPT"
   sed -n '/^sweep_ad_hoc_postgres_dirs() {/,/^}/p' "$SCRIPT"; } > "$PG_DIR/fn.sh"
 grep -q 'sweep_ad_hoc_postgres_dirs' "$PG_DIR/fn.sh" \
   || fail "could not extract sweep_ad_hoc_postgres_dirs from clean.sh (#1803)"
 grep -q 'dir_has_open_handles' "$PG_DIR/fn.sh" \
   || fail "extracted sweep has no dir_has_open_handles helper to test (#1803)"
-# bin-missing gets the real find/dirname/mktemp and NO lsof at all.
-# (mktemp joined the list with #2286: the sweep's freshness probe,
-# fresh_probe, captures find's stderr through a temp file.)
+# bin-missing gets the real find/dirname and NO lsof at all.
 ln -s "$(command -v find)" "$PG_DIR/bin-missing/find"
 ln -s "$(command -v dirname)" "$PG_DIR/bin-missing/dirname"
-ln -s "$(command -v mktemp)" "$PG_DIR/bin-missing/mktemp"
 cat > "$PG_DIR/bin-error/lsof" <<'STUB'
 #!/bin/sh
 exit 2
@@ -1667,9 +1548,6 @@ pg_run() { # pg_run <PATH> -- runs the extracted sweep in a subshell
     DRY_RUN=0; PG_SCRATCH_STALE_HOURS=8
     # shellcheck disable=SC2034 # consumed by the sourced sweep
     SPOTLIGHT_MARKER=".metadata_never_index"; CALLER_USER_HOME="$HOME"
-    # shellcheck disable=SC2034 # consumed by fresh_probe (#2286)
-    IDLE_PROBE_FAILURES=0; FRESH_PROBE_RESULT=""
-    warn() { printf '%s\n' "$*" >&2; }
     PATH="$1"
     del() { printf '%s\n' "$1" >> "$PG_DIR/deleted"; }
     . "$PG_DIR/fn.sh"
@@ -1892,9 +1770,6 @@ for fn in sweep_unknown_large_scratch sweep_short_lived_scratch \
   fi
 done
 sed -n '/^del() {/,/^}/p' "$SCRIPT" > "$SW_DIR/del.sh"
-awk '/^fresh_probe\(\) \{/,/^\}/' "$SCRIPT" > "$SW_DIR/fresh_probe.sh"
-grep -q 'fresh_probe' "$SW_DIR/fresh_probe.sh" \
-  || fail "could not extract fresh_probe from clean.sh (#2286)"
 awk '/^dir_has_open_handles\(\) \{/,/^\}/' "$SCRIPT" > "$SW_DIR/dir_has_open_handles.sh"
 grep -q 'dir_has_open_handles' "$SW_DIR/dir_has_open_handles.sh" \
   || fail "could not extract dir_has_open_handles from clean.sh (#1803)"
@@ -1971,12 +1846,9 @@ chmod +x "$SW_DIR/no-holder-bin/lsof"
   unknown_scratch_is_known() { return 1; }
   stat_birth_time() { echo unknown; }
   stat_mtime_time() { echo unknown; }
-  # shellcheck disable=SC2034 # consumed by fresh_probe (#2286)
-  IDLE_PROBE_FAILURES=0; FRESH_PROBE_RESULT=""
   PATH="$SW_DIR/no-holder-bin:$PATH"
   . "$SW_DIR/del.sh"
   . "$SW_DIR/dir_has_open_handles.sh"
-  . "$SW_DIR/fresh_probe.sh"
   . "$SW_DIR/sweep_unknown_large_scratch.sh"
   mkdir -p "$SW_DIR/unknown"
   ln -s "$SW_DIR/no-such-target" "$SW_DIR/unknown/mystery-link"

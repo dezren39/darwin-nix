@@ -1333,10 +1333,17 @@ export PATH
 SP_TMPDIR_SAVE="${TMPDIR:-}"
 TMPDIR="$SP_DIR"
 export TMPDIR
-sweep_unknown_large_scratch "$SP_DIR/scratch" 2>> "$SP_DIR/stderr.log"
-sweep_ad_hoc_postgres_dirs "$SP_DIR/pgscratch" 2>> "$SP_DIR/stderr.log"
-sweep_repo_postgres_dirs 2>> "$SP_DIR/stderr.log"
-sweep_home_artifact_dirs 2>> "$SP_DIR/stderr.log"
+# This suite region runs under `set -e` (see the #1803 section above), and
+# the extracted sweeps call the dir_has_open_handles stub (rc=1) as a bare
+# command -- under -e that aborts the whole suite before any assertion
+# runs. Invoking each sweep in a || context disables -e inside it (the
+# #2253 block above guards its probe calls the same way); the sweeps'
+# effects are asserted exhaustively below, so a bare `|| true` loses no
+# signal.
+sweep_unknown_large_scratch "$SP_DIR/scratch" 2>> "$SP_DIR/stderr.log" || true
+sweep_ad_hoc_postgres_dirs "$SP_DIR/pgscratch" 2>> "$SP_DIR/stderr.log" || true
+sweep_repo_postgres_dirs 2>> "$SP_DIR/stderr.log" || true
+sweep_home_artifact_dirs 2>> "$SP_DIR/stderr.log" || true
 if [ -n "$SP_TMPDIR_SAVE" ]; then TMPDIR="$SP_TMPDIR_SAVE"; else unset TMPDIR; fi
 export TMPDIR
 PATH="$SP_OLD_PATH"

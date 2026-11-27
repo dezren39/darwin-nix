@@ -263,7 +263,7 @@ check "failed rollback restart was attempted" test "$(restart_count)" -eq 2
 check "failed rollback restart is named as the cause" \
   grep -q 'systemctl --user restart openchamber.service failed' "$out"
 check "failed rollback restart is not reported as merely unhealthy" \
-  bash -c "! grep -q 'still not healthy' \"$1\"" _ "$out"
+  bash -c '! grep -q "still not healthy" "$1"' _ "$out"
 
 # --- verdict -----------------------------------------------------------------
 

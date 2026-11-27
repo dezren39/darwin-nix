@@ -573,6 +573,35 @@ grep -q "Shared .opencode mounted at $R_TGT_OK_PART/.opencode" <<<"$out_r4" || f
 grep -q "bindfs $R_TGT_OK_PART/plans $R_TGT_OK_PART/.opencode/plans" "$BINDFS_LOG" || fail "R: same-source partial control never overlaid plans via bindfs"
 [[ $failures -eq $start ]] && ok "R: fully/partially mounted from A + --source B errors naming both sources, counted, no bindfs, no B mutation; same-source full/partial controls unchanged"
 
+# ─── Scenario S (#2249): a source path containing spaces is not truncated ──
+# mount_source extracted the live mount's source with awk '{print $1}',
+# so a valid source named e.g. "source with spaces" read back as only
+# its first word and do_mount refused the idempotent mount as serving
+# a different source. This drives the REAL --dry-run path from the
+# issue's repro (plus --status, which shares the extraction) with a
+# stub mount table listing the spaced source as already mounted.
+start=$failures
+STUB_BIN_S="$TMP_ROOT/stub-bin-s"; mkdir -p "$STUB_BIN_S"
+SPACED_SRC="$TMP_ROOT/source with spaces"; mkdir -p "$SPACED_SRC/plans"
+S_TGT="$TMP_ROOT/s-tgt"; mkdir -p "$S_TGT/.opencode"
+write_bash_stub "$STUB_BIN_S/mount" <<'STUB'
+printf '%s on %s (fuse, local)\n' "$SPACED_SRC_ENV" "$S_TGT_ENV/.opencode"
+printf '%s on %s (fuse, local)\n' "$S_TGT_ENV/plans" "$S_TGT_ENV/.opencode/plans"
+STUB
+chmod +x "$STUB_BIN_S/mount"
+out_s1="$(SPACED_SRC_ENV="$SPACED_SRC" S_TGT_ENV="$S_TGT" PATH="$STUB_BIN_S:$PATH" \
+  bash "$SCRIPT" --dry-run --source "$SPACED_SRC" "$S_TGT" 2>&1)"; rc_s1=$?
+[[ $rc_s1 -eq 0 ]] || fail "S: same-source (spaced path) fully-mounted dry-run expected exit 0, got $rc_s1; output: $out_s1"
+grep -q "Already fully mounted" <<<"$out_s1" || fail "S: spaced same-source mount not recognised as already mounted; output: $out_s1"
+if grep -q "serves a different source" <<<"$out_s1"; then
+  fail "S: spaced same-source mount refused as a different source (regression)"
+fi
+out_s2="$(SPACED_SRC_ENV="$SPACED_SRC" S_TGT_ENV="$S_TGT" PATH="$STUB_BIN_S:$PATH" \
+  bash "$SCRIPT" --status --source "$SPACED_SRC" "$S_TGT" 2>&1)"; rc_s2=$?
+[[ $rc_s2 -eq 0 ]] || fail "S: --status expected exit 0, got $rc_s2; output: $out_s2"
+grep -qF ".opencode: mounted (source: $SPACED_SRC)" <<<"$out_s2" || fail "S: --status did not report the full spaced source; output: $out_s2"
+[[ $failures -eq $start ]] && ok "S: source path containing spaces parses in full; same-source mount recognised (dry-run + status)"
+
 if [[ $failures -gt 0 ]]; then
   echo "$failures failure(s)" >&2
   exit 1

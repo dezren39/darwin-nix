@@ -2097,8 +2097,27 @@ rec {
               modules = [ { services.mcpx.package = pkgs.lib.mkForce mcpx-runtime; } ];
             };
             activation = host.config.system.activationScripts;
-            extra = pkgs.writeText "extra-activation" activation.extraActivation.text;
-            post = pkgs.writeText "post-activation" activation.postActivation.text;
+            # Activation strings carry the entire host's dependency context,
+            # even after substring extraction. This check executes only these
+            # module blocks, not Home Manager, OpenCode or their Go suites.
+            # Discard context only after checking/extracting the markers, then
+            # restore the install block's store dependency from mcpx-runtime
+            # itself (already in scope): its string context carries the
+            # module's writeShellScript "mcpx" wrapper (with runtime closure).
+            block = kind: text:
+              let
+                begin = "# mcpx-agent-${kind}-begin";
+                end = "# mcpx-agent-${kind}-end";
+                starts = pkgs.lib.splitString begin text;
+                ends = pkgs.lib.splitString end (builtins.elemAt starts 1);
+              in
+              assert builtins.length starts == 2;
+              assert builtins.length ends == 2;
+              builtins.unsafeDiscardStringContext (begin + builtins.head ends + end + "\n");
+            installBlock =
+              builtins.appendContext (block "install" activation.extraActivation.text) (builtins.getContext "${mcpx-runtime}");
+            extra = pkgs.writeText "extra-activation" installBlock;
+            post = pkgs.writeText "post-activation" (block "restart" activation.postActivation.text);
           in
           pkgs.runCommandLocal "mcpx-agent-restart-test"
             {

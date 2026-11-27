@@ -321,13 +321,20 @@ EOF
     case "$HEALTH_CHILD" in
       ''|*[!0-9]*) fail "invalid health child pid: $HEALTH_CHILD"; exit 1 ;;
     esac
-    command -v ps >/dev/null || { fail "ps required to verify child cleanup"; exit 1; }
+    # Darwin's Nix build PATH omits the system utilities. Use the stock
+    # ps there; Linux supplies procps through nativeBuildInputs. Keep the
+    # assertion mandatory rather than silently skipping descendant cleanup.
+    HEALTH_PS=$(command -v ps || true)
+    if [ -z "$HEALTH_PS" ] && [ "$(uname -s)" = Darwin ] && [ -x /bin/ps ]; then
+      HEALTH_PS=/bin/ps
+    fi
+    [ -n "$HEALTH_PS" ] || { fail "ps required to verify child cleanup"; exit 1; }
     if [ "$AGENT_STATUS" -ne 1 ] || [ "$AGENT_ELAPSED" -ge 10 ]; then
       fail "descendant probe exited $AGENT_STATUS after ${AGENT_ELAPSED}s (want 1, under 10s)"
     fi
     HEALTH_CHILD_STATE=""
     for _ in 1 2 3 4 5; do
-      HEALTH_CHILD_STATE=$(ps -o stat= -p "$HEALTH_CHILD" 2>/dev/null | tr -d ' ')
+      HEALTH_CHILD_STATE=$("$HEALTH_PS" -o stat= -p "$HEALTH_CHILD" 2>/dev/null | tr -d ' ')
       case "$HEALTH_CHILD_STATE" in
         ''|Z*) break ;;
       esac

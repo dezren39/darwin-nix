@@ -154,21 +154,30 @@ rec {
     # differently and miss the fixed-output hash.
     openchamber = {
       url = "github:developing-today-forks/openchamber";
-      # No overrides: the chain's own pins (openchamber -> opencode ->
-      # mcpx-src) carry every fix this flake used to pin forward
+      # Overrides: mcpx-src is pinned below (see comment). The rest of the
+      # chain's own pins (openchamber -> opencode -> mcpx-src) carry every
+      # fix this flake used to pin forward
       # (opencode #1547 route overrides, the #1791 node_modules hash,
       # code #11443/#11453/#11476 for mcpx on aarch64-darwin), as of
-      # openchamber 1f22216 / opencode cd2ce27 / mcpx-src b8026cbf (2026-11-24).
-      # Pin mcpx-src at b8026cbf: it keeps 0a5f870f's supervised-takeover
-      # ordering fix and retries the transient already-attached refusal while
-      # the predecessor's supervisor clears EOF. The pinned 0a5f870f failed
-      # once in main run 45974574594 (TestTakeoverAttachesToSupervisedChild,
-      # child pid became 0). Do not float to code main: later unrelated test
-      # and documentation changes in 54626513 fail this flake's full mcpx check.
+      # openchamber 1f22216 / opencode cd2ce27 (2026-11-24).
+      # Pin mcpx-src at 113a65e369f: it keeps 0a5f870f's supervised-takeover
+      # ordering fix and b8026cbf's retry of the transient already-attached
+      # refusal while the predecessor's supervisor clears EOF, and it
+      # allowlists the retry's 50ms poll constant for the
+      # TestNoPackageRedeclaresADefault guard. The pinned b8026cbf failed
+      # that guard in main run 45990717349 (adoptDetachRetryInterval not in
+      # the defaults registry; both mcpx module checks failed), and 0a5f870f
+      # failed once in main run 45974574594 (TestTakeoverAttachesToSupervisedChild,
+      # child pid became 0). Guard verified green at 113a65e with
+      # go test ./internal/defaults/ (#2122). Do not float to code main:
+      # later unrelated test and documentation changes in 54626513 fail
+      # this flake's full mcpx check.
       # The opencode bump moves past the #2712 restamp: dfa989e was the
       # stale pre-restamp pin behind the #1991 flake-build failures.
       # If the chain regresses, pin here again with
       # inputs.opencode.url / inputs.opencode.inputs.mcpx-src.url.
+      inputs.opencode.inputs.mcpx-src.url =
+        "github:developing-today/code/113a65e369f189e27638811b93a1df7a0c08de5f";
     };
     sidepulse-src = {
       url = "github:inteliwear/sidepulse/ffb1d3c2f3eed3b7e80e32d7876a7e1d67bd5dfb";

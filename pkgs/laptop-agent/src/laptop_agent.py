@@ -116,13 +116,30 @@ STARTED = time.time()
 # start of each request until its headers are parsed (armed in
 # Handler.handle_one_request, cleared in Handler.parse_request); on
 # expiry the read raises, the connection closes, and the thread is
-# released. Body reads after the headers keep the previous blocking
-# behaviour -- their size is already capped (#1521). 30s is generous
+# released. Body reads after the headers carry their own deadline
+# (BODY_TIMEOUT_S below, #2291); their size is already capped
+# (#1521). 30s is generous
 # for the real clients, which send headers immediately, and short
 # enough that stalled connections cannot accumulate threads.
 HEADER_TIMEOUT_S = _parse_startup_int(
     "LAPTOP_AGENT_HEADER_TIMEOUT_S",
     os.environ.get("LAPTOP_AGENT_HEADER_TIMEOUT_S", "30"),
+    "must be an integer >= 1", 1)
+
+# Body-read deadline (#2291): the header deadline above stops at the
+# headers, so a client that sends complete headers fast and then
+# trickles the body would pin its handler thread indefinitely --
+# body size is capped (#1521) but nothing bounded body read TIME,
+# and ThreadingHTTPServer spawns an unbounded thread per
+# connection. _read_body_bytes therefore reads every body (parsed
+# or drained) under a total deadline of this many seconds; on
+# expiry the read fails as a FramingError, the caller answers
+# 400 + Connection: close (the framing contract), and the thread
+# is released. The socket is restored to blocking once the body
+# is in, so long-running /exec responses are not cut by it.
+BODY_TIMEOUT_S = _parse_startup_int(
+    "LAPTOP_AGENT_BODY_TIMEOUT_S",
+    os.environ.get("LAPTOP_AGENT_BODY_TIMEOUT_S", "30"),
     "must be an integer >= 1", 1)
 
 JOBS = {}                    # job_id -> dict
@@ -818,6 +835,38 @@ class Handler(BaseHTTPRequestHandler):
             pass
         return any(hmac.compare_digest(c, expected) for c in candidates)
 
+    def _read_body_bytes(self, n):
+        """Read exactly n request-body bytes under the body-read
+        deadline (#2291) and return them (the drain path discards
+        the result; MAX_BODY bounds the buffer). Reads go through
+        read1 so the total deadline is re-checked between every
+        raw socket read -- a steady trickle cannot reset it the
+        way it would reset a per-read timeout. On expiry raises
+        FramingError, whose contract is 400 + Connection: close.
+        A short read at EOF returns what arrived and lets the
+        caller judge, exactly as the previous blocking reads did.
+        The socket is restored to blocking in all cases, as
+        parse_request does for the header deadline."""
+        chunks = []
+        got = 0
+        deadline = time.monotonic() + BODY_TIMEOUT_S
+        try:
+            while got < n:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    raise FramingError("request body read timed out")
+                self.connection.settimeout(left)
+                chunk = self.rfile.read1(min(n - got, 65536))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                got += len(chunk)
+        except TimeoutError:
+            raise FramingError("request body read timed out")
+        finally:
+            self.connection.settimeout(None)
+        return b"".join(chunks)
+
     def _body(self):
         _check_body_framing(self.headers)
         try:
@@ -828,7 +877,7 @@ class Handler(BaseHTTPRequestHandler):
             raise FramingError("invalid Content-Length header")
         if n > MAX_BODY:
             raise FramingError("request body too large")
-        raw = self.rfile.read(n) if n else b"{}"
+        raw = self._read_body_bytes(n) if n else b"{}"
         try:
             body = json.loads(raw or b"{}")
         except ValueError:
@@ -853,12 +902,8 @@ class Handler(BaseHTTPRequestHandler):
             raise FramingError("invalid Content-Length header")
         if n > MAX_BODY:
             raise FramingError("request body too large")
-        remaining = n
-        while remaining > 0:
-            chunk = self.rfile.read(min(remaining, 65536))
-            if not chunk:
-                raise FramingError("request body truncated")
-            remaining -= len(chunk)
+        if len(self._read_body_bytes(n)) < n:
+            raise FramingError("request body truncated")
 
     def _send_bad_request(self, e):
         try:

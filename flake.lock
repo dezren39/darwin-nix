@@ -548,7 +548,7 @@
       "flake": false,
       "locked": {
         "lastModified": 1795568102,
-        "narHash": "sha256-ppBR/By6/onrzz6ujuyQ0ETtt3ZTxAh4N0l5CXZXGGY=",
+        "narHash": "sha256-woMskPYfdHpSqONWIVYCmpt1xL0dNwv8dBS07vRU66c=",
         "owner": "developing-today",
         "repo": "code",
         "rev": "113a65e369f189e27638811b93a1df7a0c08de5f",

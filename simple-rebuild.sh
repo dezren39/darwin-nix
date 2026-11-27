@@ -315,18 +315,36 @@ refresh_nix_access_token() {
     echo "gh token unavailable; leaving Nix access token as is" >&2
     return 0
   fi
-  mkdir -p "$dir" && chmod 700 "$dir"
+  # Fail-soft (#2232): the token is only an optimization for
+  # authenticated fetches, so no local filesystem failure here may
+  # abort the rebuild. Every failure below warns, leaves any
+  # previously installed access-tokens.conf intact, removes the
+  # temp file when there is one, and returns 0 -- this function is
+  # called bare under set -e, so a nonzero return would stop
+  # simple-rebuild before phase_build.
+  if ! mkdir -p "$dir" || ! chmod 700 "$dir"; then
+    echo "warning: could not prepare $dir; leaving Nix access token as is" >&2
+    return 0
+  fi
   # Per-invocation temp name (#2052): concurrent refreshes must never
   # share one temp path -- a peer's rename made our mv fail and, under
   # set -e, aborted the rebuild before building. mktemp owns mode 600,
   # so the umask 077 effect below is unchanged.
-  tmp="$(mktemp "$dir/.access-tokens.conf.XXXXXX")" || return 1
+  tmp="$(mktemp "$dir/.access-tokens.conf.XXXXXX")" || {
+    echo "warning: could not create a temp file in $dir; leaving Nix access token as is" >&2
+    return 0
+  }
   if ! ( umask 077
     print -r -- "access-tokens = github.com=$tok" >"$tmp" ); then
     rm -f "$tmp"
-    return 1
+    echo "warning: could not write the Nix access token temp file; leaving Nix access token as is" >&2
+    return 0
   fi
-  mv "$tmp" "$dir/access-tokens.conf" || { rm -f "$tmp"; return 1; }
+  if ! mv "$tmp" "$dir/access-tokens.conf"; then
+    rm -f "$tmp"
+    echo "warning: could not replace $dir/access-tokens.conf; leaving Nix access token as is" >&2
+    return 0
+  fi
   echo "refreshed Nix GitHub access token"
 }
 # Not traced: the token must not reach the `set -x` log.

@@ -100,6 +100,72 @@ while ((round < ROUNDS)); do
 done
 ((failures == volley_failures)) && ok "$ROUNDS overlapping volleys of $VOLLEY concurrent refreshes: all exit 0, atomic single-line result, no debris"
 
+# --- Fail-soft filesystem failures (#2232) ---
+# With a valid gh token, injected mkdir/chmod, mktemp, temp-write and
+# mv failures must warn, return 0 (the runner calls the function bare
+# under set -eu, exactly as simple-rebuild.sh does under set -e, so a
+# nonzero return would abort the runner), preserve the previously
+# installed token file, and leave no temp debris.
+FAIL_RUNNER="$TMP_ROOT/run-fail.zsh"
+cat >"$FAIL_RUNNER" <<'ZSH'
+set -eu
+TEST_HOME="$1"; TEST_TOKEN="$2"; FUNC_FILE="$3"; STUB_DIR="$4"
+export HOME="$TEST_HOME"
+export PATH="$STUB_DIR:$PATH"
+gh() { print -r -- "$TEST_TOKEN"; }
+source "$FUNC_FILE"
+refresh_nix_access_token
+ZSH
+
+make_stub() { # dir name body-line...
+  local dir="$1" name="$2"; shift 2
+  mkdir -p "$dir"
+  printf '%s\n' '#!/bin/sh' "$@" >"$dir/$name"
+  chmod +x "$dir/$name"
+}
+
+prep_old_home() { # home
+  mkdir -p "$1/.local/share/nix"
+  printf '%s\n' "access-tokens = github.com=old-token" >"$1/.local/share/nix/access-tokens.conf"
+}
+
+check_fail_soft() { # name home errfile status
+  local name="$1" home="$2" err="$3" status="$4"
+  local target="$home/.local/share/nix/access-tokens.conf"
+  [ "$status" = "0" ] || fail "$name: refresh exits 0 despite the injected failure (got $status)"
+  [ "$(cat "$target")" = "access-tokens = github.com=old-token" ] || fail "$name: old token file preserved"
+  grep -qi 'warning' "$err" || fail "$name: a warning is emitted"
+  [ "$(ls -A "$home/.local/share/nix")" = "access-tokens.conf" ] || fail "$name: no temp debris left ($(ls -A "$home/.local/share/nix"))"
+  ok "$name: non-fatal, warning emitted, old token preserved, no debris"
+}
+
+run_fail_scenario() { # name stubdir
+  local name="$1" stubdir="$2"
+  local home="$TMP_ROOT/fail-$name-home" err="$TMP_ROOT/fail-$name.err"
+  prep_old_home "$home"
+  zsh "$FAIL_RUNNER" "$home" "new-token" "$FUNC" "$stubdir" >/dev/null 2>"$err"
+  check_fail_soft "$name" "$home" "$err" "$?"
+}
+
+STUBS="$TMP_ROOT/stubs"
+
+make_stub "$STUBS/mkdir" mkdir 'exit 1'
+run_fail_scenario mkdir "$STUBS/mkdir"
+
+make_stub "$STUBS/chmod" chmod 'exit 1'
+run_fail_scenario chmod "$STUBS/chmod"
+
+make_stub "$STUBS/mktemp" mktemp 'exit 1'
+run_fail_scenario mktemp "$STUBS/mktemp"
+
+# Temp-write failure: mktemp hands back a path in a missing directory,
+# so the function's redirection to the temp file fails.
+make_stub "$STUBS/write" mktemp 'echo "$HOME/.local/share/nix/missing-dir/tmp"'
+run_fail_scenario write "$STUBS/write"
+
+make_stub "$STUBS/mv" mv 'exit 1'
+run_fail_scenario mv "$STUBS/mv"
+
 if ((failures > 0)); then
   echo "$failures failure(s)" >&2
   exit 1

@@ -630,6 +630,66 @@ cmp -s "$db" "$fx/lsofholder.before" || fail "positive-holder lsof: real run mut
 [ ! -e "${db}.old" ] || fail "positive-holder lsof: real run created .old"
 ok_if_clean "$before" "successful positive lsof result preserves behavior: real vacuum refuses and DB is unchanged"
 
+# --- Writer appearing after the first guard aborts before swap (#2251).
+# The preflight guard ran once, minutes before the swap; a writer that
+# starts after it (during VACUUM INTO, verification, or the prompt) had
+# its writes silently discarded by the renames. A ps double that reports
+# no processes on its first snapshot and an opencode process on every
+# later snapshot, plus an lsof double reporting that process as holding
+# the DB, pins the pre-swap re-check: the run must refuse, naming the
+# late writer, with the original byte-identical and no .old created.
+before=$failures
+db="$fx/latewriter.db"; mk_fixture "$db"; cp "$db" "$fx/latewriter.before"
+latebin="$HOME/latewriterbin"; mkdir -p "$latebin"
+cat >"$latebin/ps" <<EOF
+#!$(command -v bash)
+case "\$*" in
+  *"-eo pid=,ppid=,args="*)
+    if [ -e "$latebin/seen" ]; then printf '424243 1 opencode\n'; else : >"$latebin/seen"; fi ;;
+  *"-o pid=,args="*) printf '424243 opencode\n' ;;
+esac
+exit 0
+EOF
+chmod +x "$latebin/ps"
+printf '#!/bin/sh\nprintf "424243\\n"\nexit 0\n' >"$latebin/lsof"; chmod +x "$latebin/lsof"
+out="$(PATH="$latebin:$PATH" bash "$VACUUM" --db "$db" -y 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] || fail "late writer: real run exited 0, expected pre-swap refusal: $out"
+case "$out" in *"started after the first check"*) ;; *) fail "late writer: refusal does not name the late writer: $out" ;; esac
+cmp -s "$db" "$fx/latewriter.before" || fail "late writer: real run mutated the fixture DB (swap happened?)"
+[ ! -e "${db}.old" ] || fail "late writer: real run created ${db}.old (swap happened?)"
+ok_if_clean "$before" "writer appearing after the first guard: pre-swap re-check refuses, original byte-identical, no .old"
+
+# --- Row drift after verification aborts before the swap (#2251). -----
+# Same window, caught by the count axis instead of the process axis: a
+# sqlite3 double that lets the first verification pass (8 COUNT queries:
+# original + compacted for 4 tables) through, then inserts a row into
+# the original just before the 9th COUNT, pins the pre-swap row-count
+# re-verification. The run must die on the mismatch with no swap: the
+# active DB keeps the late row and no .old is created.
+before=$failures
+db="$fx/latedrift.db"; mk_fixture "$db"
+driftbin="$HOME/latedriftbin"; mkdir -p "$driftbin"
+cat >"$driftbin/sqlite3" <<EOF
+#!$(command -v bash)
+for a in "\$@"; do
+  case "\$a" in
+    *"SELECT COUNT(*) FROM"*)
+      n=0; [ -f "$driftbin/count" ] && n="\$(cat "$driftbin/count")"
+      n=\$((n + 1)); printf '%s' "\$n" >"$driftbin/count"
+      if [ "\$n" -eq 9 ]; then $real_sqlite3 "$db" "INSERT INTO session VALUES('late_write');" || exit 1; fi
+      ;;
+  esac
+done
+exec $real_sqlite3 "\$@"
+EOF
+chmod +x "$driftbin/sqlite3"
+out="$(PATH="$driftbin:$PATH" bash "$VACUUM" --db "$db" -y 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] || fail "late row drift: real run exited 0, expected pre-swap refusal: $out"
+case "$out" in *"row count mismatch in session"*) ;; *) fail "late row drift: refusal does not name the drifted table: $out" ;; esac
+[ "$(count_of "$db" session)" = "501" ] || fail "late row drift: active DB does not hold the late row (swap discarded it?)"
+[ ! -e "${db}.old" ] || fail "late row drift: real run created ${db}.old (swap happened?)"
+ok_if_clean "$before" "row drift after verification: pre-swap re-verification refuses on the mismatch, late row preserved, no .old"
+
 HARNESS_FAILURES="$failures"
 [ "$failures" -eq 0 ] && echo "all opencode-db-vacuum core checks passed"
 harness_ps_double_end

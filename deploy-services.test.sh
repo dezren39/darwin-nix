@@ -154,6 +154,7 @@ run_deploy openchamber openchamber.service openchamber/start "$new_target"
 check "unchanged+healthy exits 0" test "$rc" -eq 0
 check "unchanged+healthy does not restart" test "$(restart_count)" -eq 0
 check "unchanged+healthy still health-checks" grep -q 'curl ' "$STUB_LOG"
+check "health-check curl carries a deadline (-m 5)" grep -q 'curl -fsS -m 5 ' "$STUB_LOG"
 check "unchanged+healthy says what it did" grep -q 'already points' "$out"
 
 # --- scenario 2: changed entrypoint, healthy new build = one restart -------

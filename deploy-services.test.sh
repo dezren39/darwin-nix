@@ -244,6 +244,42 @@ check "non-symlink entrypoint exits non-zero" test "$rc" -ne 0
 check "non-symlink entrypoint is left untouched" grep -q 'hand-maintained' "$oc_link"
 check "non-symlink entrypoint does not restart" test "$(restart_count)" -eq 0
 
+# --- scenarios 10-12: invalid health budget env fails fast ------------------
+#
+# DEPLOY_HEALTH_TRIES / DEPLOY_HEALTH_DELAY come purely from the
+# ambient environment; an invalid value must fail before step 1,
+# naming the variable, with no repoint and no restart (#2274).
+
+run_deploy_bad_env() {
+  # run_deploy_bad_env <tries> <delay>; sets rc, out.
+  out="$tmp/last-out"
+  DEPLOY_NAME="deploy-test" \
+    DEPLOY_UNIT="openchamber.service" \
+    DEPLOY_LINK_REL="openchamber/start" \
+    DEPLOY_TARGET="$new_target" \
+    DEPLOY_HEALTH="openchamber" \
+    DEPLOY_HEALTH_TRIES="$1" \
+    DEPLOY_HEALTH_DELAY="$2" \
+    HOME="$tmp/home" \
+    PATH="$tmp/bin:$PATH" \
+    bash "$script" >"$out" 2>&1 && rc=0 || rc=$?
+}
+
+for case_name in tries-zero tries-alpha delay-bogus; do
+  reset_state
+  mkdir -p "$(dirname "$oc_link")"
+  ln -s "$old_target" "$oc_link"
+  case "$case_name" in
+    tries-zero) run_deploy_bad_env 0 0.1; var=DEPLOY_HEALTH_TRIES ;;
+    tries-alpha) run_deploy_bad_env abc 0.1; var=DEPLOY_HEALTH_TRIES ;;
+    delay-bogus) run_deploy_bad_env 3 bogus; var=DEPLOY_HEALTH_DELAY ;;
+  esac
+  check "$case_name exits non-zero" test "$rc" -ne 0
+  check "$case_name names the offending variable" grep -q "$var" "$out"
+  check "$case_name leaves the link alone" link_is "$oc_link" "$old_target"
+  check "$case_name does not restart" test "$(restart_count)" -eq 0
+done
+
 # --- verdict -----------------------------------------------------------------
 
 if [ "$failures" -gt 0 ]; then

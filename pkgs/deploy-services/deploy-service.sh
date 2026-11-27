@@ -55,6 +55,18 @@ fail() {
   exit 1
 }
 
+# Validate the health-check retry budget before anything is touched:
+# both values come purely from the ambient environment (the deploy-app
+# wrapper never sets them), so a stray export must fail fast and name
+# itself instead of silently zeroing the budget (TRIES=0/-5/abc makes
+# wait_healthy run zero checks) or turning the paced wait into a tight
+# busy loop (a bogus DELAY makes every sleep fail, suppressed at the
+# wait_healthy call sites).
+[[ "$health_tries" =~ ^[1-9][0-9]*$ ]] ||
+  fail "invalid DEPLOY_HEALTH_TRIES: '$health_tries' (must be a positive integer)"
+[[ "$health_delay" =~ ^([0-9]+(\.[0-9]*)?|\.[0-9]+)$ ]] ||
+  fail "invalid DEPLOY_HEALTH_DELAY: '$health_delay' (must be a non-negative number)"
+
 health_check() {
   case "$health_kind" in
     openchamber)

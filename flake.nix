@@ -158,12 +158,16 @@ rec {
       # mcpx-src) carry every fix this flake used to pin forward
       # (opencode #1547 route overrides, the #1791 node_modules hash,
       # code #11443/#11453/#11476 for mcpx on aarch64-darwin), as of
-      # openchamber 1f22216 / opencode cd2ce27 / mcpx-src b8026cbf (2026-11-24).
-      # Pin mcpx-src at b8026cbf: it keeps 0a5f870f's supervised-takeover
-      # ordering fix and retries the transient already-attached refusal while
-      # the predecessor's supervisor clears EOF. The pinned 0a5f870f failed
-      # once in main run 45974574594 (TestTakeoverAttachesToSupervisedChild,
-      # child pid became 0). Do not float to code main: later unrelated test
+      # openchamber 1f22216 / opencode cd2ce27 / mcpx-src 113a65e3 (2026-11-24).
+      # Pin mcpx-src at 113a65e3: b8026cbf's bounded already-attached retry
+      # added adoptDetachRetryInterval (50ms poll), which the
+      # TestNoPackageRedeclaresADefault guard flags in every leg;
+      # 113a65e3 allowlists it as race arbitration (like the artifacts 2ms
+      # entry) rather than user policy. Keeps 0a5f870f's supervised-takeover
+      # ordering fix and the transient-refusal retry while the predecessor's
+      # supervisor clears EOF. (The prior 0a5f870f pin had failed once in main
+      # run 45974574594 with TestTakeoverAttachesToSupervisedChild, child pid
+      # became 0.) Do not float to code main: later unrelated test
       # and documentation changes in 54626513 fail this flake's full mcpx check.
       # The opencode bump moves past the #2712 restamp: dfa989e was the
       # stale pre-restamp pin behind the #1991 flake-build failures.

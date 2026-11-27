@@ -60,6 +60,17 @@ permissions:
   id-token: write
   contents: read
 
+# Prompt pin (#2038): the dispatch prompts are fetched from
+# developing-today/code at this exact commit — never a mutable branch
+# ref — and pm-dispatch-launch.sh verifies each fetched prompt against
+# the INPUT_PROMPT_SHA256 recorded in its dispatch step below before
+# anything is minted or dispatched. To bump the prompts: update this
+# SHA and the three INPUT_PROMPT_SHA256 values together, in one
+# reviewable change (each digest is `sha256sum` of that prompt file at
+# the new commit).
+env:
+  PM_DISPATCH_PROMPTS_REF: 320db21ad8eee977f2f3786cc6ae0c8cc3bb8ab1
+
 jobs:
   scheduled:
     runs-on: ubuntu-latest
@@ -179,7 +190,9 @@ jobs:
       # prompt comes from the pm-dispatch-task prompt library,
       # fetched at runtime over HTTPS (the library stays centrally
       # managed; only the runner's action-archive download is
-      # broken — see the header comment). The calling job grants
+      # broken — see the header comment). The fetch is pinned to a
+      # commit SHA and SHA-256-verified before dispatch (#2038; see
+      # the PM_DISPATCH_PROMPTS_REF env block above). The calling job grants
       # `permissions: id-token: write` so the script can mint a
       # GitHub Actions OIDC token (audience pm-dispatch) to
       # authenticate.
@@ -190,7 +203,8 @@ jobs:
         env:
           INPUT_REPO: ${{ steps.resolve.outputs.repo }}
           INPUT_TASK: bolt
-          INPUT_PROMPT_URL: https://raw.githubusercontent.com/developing-today/code/main/.github/actions/pm-dispatch-task/prompts/bolt.md
+          INPUT_PROMPT_URL: https://raw.githubusercontent.com/developing-today/code/${{ env.PM_DISPATCH_PROMPTS_REF }}/.github/actions/pm-dispatch-task/prompts/bolt.md
+          INPUT_PROMPT_SHA256: 1268c602f793bf2a5aca52ea8474567e4ced3ccc20cc0156464177fdac97a2c8
         run: bash .github/scripts/pm-dispatch-launch.sh
       - name: Dispatch palette
         id: palette
@@ -199,7 +213,8 @@ jobs:
         env:
           INPUT_REPO: ${{ steps.resolve.outputs.repo }}
           INPUT_TASK: palette
-          INPUT_PROMPT_URL: https://raw.githubusercontent.com/developing-today/code/main/.github/actions/pm-dispatch-task/prompts/palette.md
+          INPUT_PROMPT_URL: https://raw.githubusercontent.com/developing-today/code/${{ env.PM_DISPATCH_PROMPTS_REF }}/.github/actions/pm-dispatch-task/prompts/palette.md
+          INPUT_PROMPT_SHA256: 51ed6361e06da7158ab12dd272eb13ae2b361f37c7f5e6db4be7fad1fc055740
         run: bash .github/scripts/pm-dispatch-launch.sh
       - name: Dispatch suggestions
         id: suggestions
@@ -208,7 +223,8 @@ jobs:
         env:
           INPUT_REPO: ${{ steps.resolve.outputs.repo }}
           INPUT_TASK: suggestions
-          INPUT_PROMPT_URL: https://raw.githubusercontent.com/developing-today/code/main/.github/actions/pm-dispatch-task/prompts/suggestions.md
+          INPUT_PROMPT_URL: https://raw.githubusercontent.com/developing-today/code/${{ env.PM_DISPATCH_PROMPTS_REF }}/.github/actions/pm-dispatch-task/prompts/suggestions.md
+          INPUT_PROMPT_SHA256: 9654bee7cd0bc53cb7b109049cc67b00e1fb1485344b798185da7086da362855
         run: bash .github/scripts/pm-dispatch-launch.sh
       - name: Summarize the dispatched tasks
         if: always()

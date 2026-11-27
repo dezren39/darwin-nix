@@ -9,7 +9,9 @@
 # (INPUT_REPO / INPUT_TASK / INPUT_PROMPT_URL) and call this script.
 #
 # Interface (env, identical to the former inline steps):
-#   INPUT_REPO, INPUT_TASK, INPUT_PROMPT_URL
+#   INPUT_REPO, INPUT_TASK, INPUT_PROMPT_URL, INPUT_PROMPT_SHA256
+#     (INPUT_PROMPT_SHA256 is new with #2038: the expected SHA-256 of
+#     the prompt file at the pinned commit INPUT_PROMPT_URL names)
 #   ACTIONS_ID_TOKEN_REQUEST_URL, ACTIONS_ID_TOKEN_REQUEST_TOKEN
 #     (provided by the runner when the job grants id-token: write)
 #   GITHUB_OUTPUT -- receives task_id, session_id, issue_number,
@@ -21,14 +23,33 @@ set -euo pipefail
 # Every request has a connect and total deadline shorter than the caller's
 # 10-minute job timeout (agents.yml), so a stalled dependency fails this
 # script with a stage diagnostic instead of consuming the whole job.
-if ! resolved_prompt="$(curl -fsS --connect-timeout 10 --max-time 60 "$INPUT_PROMPT_URL")"; then
+# Prompt trust (#2038): the fetched prompt becomes the dispatched
+# agent's instructions, so it is verified before anything is minted or
+# sent. agents.yml pins INPUT_PROMPT_URL to an immutable commit SHA of
+# developing-today/code and sets INPUT_PROMPT_SHA256 to that prompt
+# file's SHA-256 at the pin; a mismatch — or a missing digest — aborts
+# here, before the OIDC mint below. The fetch goes to a file so the
+# digest covers the exact bytes served, not a shell-trimmed copy.
+prompt_file="$(mktemp)"
+trap 'rm -f "$prompt_file"' EXIT
+if ! curl -fsS --connect-timeout 10 --max-time 60 -o "$prompt_file" "$INPUT_PROMPT_URL"; then
   echo "::error::agents dispatch: failed to fetch prompt for task '$INPUT_TASK': $INPUT_PROMPT_URL" >&2
   exit 1
 fi
-if [ -z "$resolved_prompt" ]; then
+if [ ! -s "$prompt_file" ]; then
   echo "::error::agents dispatch: prompt for task '$INPUT_TASK' is empty: $INPUT_PROMPT_URL" >&2
   exit 1
 fi
+if [ -z "${INPUT_PROMPT_SHA256:-}" ]; then
+  echo "::error::agents dispatch: INPUT_PROMPT_SHA256 is not set for task '$INPUT_TASK'; refusing to dispatch an unverified prompt (#2038)." >&2
+  exit 1
+fi
+actual_prompt_sha256="$(sha256sum "$prompt_file" | awk '{print $1}')"
+if [ "$actual_prompt_sha256" != "$INPUT_PROMPT_SHA256" ]; then
+  echo "::error::agents dispatch: prompt for task '$INPUT_TASK' failed SHA-256 verification: got $actual_prompt_sha256, expected $INPUT_PROMPT_SHA256 ($INPUT_PROMPT_URL). Refusing to dispatch." >&2
+  exit 1
+fi
+resolved_prompt="$(cat "$prompt_file")"
 if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] || [ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]; then
   echo "::error::agents dispatch: ACTIONS_ID_TOKEN_REQUEST_URL / ACTIONS_ID_TOKEN_REQUEST_TOKEN are not set. The calling job must grant 'permissions: id-token: write' so an OIDC token can be minted." >&2
   exit 1

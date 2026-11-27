@@ -589,7 +589,7 @@ agent_answers() {
       # deadline after agent_answers returns, so one hung command (a
       # wedged mcpx ls is the production case) pinned the whole health
       # gate forever, after the switch had already been recorded. Run
-      # the eval in the background and poll for it; the bound is the
+      # the command in the background and poll for it; the bound is the
       # smaller of 5 s and HEALTH_TIMEOUT, so a single check can never
       # overrun the gate's own deadline either. A timeout is a failed
       # answer, named on stderr; the exit-status contract (0 = healthy)
@@ -599,13 +599,15 @@ agent_answers() {
         bound=${HEALTH_TIMEOUT:-60}
       fi
       limit=$(( SECONDS + bound ))
-      (eval "$cmd") >/dev/null 2>&1 &
+      # Give the probe its own process group so a timeout can stop children
+      # too, rather than only killing the shell that eval started.
+      perl -e 'setpgrp(0, 0) or die "setpgrp: $!"; exec "zsh", "-c", $ARGV[0] or die "exec: $!"' "$cmd" >/dev/null 2>&1 &
       pid=$!
       while kill -0 "$pid" 2>/dev/null; do
         if (( SECONDS >= limit )); then
-          kill "$pid" 2>/dev/null
+          kill -TERM -- "-$pid" 2>/dev/null
           sleep 1
-          kill -9 "$pid" 2>/dev/null
+          kill -KILL -- "-$pid" 2>/dev/null
           wait "$pid" 2>/dev/null
           echo "health check timed out after ${bound}s: $cmd" >&2
           return 1

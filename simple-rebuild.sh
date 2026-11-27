@@ -186,12 +186,37 @@ fi
 # nix as root against this flake, so it is not proven that nothing can slip
 # through. The difference is that it now costs a password only when it finds
 # something, and says what it found.
+#
+# Detector and action cover ONE set (#2281): every path in the tree -- .git
+# included -- that is not owned by the invoking user. The old detector
+# excluded ./.git/* while the action chowned the whole tree, so .git-internal
+# strays (the ones that break every later git command) read as clean, and a
+# single outside stray rewrote the entire object store. Now find enumerates
+# the strays and chown touches exactly those paths (find lists every stray
+# individually, so no -R is needed), and a failed find is an error, never a
+# "clean" verdict.
 reclaim_root_owned() {
-  local owner="${USER:-$(id -un)}" strays
-  strays=$(find . -not -user "$owner" -not -path './.git/*' -print -quit 2>/dev/null)
-  if [[ -n "$strays" ]]; then
-    echo "reclaiming root-owned files (first: $strays)"
-    sudo chown -R "$owner" .
+  local owner="${USER:-$(id -un)}"
+  local errlog found
+  local find_status=0
+  local -a strays
+  errlog="$(mktemp "${TMPDIR:-/tmp}/simple-rebuild-reclaim.XXXXXX")" || {
+    echo "simple-rebuild.sh: reclaim: could not create a temp file; refusing to call the tree clean" >&2
+    return 1
+  }
+  found="$(find . -not -user "$owner" -print 2>"$errlog")" || find_status=$?
+  if [[ $find_status -ne 0 ]]; then
+    echo "simple-rebuild.sh: reclaim: find failed (status $find_status); not treating the tree as clean:" >&2
+    cat "$errlog" >&2
+    rm -f "$errlog"
+    return 1
+  fi
+  rm -f "$errlog"
+  strays=()
+  [[ -n "$found" ]] && strays=("${(@f)found}")
+  if (( ${#strays[@]} > 0 )); then
+    echo "reclaiming root-owned files (first: ${strays[1]})"
+    sudo chown -- "$owner" "${strays[@]}"
   else
     echo "no root-owned files; skipping chown"
   fi

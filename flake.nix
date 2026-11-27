@@ -158,12 +158,13 @@ rec {
       # mcpx-src) carry every fix this flake used to pin forward
       # (opencode #1547 route overrides, the #1791 node_modules hash,
       # code #11443/#11453/#11476 for mcpx on aarch64-darwin), as of
-      # openchamber 1f22216 / opencode cd2ce27 / code 0a5f870f (2026-11-24).
-      # Pin code at 0a5f870f, the commit that fixes the supervised takeover
-      # ordering race seen on 2dc8cb8. Do not float to code main: later
-      # unrelated test and documentation changes in 54626513 fail this flake's
-      # full mcpx check. The takeover test passed 10 times on current code main
-      # in Fleet run 45864210459; the fixed commit is the minimal stable pin.
+      # openchamber 1f22216 / opencode cd2ce27 / mcpx-src b8026cbf (2026-11-24).
+      # Pin mcpx-src at b8026cbf: it keeps 0a5f870f's supervised-takeover
+      # ordering fix and retries the transient already-attached refusal while
+      # the predecessor's supervisor clears EOF. The pinned 0a5f870f failed
+      # once in main run 45974574594 (TestTakeoverAttachesToSupervisedChild,
+      # child pid became 0). Do not float to code main: later unrelated test
+      # and documentation changes in 54626513 fail this flake's full mcpx check.
       # The opencode bump moves past the #2712 restamp: dfa989e was the
       # stale pre-restamp pin behind the #1991 flake-build failures.
       # If the chain regresses, pin here again with

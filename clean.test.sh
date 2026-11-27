@@ -1514,14 +1514,18 @@ mkdir -p "$PG_DIR/base/pgdata" "$PG_DIR/bin-missing" \
 touch "$PG_DIR/base/pgdata/PG_VERSION"
 touch -t 200001010000 "$PG_DIR/base/pgdata/PG_VERSION"
 { sed -n '/^dir_has_open_handles() {/,/^}/p' "$SCRIPT"
+  sed -n '/^fresh_probe() {/,/^}/p' "$SCRIPT"
   sed -n '/^sweep_ad_hoc_postgres_dirs() {/,/^}/p' "$SCRIPT"; } > "$PG_DIR/fn.sh"
 grep -q 'sweep_ad_hoc_postgres_dirs' "$PG_DIR/fn.sh" \
   || fail "could not extract sweep_ad_hoc_postgres_dirs from clean.sh (#1803)"
 grep -q 'dir_has_open_handles' "$PG_DIR/fn.sh" \
   || fail "extracted sweep has no dir_has_open_handles helper to test (#1803)"
-# bin-missing gets the real find/dirname and NO lsof at all.
+# bin-missing gets the real find/dirname/mktemp and NO lsof at all.
+# (mktemp joined the list with #2286: the sweep's freshness probe,
+# fresh_probe, captures find's stderr through a temp file.)
 ln -s "$(command -v find)" "$PG_DIR/bin-missing/find"
 ln -s "$(command -v dirname)" "$PG_DIR/bin-missing/dirname"
+ln -s "$(command -v mktemp)" "$PG_DIR/bin-missing/mktemp"
 cat > "$PG_DIR/bin-error/lsof" <<'STUB'
 #!/bin/sh
 exit 2
@@ -1548,6 +1552,9 @@ pg_run() { # pg_run <PATH> -- runs the extracted sweep in a subshell
     DRY_RUN=0; PG_SCRATCH_STALE_HOURS=8
     # shellcheck disable=SC2034 # consumed by the sourced sweep
     SPOTLIGHT_MARKER=".metadata_never_index"; CALLER_USER_HOME="$HOME"
+    # shellcheck disable=SC2034 # consumed by fresh_probe (#2286)
+    IDLE_PROBE_FAILURES=0; FRESH_PROBE_RESULT=""
+    warn() { printf '%s\n' "$*" >&2; }
     PATH="$1"
     del() { printf '%s\n' "$1" >> "$PG_DIR/deleted"; }
     . "$PG_DIR/fn.sh"
@@ -1770,6 +1777,9 @@ for fn in sweep_unknown_large_scratch sweep_short_lived_scratch \
   fi
 done
 sed -n '/^del() {/,/^}/p' "$SCRIPT" > "$SW_DIR/del.sh"
+awk '/^fresh_probe\(\) \{/,/^\}/' "$SCRIPT" > "$SW_DIR/fresh_probe.sh"
+grep -q 'fresh_probe' "$SW_DIR/fresh_probe.sh" \
+  || fail "could not extract fresh_probe from clean.sh (#2286)"
 awk '/^dir_has_open_handles\(\) \{/,/^\}/' "$SCRIPT" > "$SW_DIR/dir_has_open_handles.sh"
 grep -q 'dir_has_open_handles' "$SW_DIR/dir_has_open_handles.sh" \
   || fail "could not extract dir_has_open_handles from clean.sh (#1803)"
@@ -1846,9 +1856,12 @@ chmod +x "$SW_DIR/no-holder-bin/lsof"
   unknown_scratch_is_known() { return 1; }
   stat_birth_time() { echo unknown; }
   stat_mtime_time() { echo unknown; }
+  # shellcheck disable=SC2034 # consumed by fresh_probe (#2286)
+  IDLE_PROBE_FAILURES=0; FRESH_PROBE_RESULT=""
   PATH="$SW_DIR/no-holder-bin:$PATH"
   . "$SW_DIR/del.sh"
   . "$SW_DIR/dir_has_open_handles.sh"
+  . "$SW_DIR/fresh_probe.sh"
   . "$SW_DIR/sweep_unknown_large_scratch.sh"
   mkdir -p "$SW_DIR/unknown"
   ln -s "$SW_DIR/no-such-target" "$SW_DIR/unknown/mystery-link"

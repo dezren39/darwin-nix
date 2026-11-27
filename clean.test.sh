@@ -1635,12 +1635,15 @@ grep -q 'sweep_ad_hoc_postgres_dirs' "$PG_DIR/fn.sh" \
   || fail "could not extract sweep_ad_hoc_postgres_dirs from clean.sh (#1803)"
 grep -q 'dir_has_open_handles' "$PG_DIR/fn.sh" \
   || fail "extracted sweep has no dir_has_open_handles helper to test (#1803)"
-# bin-missing gets the real find/dirname/mktemp and NO lsof at all.
-# (mktemp joined the list with #2286: the sweep's freshness probe,
-# fresh_probe, captures find's stderr through a temp file.)
+# bin-missing gets the real find/dirname/mktemp/rm/sed and NO lsof at
+# all. (mktemp/rm/sed joined the list with #2286: the sweep's freshness
+# probe, fresh_probe, captures find's stderr through a temp file --
+# the #2035 harness below includes mktemp/rm for the same reason.)
 ln -s "$(command -v find)" "$PG_DIR/bin-missing/find"
 ln -s "$(command -v dirname)" "$PG_DIR/bin-missing/dirname"
 ln -s "$(command -v mktemp)" "$PG_DIR/bin-missing/mktemp"
+ln -s "$(command -v rm)" "$PG_DIR/bin-missing/rm"
+ln -s "$(command -v sed)" "$PG_DIR/bin-missing/sed"
 cat > "$PG_DIR/bin-error/lsof" <<'STUB'
 #!/bin/sh
 exit 2

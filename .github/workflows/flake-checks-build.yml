@@ -96,7 +96,9 @@ jobs:
     name: nix build (aarch64-darwin) ${{ matrix.check }}
     needs: list-checks
     runs-on: macos-15
-    timeout-minutes: 60
+    # The restart activation check builds the OpenChamber closure on a cold
+    # Darwin runner and can exceed the standard one-hour matrix limit.
+    timeout-minutes: ${{ matrix.check == 'mcpx-agent-restart' && 120 || 60 }}
     strategy:
       fail-fast: false
       matrix:

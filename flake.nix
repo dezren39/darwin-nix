@@ -667,7 +667,8 @@ rec {
                 # laptop, but the sandbox needs it provided explicitly.
                 pkgs.perl
               ]
-              ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.procps ];
+              ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.procps ]
+              ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [ pkgs.darwin.ps ];
             }
             ''
               cp ${./simple-rebuild.sh} simple-rebuild.sh

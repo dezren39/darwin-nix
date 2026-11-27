@@ -14,7 +14,10 @@
 #     back to the previous target and restarts again;
 #   - the mcpx health check asks through the config path the unit
 #     itself was started with (read back from ExecStart), because
-#     the daemon's socket name derives from that path.
+#     the daemon's socket name derives from that path;
+#   - every systemctl call carries a deadline (#2268): a stubbed
+#     systemctl that never answers must fail the probe / the restart
+#     in bounded time, never hang the deploy.
 #
 # Usage: deploy-services.test.sh <path-to-deploy-service.sh>
 set -euo pipefail
@@ -54,6 +57,9 @@ bash_path=$(command -v bash)
   printf '#!%s\n' "$bash_path"
   cat <<'STUB'
 echo "systemctl $*" >>"$STUB_LOG"
+# A wedged user manager never answers at all (#2268): hang-all makes
+# every call sleep past any deadline the deploy sets.
+[ -f "$STUB_DIR/hang-all" ] && exec sleep 60
 case "$*" in
   *is-active*)
     [ -f "$STUB_DIR/not-active" ] && exit 1
@@ -69,6 +75,12 @@ case "$*" in
     echo "$n" >"$STUB_DIR/restart-count"
     if [ "${RESTART_CLEARS_AT:-0}" = "$n" ]; then
       rm -f "$STUB_DIR/curl-fail"
+    fi
+    # hang-restart-from holds a restart count: that restart and
+    # later ones never answer (the rollback-restart hang, #2268).
+    if [ -f "$STUB_DIR/hang-restart-from" ] &&
+      [ "$n" -ge "$(cat "$STUB_DIR/hang-restart-from")" ]; then
+      exec sleep 60
     fi
     exit 0
     ;;
@@ -116,9 +128,11 @@ mcpx_link="$state_home/mcpx/bin/mcpx"
 reset_state() {
   rm -rf "$tmp/home/.local"
   rm -f "$STUB_DIR/curl-fail" "$STUB_DIR/not-active" \
-    "$STUB_DIR/fail-old" "$STUB_DIR/fail-new" "$STUB_DIR/restart-count"
+    "$STUB_DIR/fail-old" "$STUB_DIR/fail-new" "$STUB_DIR/restart-count" \
+    "$STUB_DIR/hang-all" "$STUB_DIR/hang-restart-from"
   : >"$STUB_LOG"
   export RESTART_CLEARS_AT=0
+  unset TEST_SYSTEMCTL_TIMEOUT
 }
 
 restart_count() {
@@ -136,6 +150,7 @@ run_deploy() {
     DEPLOY_HEALTH="$health" \
     DEPLOY_HEALTH_TRIES=3 \
     DEPLOY_HEALTH_DELAY=0.1 \
+    DEPLOY_SYSTEMCTL_TIMEOUT="${TEST_SYSTEMCTL_TIMEOUT:-5}" \
     HOME="$tmp/home" \
     PATH="$tmp/bin:$PATH" \
     bash "$script" >"$out" 2>&1 && rc=0 || rc=$?
@@ -243,6 +258,58 @@ run_deploy openchamber openchamber.service openchamber/start "$new_target"
 check "non-symlink entrypoint exits non-zero" test "$rc" -ne 0
 check "non-symlink entrypoint is left untouched" grep -q 'hand-maintained' "$oc_link"
 check "non-symlink entrypoint does not restart" test "$(restart_count)" -eq 0
+
+# --- scenario 10: hung systemctl, mcpx health probe times out ---------------
+
+reset_state
+mkdir -p "$(dirname "$mcpx_link")"
+ln -s "$new_target" "$mcpx_link"
+touch "$STUB_DIR/hang-all"
+TEST_SYSTEMCTL_TIMEOUT=1
+start=$SECONDS
+run_deploy mcpx mcpx.service mcpx/bin/mcpx "$new_target"
+check "hung probe exits non-zero" test "$rc" -ne 0
+check "hung probe is named as a timeout" grep -q 'timed out after 1s' "$out"
+check "hung probe still advances the retry budget" \
+  test "$(grep -c 'is-active' "$STUB_LOG")" -ge 3
+check "hung probe deploy finishes in bounded time" \
+  test $((SECONDS - start)) -lt 30
+
+# --- scenario 11: hung systemctl, forward restart times out -----------------
+
+reset_state
+mkdir -p "$(dirname "$oc_link")"
+ln -s "$old_target" "$oc_link"
+touch "$STUB_DIR/hang-all"
+TEST_SYSTEMCTL_TIMEOUT=1
+start=$SECONDS
+run_deploy openchamber openchamber.service openchamber/start "$new_target"
+check "hung restart exits non-zero" test "$rc" -ne 0
+check "hung restart is named as a timeout" grep -q 'timed out after 1s' "$out"
+check "hung restart fails the deploy" grep -q 'restart openchamber.service failed' "$out"
+check "hung restart deploy finishes in bounded time" \
+  test $((SECONDS - start)) -lt 30
+
+# --- scenario 12: hung systemctl, rollback restart times out ----------------
+
+reset_state
+mkdir -p "$(dirname "$oc_link")"
+ln -s "$old_target" "$oc_link"
+touch "$STUB_DIR/curl-fail"
+export RESTART_CLEARS_AT=2
+echo 2 >"$STUB_DIR/hang-restart-from"
+TEST_SYSTEMCTL_TIMEOUT=1
+start=$SECONDS
+run_deploy openchamber openchamber.service openchamber/start "$new_target"
+check "hung rollback restart exits non-zero" test "$rc" -ne 0
+check "hung rollback restart is named as a timeout" \
+  grep -q 'timed out after 1s' "$out"
+check "hung rollback restart still rolls the link back" \
+  link_is "$oc_link" "$old_target"
+check "hung rollback restart is reported as a rollback" \
+  grep -q 'rolled back' "$out"
+check "hung rollback deploy finishes in bounded time" \
+  test $((SECONDS - start)) -lt 30
 
 # --- verdict -----------------------------------------------------------------
 

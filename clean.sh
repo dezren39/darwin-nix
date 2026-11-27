@@ -52,6 +52,7 @@ TIDY_MOVE_FAILURES=0   # incremented by tidy_file_to_bucket/tidy_dir_to_bucket w
 BREW_DRIFT_FAILURES=0  # incremented by brew_cask_drift_check when `brew list --cask` fails (#1918)
 MAS_DRIFT_FAILURES=0   # incremented by mas_app_drift_check when `mas list` fails (#2018)
 EVAL_CACHE_FAILURES=0  # incremented by sweep_eval_caches when the Tier-3 freshness `find` fails (#2167)
+IDLE_PROBE_FAILURES=0  # incremented by fresh_probe when an idleness freshness `find` fails (#2253)
 EXPIRE_REFLOG="${EXPIRE_REFLOG:-0}" # opt-in: force reflog expiry during maintenance
 DOCKER_AGE_DAYS="${DOCKER_AGE_DAYS:-}"  # set = age-scoped docker prune, VM preserved
 PRUNE_UNKNOWN_SCRATCH="${PRUNE_UNKNOWN_SCRATCH:-0}" # opt-in: delete, not just flag, the name-blind catch-all
@@ -1696,11 +1697,52 @@ git_tree_is_clean() {
   [ -e "$1/.git" ] || return 0     # not a repo/worktree: nothing git can say
   [ -z "$(git -C "$1" status --porcelain 2>/dev/null | head -1)" ]
 }
+# Fail-closed freshness probe (#2253): run `find` with the caller's args
+# and leave the first match in FRESH_PROBE_RESULT, exactly like the inline
+# probes this replaces -- but capture find's exit status (temp-file
+# stderr, not a pipe, so the status survives; same shape as #2167). A
+# failed scan (I/O error, permission denied mid-traversal, bad path) also
+# yields empty output, and the idleness callers read empty as "nothing
+# fresh" = idle = deletable. On failure: warn naming the probed path,
+# surface find's stderr, count the failure in IDLE_PROBE_FAILURES so the
+# run exits non-zero at the end, and return 1 -- callers treat that as
+# "active" (keep). The result travels in a variable, not stdout, because
+# a command substitution would run the probe in a subshell and lose the
+# counter increment.
+FRESH_PROBE_RESULT=""
+fresh_probe() {
+  local _label="$1" _path="$2"; shift 2
+  local _err
+  _err=$(mktemp)
+  FRESH_PROBE_RESULT="$(find "$@" 2>"$_err")"
+  if [ $? -ne 0 ]; then
+    warn "$_label freshness probe failed for $_path -- idleness unverifiable; treating as active (keeping)"
+    [ -s "$_err" ] && sed 's/^/     /' "$_err" >&2
+    rm -f "$_err"
+    IDLE_PROBE_FAILURES=$((IDLE_PROBE_FAILURES + 1))
+    return 1
+  fi
+  rm -f "$_err"
+  return 0
+}
+
 repo_is_idle() {
   git_tree_is_clean "$1" || return 1
-  [ -z "$(find "$1" \
+  fresh_probe repo-idle "$1" "$1" \
       \( "${CACHE_EXPR[@]}" -o "${RISK_EXPR[@]}" -o -name .git -o -name .worktrees \) -prune -o \
-      -type f -mtime "-${ARTIFACT_STALE_DAYS}" -print -quit 2>/dev/null)" ]
+      -type f -mtime "-${ARTIFACT_STALE_DAYS}" -print -quit || return 1
+  [ -z "$FRESH_PROBE_RESULT" ]
+}
+
+# Non-git analogue of repo_is_idle for the artifact loop's parent probe:
+# same freshness expression, same fail-closed probe (#2253). Mtime is the
+# only evidence for a plain directory tree, so a failed scan must read as
+# active, never as idle.
+parent_is_idle() {
+  fresh_probe artifact-parent "$1" "$1" \
+      \( "${CACHE_EXPR[@]}" -o "${RISK_EXPR[@]}" -o -name .git -o -name .worktrees \) -prune -o \
+      -type f -mtime "-${ARTIFACT_STALE_DAYS}" -print -quit || return 1
+  [ -z "$FRESH_PROBE_RESULT" ]
 }
 
 # A dirty/active OWNING repo still protects its SOURCE from repo_is_idle, but
@@ -1870,9 +1912,7 @@ while IFS=$'\t' read -r tag reason status path; do
         # Judged against its own parent, using the same staleness window.
         parent="$(dirname "$path")"
         if ! idle_cache_get "$parent"; then
-          if [ -z "$(find "$parent" \
-               \( "${CACHE_EXPR[@]}" -o "${RISK_EXPR[@]}" -o -name .git -o -name .worktrees \) -prune -o \
-               -type f -mtime "-${ARTIFACT_STALE_DAYS}" -print -quit 2>/dev/null)" ]; then
+          if parent_is_idle "$parent"; then
             idle_cache_set "$parent" idle
           else idle_cache_set "$parent" active; fi
           idle_cache_get "$parent"
@@ -1994,11 +2034,12 @@ opencode_entry_is_idle() {
     fi
   fi
   if [ -d "$path" ]; then
-    [ -z "$(find "$path" -mindepth 1 \( "${CACHE_EXPR[@]}" -o "${RISK_EXPR[@]}" -o -name .git \) -prune -o \
-        -type f -mtime "-${days}" -print -quit 2>/dev/null)" ]
+    fresh_probe opencode-idle "$path" "$path" -mindepth 1 \( "${CACHE_EXPR[@]}" -o "${RISK_EXPR[@]}" -o -name .git \) -prune -o \
+        -type f -mtime "-${days}" -print -quit || return 1
   else
-    [ -z "$(find "$path" -maxdepth 0 -mtime "-${days}" -print -quit 2>/dev/null)" ]
+    fresh_probe opencode-idle "$path" "$path" -maxdepth 0 -mtime "-${days}" -print -quit || return 1
   fi
+  [ -z "$FRESH_PROBE_RESULT" ]
 }
 
 # A caller-new worktree or tmp entry is never at risk: `git worktree add` /
@@ -2511,6 +2552,15 @@ fi
 # failure in EVAL_CACHE_FAILURES at the probe site above.
 if [ "$EVAL_CACHE_FAILURES" -gt 0 ]; then
   warn "Tier 3 eval-cache sweep: $EVAL_CACHE_FAILURES freshness probe failure(s) -- clean.sh exiting non-zero"
+  exit 1
+fi
+
+# A failed idleness freshness probe fails the run (#2253), same
+# convention: fresh_probe kept the unverifiable entries (read them as
+# active) and recorded the failures in IDLE_PROBE_FAILURES at the probe
+# sites above.
+if [ "$IDLE_PROBE_FAILURES" -gt 0 ]; then
+  warn "idleness probes: $IDLE_PROBE_FAILURES freshness probe failure(s) -- clean.sh exiting non-zero"
   exit 1
 fi
 outcome_finish

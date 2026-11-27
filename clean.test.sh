@@ -1161,6 +1161,101 @@ fi
 echo "ok: Tier-3 eval-cache sweep keeps the cache and counts the failure on a failed freshness probe; stale deleted and fresh kept on success"
 rm -rf "$EC_DIR"
 
+# ─── #2253: failed idleness freshness probes read as active ───────
+# Drive the extracted fresh_probe + repo_is_idle + parent_is_idle +
+# opencode_entry_is_idle with a find stub that fails only for the
+# "broken" fixtures: a failed scan must read as active (keep) at all
+# three sites (repo probe, non-git parent probe, opencode probe in
+# both its directory and single-file branches), warn naming the path,
+# surface find's stderr, and be counted in IDLE_PROBE_FAILURES.
+# Controls through the real find in the same run: fresh content reads
+# active, genuinely stale content still reads idle.
+IP_DIR="$TMP_ROOT/idle-probe"
+mkdir -p "$IP_DIR/repo-fresh" "$IP_DIR/repo-stale" "$IP_DIR/repo-broken" \
+         "$IP_DIR/parent-stale" "$IP_DIR/parent-broken" \
+         "$IP_DIR/oc-dir-stale" "$IP_DIR/oc-dir-broken" "$IP_DIR/bin"
+printf 'new\n' > "$IP_DIR/repo-fresh/fresh.txt"
+printf 'old\n' > "$IP_DIR/repo-stale/old.txt"
+printf 'new\n' > "$IP_DIR/repo-broken/fresh.txt"
+printf 'old\n' > "$IP_DIR/parent-stale/old.txt"
+printf 'new\n' > "$IP_DIR/parent-broken/fresh.txt"
+printf 'old\n' > "$IP_DIR/oc-dir-stale/old.txt"
+printf 'new\n' > "$IP_DIR/oc-dir-broken/fresh.txt"
+printf 'old\n' > "$IP_DIR/oc-file-stale.txt"
+printf 'new\n' > "$IP_DIR/oc-file-broken.txt"
+touch -t 200001010000 "$IP_DIR/repo-stale/old.txt" "$IP_DIR/parent-stale/old.txt" "$IP_DIR/oc-dir-stale/old.txt" "$IP_DIR/oc-file-stale.txt"
+for _r in repo-fresh repo-stale repo-broken; do
+  git -C "$IP_DIR/$_r" init -q
+  git -C "$IP_DIR/$_r" add -A
+  GIT_AUTHOR_NAME=clean-test GIT_AUTHOR_EMAIL=clean@test GIT_COMMITTER_NAME=clean-test GIT_COMMITTER_EMAIL=clean@test git -C "$IP_DIR/$_r" commit -qm fixture
+done
+: > "$IP_DIR/fns.sh"
+for _f in git_tree_is_clean fresh_probe repo_is_idle parent_is_idle opencode_entry_is_idle; do
+  sed -n "/^$_f() {/,/^}/p" "$SCRIPT" >> "$IP_DIR/fns.sh"
+done
+grep -q 'fresh_probe' "$IP_DIR/fns.sh" || fail "could not extract the #2253 idleness probes"
+REAL_FIND="$(command -v find)"
+export REAL_FIND
+cat > "$IP_DIR/bin/find" <<'STUB'
+#!/bin/sh
+case " $* " in
+  *broken*) echo "find: broken fixture: Permission denied" >&2; exit 1 ;;
+  *) exec "$REAL_FIND" "$@" ;;
+esac
+STUB
+chmod +x "$IP_DIR/bin/find"
+# shellcheck disable=SC2034 # consumed by the extracted probes
+CACHE_EXPR=(-name node_modules)
+# shellcheck disable=SC2034 # consumed by the extracted probes
+RISK_EXPR=(-name target)
+ARTIFACT_STALE_DAYS=3
+IDLE_PROBE_FAILURES=0
+FRESH_PROBE_RESULT=""
+warn() { printf '%s\n' "$*" >> "$IP_DIR/warnings"; }
+as_user() { "$@"; }
+# shellcheck disable=SC1091
+. "$IP_DIR/fns.sh"
+: > "$IP_DIR/warnings"
+IP_OLD_PATH="$PATH"
+PATH="$IP_DIR/bin:$PATH"
+export PATH
+IP_TMPDIR_SAVE="${TMPDIR:-}"
+TMPDIR="$IP_DIR"
+export TMPDIR
+ip_rc=0; repo_is_idle "$IP_DIR/repo-fresh" || ip_rc=$?
+[ "$ip_rc" -eq 1 ] || fail "repo_is_idle read a fresh repo as idle (rc=$ip_rc)"
+ip_rc=0; repo_is_idle "$IP_DIR/repo-stale" || ip_rc=$?
+[ "$ip_rc" -eq 0 ] || fail "repo_is_idle read a stale repo as active (rc=$ip_rc)"
+ip_rc=0; repo_is_idle "$IP_DIR/repo-broken" 2>> "$IP_DIR/stderr.log" || ip_rc=$?
+[ "$ip_rc" -eq 1 ] || fail "repo_is_idle read a failed probe as idle (rc=$ip_rc)"
+ip_rc=0; parent_is_idle "$IP_DIR/parent-stale" || ip_rc=$?
+[ "$ip_rc" -eq 0 ] || fail "parent_is_idle read a stale parent as active (rc=$ip_rc)"
+ip_rc=0; parent_is_idle "$IP_DIR/parent-broken" 2>> "$IP_DIR/stderr.log" || ip_rc=$?
+[ "$ip_rc" -eq 1 ] || fail "parent_is_idle read a failed probe as idle (rc=$ip_rc)"
+ip_rc=0; opencode_entry_is_idle "$IP_DIR/oc-dir-stale" 7 || ip_rc=$?
+[ "$ip_rc" -eq 0 ] || fail "opencode_entry_is_idle read a stale dir as active (rc=$ip_rc)"
+ip_rc=0; opencode_entry_is_idle "$IP_DIR/oc-dir-broken" 7 2>> "$IP_DIR/stderr.log" || ip_rc=$?
+[ "$ip_rc" -eq 1 ] || fail "opencode_entry_is_idle read a failed dir probe as idle (rc=$ip_rc)"
+ip_rc=0; opencode_entry_is_idle "$IP_DIR/oc-file-stale.txt" 7 || ip_rc=$?
+[ "$ip_rc" -eq 0 ] || fail "opencode_entry_is_idle read a stale file as active (rc=$ip_rc)"
+ip_rc=0; opencode_entry_is_idle "$IP_DIR/oc-file-broken.txt" 7 2>> "$IP_DIR/stderr.log" || ip_rc=$?
+[ "$ip_rc" -eq 1 ] || fail "opencode_entry_is_idle read a failed file probe as idle (rc=$ip_rc)"
+if [ -n "$IP_TMPDIR_SAVE" ]; then TMPDIR="$IP_TMPDIR_SAVE"; else unset TMPDIR; fi
+export TMPDIR
+PATH="$IP_OLD_PATH"
+export PATH
+[ "$IDLE_PROBE_FAILURES" -eq 4 ] || fail "failed idleness probes not counted (IDLE_PROBE_FAILURES=$IDLE_PROBE_FAILURES, want 4)"
+grep -q 'freshness probe failed' "$IP_DIR/warnings" \
+  || fail "failed idleness probe did not warn"
+grep -q "$IP_DIR/repo-broken" "$IP_DIR/warnings" \
+  || fail "failed repo idleness probe warning did not name the path"
+grep -q "$IP_DIR/oc-file-broken.txt" "$IP_DIR/warnings" \
+  || fail "failed opencode file probe warning did not name the path"
+grep -q 'Permission denied' "$IP_DIR/stderr.log" \
+  || fail "failed idleness probe did not surface find's stderr"
+echo "ok: idleness probes keep (read active) and count the failure on a failed freshness find at all three sites; stale still reads idle and fresh active on success"
+rm -rf "$IP_DIR"
+
 # ─── Bash 3.2 compatibility: no associative-array cache (#1829) ─────
 # clean.sh's supported entrypoints (./clean.sh via its env-bash shebang,
 # just clean) can resolve to the Bash 3.2 macOS ships at /bin/bash, and

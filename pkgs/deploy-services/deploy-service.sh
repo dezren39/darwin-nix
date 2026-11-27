@@ -163,7 +163,7 @@ fi
 echo "$name: $unit did not become healthy on $target" >&2
 if [ -n "$previous" ]; then
   repoint "$previous"
-  systemctl --user restart "$unit" || true
+  restart
   if wait_healthy; then
     fail "rolled back to $previous and the service is healthy again; the new build was NOT deployed"
   fi

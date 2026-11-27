@@ -34,6 +34,10 @@
 #                  (#2042)                                  -> WARN naming
 #                  the repo, the repo is not counted as refreshed, and
 #                  the run reports protection is incomplete
+#   probe error:   the working-file freshness probe find
+#                  fails (#2288)                            -> WARN naming
+#                  the repo, the repo is not counted as changed, and the
+#                  run reports protection is incomplete
 #
 # Run: bash opencode-tmp-guard.test.sh (exit 0 = all passed)
 set -u
@@ -290,6 +294,43 @@ grep -q "protection is incomplete" "$work/out7"
 check "2042 touch failure: run reports protection incomplete" $?
 [ -n "$(find "$T7/repo/.git/HEAD" -anewer "$work/ref7" 2>/dev/null)" ]; [ $? -ne 0 ]
 check "2042 touch failure: .git metadata indeed not refreshed" $?
+
+# --- Scenario 8: freshness-probe failure is visible (#2288) ---------
+# The 14-day change probe discarded find's stderr, ignored its exit
+# status, and piped through head -1, so a failed scan produced empty
+# output that read as "nothing changed in 14 days": the repo was
+# silently skipped -- no WARN, no counter, a clean success summary.
+T8="$work/T8"
+HOME8="$work/home8"
+mkdir -p "$T8" "$HOME8" "$work/bin8"
+seed_gitdir "$T8/repo/.git"
+printf 'recent work\n' > "$T8/repo/app.js"
+# Recent in mtime (a working probe would count the repo as changed)
+# but old in atime, so a working-file refresh would be observable.
+touch -a -t $OLD_T "$T8/repo/app.js"
+cat > "$work/bin8/find" <<'EOF'
+#!/bin/sh
+# Fail only the working-file freshness probe (the -mtime -14 scan);
+# delegate discovery, the metadata pass, and the refresh pass.
+case " $* " in
+  *" -mtime -14 "*) echo "find: stub: I/O error" >&2; exit 1 ;;
+esac
+exec "$REAL_FIND" "$@"
+EOF
+chmod +x "$work/bin8/find"
+touch "$work/ref8"
+
+rc=$(REAL_FIND=$(command -v find) GUARD_TEST_T="$T8" HOME="$HOME8" PATH="$work/bin8:$work/bin:$PATH" bash "$work/guard.sh" > "$work/out8" 2>&1; echo $?)
+[ "$rc" -eq 0 ]; check "2288 probe-failure run still completes (exit 0)" $?
+grep -q "WARN" "$work/out8"; check "2288 probe failure: WARN logged" $?
+grep -q "freshness probe failed for $T8/repo" "$work/out8"
+check "2288 probe failure: WARN names the repo" $?
+grep -q "working files in 0 (changed <14d)" "$work/out8"
+check "2288 probe failure: repo not counted as changed" $?
+grep -q "protection is incomplete" "$work/out8"
+check "2288 probe failure: run reports protection incomplete" $?
+[ -n "$(find "$T8/repo/app.js" -anewer "$work/ref8" 2>/dev/null)" ]; [ $? -ne 0 ]
+check "2288 probe failure: working files indeed not refreshed" $?
 
 if [ "$failures" -gt 0 ]; then
   echo "FAILURES: $failures"

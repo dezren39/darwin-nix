@@ -34,6 +34,14 @@
 #      a failed deploy leaves the old build running, not a down
 #      service.
 #
+#   0. Serialize against other deploys of the same entrypoint: a
+#      per-link flock is taken before anything is read or touched
+#      and held until exit, so `previous`, the repoint, the restart
+#      and any rollback all happen under the same exclusion. A
+#      contender fails closed immediately — it never races, and
+#      never prints a healthy line for a build it did not deploy
+#      (#2307).
+#
 # systemctl is deliberately NOT one of the app's runtime inputs: the
 # deploy must talk to the host's user manager through the host's
 # systemctl, not a store copy pinned by this flake.
@@ -116,6 +124,22 @@ repoint() {
 restart() {
   systemctl --user restart "$unit" || fail "systemctl --user restart $unit failed"
 }
+
+# 0. Serialize concurrent deploys of this entrypoint (#2307). The
+# lock is taken before `previous` is read below, so the rollback
+# target is captured under the same exclusion that repoints and
+# restarts. flock -n: a contender fails closed instead of queueing
+# behind a ~30s health budget and then racing the winner's state.
+# Fd 9 stays open for the process's whole life; the kernel releases
+# the lock on any exit (including fail() and signals), so there is
+# no stale-lock state to clean up.
+command -v flock >/dev/null 2>&1 ||
+  fail "flock not found: cannot serialize deploys of $unit"
+mkdir -p "$(dirname "$link")"
+lock_file="$link.lock"
+exec 9>"$lock_file"
+flock -n 9 ||
+  fail "another deploy of $unit is already in progress (lock: $lock_file); not racing it"
 
 # 1. Validate the target before touching anything.
 [ -e "$target" ] || fail "target does not exist: $target"

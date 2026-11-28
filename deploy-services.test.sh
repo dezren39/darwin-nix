@@ -12,6 +12,8 @@
 #     restarted exactly once, and health is verified;
 #   - a new build that never becomes healthy rolls the entrypoint
 #     back to the previous target and restarts again;
+#   - a second deploy of the same entrypoint while one holds the
+#     per-link lock fails closed without touching the link (#2307);
 #   - the mcpx health check asks through the config path the unit
 #     itself was started with (read back from ExecStart), because
 #     the daemon's socket name derives from that path.
@@ -145,6 +147,10 @@ link_is() {
   [ "$(readlink "$1" 2>/dev/null || true)" = "$2" ]
 }
 
+no_healthy_line() {
+  ! grep -q 'is healthy' "$1"
+}
+
 # --- scenario 1: unchanged entrypoint, healthy service = no-op -------------
 
 reset_state
@@ -244,6 +250,25 @@ run_deploy openchamber openchamber.service openchamber/start "$new_target"
 check "non-symlink entrypoint exits non-zero" test "$rc" -ne 0
 check "non-symlink entrypoint is left untouched" grep -q 'hand-maintained' "$oc_link"
 check "non-symlink entrypoint does not restart" test "$(restart_count)" -eq 0
+
+# --- scenario 10: a held deploy lock fails a contender closed (#2307) -------
+
+reset_state
+mkdir -p "$(dirname "$oc_link")"
+ln -s "$old_target" "$oc_link"
+exec 8>"$oc_link.lock"
+flock -n 8
+run_deploy openchamber openchamber.service openchamber/start "$new_target"
+check "locked contender exits non-zero" test "$rc" -ne 0
+check "locked contender names the race" grep -q 'already in progress' "$out"
+check "locked contender leaves the link alone" link_is "$oc_link" "$old_target"
+check "locked contender does not restart" test "$(restart_count)" -eq 0
+check "locked contender prints no healthy line" no_healthy_line "$out"
+flock -u 8
+exec 8>&-
+run_deploy openchamber openchamber.service openchamber/start "$new_target"
+check "after release the same deploy succeeds" test "$rc" -eq 0
+check "after release the link is repointed" link_is "$oc_link" "$new_target"
 
 # --- verdict -----------------------------------------------------------------
 

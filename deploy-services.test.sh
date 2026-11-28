@@ -147,6 +147,10 @@ link_is() {
   [ "$(readlink "$1" 2>/dev/null || true)" = "$2" ]
 }
 
+no_healthy_line() {
+  ! grep -q 'is healthy' "$1"
+}
+
 # --- scenario 1: unchanged entrypoint, healthy service = no-op -------------
 
 reset_state
@@ -259,7 +263,7 @@ check "locked contender exits non-zero" test "$rc" -ne 0
 check "locked contender names the race" grep -q 'already in progress' "$out"
 check "locked contender leaves the link alone" link_is "$oc_link" "$old_target"
 check "locked contender does not restart" test "$(restart_count)" -eq 0
-check "locked contender prints no healthy line" bash -c "! grep -q 'is healthy' \"$1\"" _ "$out"
+check "locked contender prints no healthy line" no_healthy_line "$out"
 flock -u 8
 exec 8>&-
 run_deploy openchamber openchamber.service openchamber/start "$new_target"

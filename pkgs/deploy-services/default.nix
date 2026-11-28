@@ -20,8 +20,8 @@
 # mcpx and moves the service onto it without a Home Manager switch.
 # A later switch repoints the links at the code flake's generation
 # again (the activation only moves a link whose target changed);
-# whoever deploys last wins the link, and the unit files never
-# change either way.
+# deploys of the same link are serialized by the core's per-link
+# flock (#2307), and the unit files never change either way.
 {
   pkgs,
   openchamber-start,
@@ -34,6 +34,7 @@ let
       coreutils
       curl
       gnugrep
+      util-linux # flock, for the core's per-link deploy lock (#2307)
     ];
     text = builtins.readFile ./deploy-service.sh;
   };

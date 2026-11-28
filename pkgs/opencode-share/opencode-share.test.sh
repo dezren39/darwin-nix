@@ -573,6 +573,66 @@ grep -q "Shared .opencode mounted at $R_TGT_OK_PART/.opencode" <<<"$out_r4" || f
 grep -q "bindfs $R_TGT_OK_PART/plans $R_TGT_OK_PART/.opencode/plans" "$BINDFS_LOG" || fail "R: same-source partial control never overlaid plans via bindfs"
 [[ $failures -eq $start ]] && ok "R: fully/partially mounted from A + --source B errors naming both sources, counted, no bindfs, no B mutation; same-source full/partial controls unchanged"
 
+# ─── Scenario S (#2296): a failed source plans/ mkdir must name itself ────
+# do_mount created $SOURCE/plans with a bare unchecked mkdir: on a
+# read-only source the raw mkdir error scrolled by, the run blamed the
+# downstream plans overlay instead (or rode through to success), and the
+# mkdir step never contributed its own error. This drives the REAL
+# (non-dry-run) mount path reusing scenario R's stub mode: the base
+# mount is present from the requested source, the plans overlay is not.
+start=$failures
+SRC_RO_S="$TMP_ROOT/src-ro-s"; mkdir -p "$SRC_RO_S"; chmod a-w "$SRC_RO_S"
+SRC_W_S="$TMP_ROOT/src-w-s"; mkdir -p "$SRC_W_S"
+S_TGT_RO="$TMP_ROOT/s-tgt-ro"; mkdir -p "$S_TGT_RO/.opencode"
+S_TGT_GOOD="$TMP_ROOT/s-tgt-good"; mkdir -p "$S_TGT_GOOD/.opencode/plans"
+S_TGT_W="$TMP_ROOT/s-tgt-w"; mkdir -p "$S_TGT_W/.opencode"
+run_s() {
+  local src="$1"; shift
+  : > "$BINDFS_LOG"
+  if [[ "$k_mode" == "direct" ]]; then
+    env -u OPENCODE_SHARE_TEST_MACFUSE_MARKER PATH="$STUB_BIN_R:$PATH" \
+      bash "$SCRIPT" --source "$src" "$@" 2>&1
+  elif [[ "$k_mode" == "namespace" ]]; then
+    local up="$TMP_ROOT/ov-up-s-$RANDOM" work="$TMP_ROOT/ov-work-s-$RANDOM"
+    mkdir -p "$up" "$work"
+    unshare -rm bash "$TMP_ROOT/fake-macfuse.sh" "$up" "$work" \
+      env -u OPENCODE_SHARE_TEST_MACFUSE_MARKER PATH="$STUB_BIN_R:$PATH" \
+      bash "$SCRIPT" --source "$src" "$@" 2>&1
+  else
+    OPENCODE_SHARE_TEST_MACFUSE_MARKER="$FAKE_MACFUSE_MARKER" \
+      PATH="$STUB_BIN_R:$PATH" bash "$SCRIPT" --source "$src" "$@" 2>&1
+  fi
+}
+# S1: read-only source, plans missing -> the mkdir itself is named in an
+# [er] line, the target counts, and the plans overlay is never blamed.
+printf '%s %s\n' "$SRC_RO_S" "$S_TGT_RO/.opencode" > "$MOUNT_STATE_R"
+out_s1="$(run_s "$SRC_RO_S" "$S_TGT_RO")"; rc_s1=$?
+chmod u+w "$SRC_RO_S"
+[[ $rc_s1 -ne 0 ]] || fail "S: read-only source expected non-zero exit, got $rc_s1"
+grep -qF "Cannot create plans/ in source .opencode: $SRC_RO_S/plans" <<<"$out_s1" || fail "S: failed mkdir not named with the source plans dir; output: $out_s1"
+grep -q "1 target(s) had errors" <<<"$out_s1" || fail "S: read-only target not counted in the summary"
+if grep -q "Failed to mount plans overlay" <<<"$out_s1"; then
+  fail "S: downstream plans overlay still blamed for the mkdir failure (regression)"
+fi
+[[ ! -d "$SRC_RO_S/plans" ]] || fail "S: plans/ appeared in the read-only source"
+# S2: multi-target -- the read-only target fails with its own diagnosis
+# while the other target (its plans/ already visible) still mounts.
+printf '%s %s\n%s %s\n' "$SRC_RO_S" "$S_TGT_RO/.opencode" "$SRC_RO_S" "$S_TGT_GOOD/.opencode" > "$MOUNT_STATE_R"
+chmod a-w "$SRC_RO_S"
+out_s2="$(run_s "$SRC_RO_S" "$S_TGT_RO" "$S_TGT_GOOD")"; rc_s2=$?
+chmod u+w "$SRC_RO_S"
+[[ $rc_s2 -eq 1 ]] || fail "S: multi-target expected exit 1, got $rc_s2"
+grep -qF "Cannot create plans/ in source .opencode: $SRC_RO_S/plans" <<<"$out_s2" || fail "S: multi-target read-only diagnosis missing; output: $out_s2"
+grep -q "Shared .opencode mounted at $S_TGT_GOOD/.opencode" <<<"$out_s2" || fail "S: multi-target good target never mounted"
+grep -q "1 target(s) had errors" <<<"$out_s2" || fail "S: multi-target summary did not count exactly the read-only target"
+# S3 control: writable source -- plans/ is created and the mount proceeds.
+printf '%s %s\n' "$SRC_W_S" "$S_TGT_W/.opencode" > "$MOUNT_STATE_R"
+out_s3="$(run_s "$SRC_W_S" "$S_TGT_W")"; rc_s3=$?
+[[ $rc_s3 -eq 0 ]] || fail "S: writable control expected exit 0, got $rc_s3; output: $out_s3"
+[[ -d "$SRC_W_S/plans" ]] || fail "S: writable control did not create the source plans/"
+grep -q "Done (mount 1 target(s))" <<<"$out_s3" || fail "S: writable control missing the Done line"
+[[ $failures -eq $start ]] && ok "S: failed source plans/ mkdir names the source plans dir, counts the target, no overlay blame; multi-target peer still mounts; writable control unchanged"
+
 if [[ $failures -gt 0 ]]; then
   echo "$failures failure(s)" >&2
   exit 1

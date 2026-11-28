@@ -428,6 +428,28 @@ EOF
   esac
 fi
 
+# --- Log-dir mkdir guard (#2302): a failed mkdir after nix-env --set ---
+# phase_activate creates the activation log directory AFTER the system
+# profile has been repointed. A bare `mkdir -p` there fails under
+# `set -e` and exits with no switch.begin and no switch.fail event --
+# an unevented orphaned generation. Pin the guard: the mkdir is checked,
+# a switch.fail event with an empty log is emitted, and both precede
+# the switch.begin event.
+mkdir_line="$(line_of 'if ! mkdir -p "$log_dir"; then')"
+fail_event_line="$(line_of 'service_event switch.fail system="$system_config" exit=2 log=""')"
+begin_line="$(line_of 'service_event switch.begin')"
+if grep -qx '    mkdir -p "$log_dir"' "$SCRIPT"; then
+  fail "simple-rebuild.sh still has the bare unguarded log-dir mkdir (#2302)"
+else
+  ok "no bare unguarded log-dir mkdir remains in simple-rebuild.sh (#2302)"
+fi
+if [ -n "$mkdir_line" ] && [ -n "$fail_event_line" ] && [ -n "$begin_line" ] \
+  && [ "$mkdir_line" -lt "$fail_event_line" ] && [ "$fail_event_line" -lt "$begin_line" ]; then
+  ok "log-dir mkdir is guarded and emits switch.fail before switch.begin (#2302)"
+else
+  fail "log-dir mkdir guard / switch.fail ordering wrong (mkdir=$mkdir_line fail=$fail_event_line begin=$begin_line) (#2302)"
+fi
+
 if [ "$failures" -gt 0 ]; then
   echo "$failures simple-rebuild parser check(s) failed" >&2
   exit 1

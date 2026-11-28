@@ -28,6 +28,26 @@ script_dir="${0:A:h}"
 cd "${script_dir}" || exit 1
 echo "entered: $script_dir"
 
+# Serialize the whole snapshot generation and publish sequence. mkdir is an
+# atomic lock primitive on both macOS and Linux, unlike platform-specific
+# flock/lockf commands. A live owner keeps the lock until this process exits.
+lock_dir="./.zed/.backup-zed.lock"
+while ! mkdir "$lock_dir" 2>/dev/null; do
+    lock_pid=""
+    if [[ -r "$lock_dir/pid" ]]; then
+        read -r lock_pid < "$lock_dir/pid"
+    fi
+    if [[ "$lock_pid" == <-> ]] && ! kill -0 "$lock_pid" 2>/dev/null; then
+        # Reclaim only a lock whose recorded process is definitely gone.
+        rm -f "$lock_dir/pid"
+        rmdir "$lock_dir" 2>/dev/null || true
+    else
+        sleep 0.1
+    fi
+done
+print -r -- "$$" > "$lock_dir/pid"
+trap 'rm -f "${settings_tmp:-}" "${index_tmp:-}" "${installed_tmp:-}" "${settings_bak:-}" "${index_bak:-}" "${installed_bak:-}"; rm -f "$lock_dir/pid"; rmdir "$lock_dir" 2>/dev/null || true' EXIT
+
 # Publish the three-file snapshot coherently (#1787). The copies used to
 # land sequentially, so a failure midway (a missing index, a failed find)
 # left a mixed old/new snapshot behind a nonzero exit. Now every output
@@ -47,7 +67,6 @@ installed_tmp=$(mktemp ./.zed/.installed.txt.XXXXXX)
 settings_bak=$(mktemp ./.zed/.settings.json.bak.XXXXXX)
 index_bak=$(mktemp ./.zed/.index.json.bak.XXXXXX)
 installed_bak=$(mktemp ./.zed/.installed.txt.bak.XXXXXX)
-trap 'rm -f "$settings_tmp" "$index_tmp" "$installed_tmp" "$settings_bak" "$index_bak" "$installed_bak"' EXIT
 
 cp -f "$settings_src" "$settings_tmp" || {
     echo "backup-zed: cannot read settings source: $settings_src" >&2
@@ -147,4 +166,3 @@ if [[ $publish_failed -ne 0 ]]; then
 fi
 
 rm -f "$settings_bak" "$index_bak" "$installed_bak"
-trap - EXIT

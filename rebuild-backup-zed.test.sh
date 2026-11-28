@@ -85,6 +85,10 @@ exec "$REAL_CP" "$@"
 EOF
 cat > "$HOME_DIR/.nix-profile/bin/mv" <<'EOF'
 #!/bin/sh
+if [ -n "${CONCURRENCY_GATE:-}" ] && [ "${BACKUP_GENERATION:-}" = A ] && [ "$3" = "./.zed/settings.json" ]; then
+  : > "$CONCURRENCY_GATE/a-paused"
+  while [ ! -e "$CONCURRENCY_GATE/release" ]; do sleep 0.02; done
+fi
 if [ "${FAIL_PUBLISH_MV:-0}" = 1 ] && [ "$3" = "./.zed/index.json" ]; then
   exit 1
 fi
@@ -382,6 +386,42 @@ check "backup-zed.sh success publishes new installed list" \
 check "backup-zed.sh success installed list has ext-b" \
   grep -qx "ext-b" "$ZED_OUT/installed.txt"
 check_no_zed_leftovers "backup-zed.sh success leaves no temp files"
+
+# Deterministic concurrent publish: A pauses at its first rename, B starts,
+# then A resumes. Without a whole-run lock B publishes between A's renames,
+# producing a mixed snapshot. Oracle: all three final outputs match one source
+# generation (the later serialized run, B).
+HOME_A="$TMP_ROOT/home-a"
+HOME_B="$TMP_ROOT/home-b"
+GATE="$TMP_ROOT/concurrency-gate"
+mkdir -p "$GATE" "$HOME_A/.config/zed" "$HOME_A/Library/Application Support/Zed/extensions/installed/a-ext" \
+  "$HOME_B/.config/zed" "$HOME_B/Library/Application Support/Zed/extensions/installed/b-ext" \
+  "$HOME_A/.nix-profile/bin" "$HOME_B/.nix-profile/bin"
+cp "$HOME_DIR/.nix-profile/bin/mv" "$HOME_A/.nix-profile/bin/mv"
+cp "$HOME_DIR/.nix-profile/bin/mv" "$HOME_B/.nix-profile/bin/mv"
+echo 'A settings' > "$HOME_A/.config/zed/settings.json"
+echo 'A index' > "$HOME_A/Library/Application Support/Zed/extensions/index.json"
+echo 'B settings' > "$HOME_B/.config/zed/settings.json"
+echo 'B index' > "$HOME_B/Library/Application Support/Zed/extensions/index.json"
+CONCURRENCY_GATE="$GATE" BACKUP_GENERATION=A HOME="$HOME_A" PATH="$BIN:$PATH" \
+  zsh "$BACKUP_WORK/backup-zed.sh" > "$TMP_ROOT/concurrent-a.out" 2>&1 &
+PID_A=$!
+for _ in $(seq 1 200); do [ -e "$GATE/a-paused" ] && break; sleep 0.02; done
+if [ ! -e "$GATE/a-paused" ]; then
+  fail "concurrent run A reached the controlled publish pause"
+  kill "$PID_A" 2>/dev/null || true
+else
+  HOME="$HOME_B" PATH="$BIN:$PATH" zsh "$BACKUP_WORK/backup-zed.sh" > "$TMP_ROOT/concurrent-b.out" 2>&1 &
+  PID_B=$!
+  sleep 0.1
+  : > "$GATE/release"
+  wait "$PID_A" || fail "concurrent run A exits successfully"
+  wait "$PID_B" || fail "concurrent run B exits successfully"
+  check "concurrent snapshot settings belong to B" grep -qx 'B settings' "$ZED_OUT/settings.json"
+  check "concurrent snapshot index belongs to B" grep -qx 'B index' "$ZED_OUT/index.json"
+  check "concurrent snapshot installed list belongs to B" grep -qx 'b-ext' "$ZED_OUT/installed.txt"
+  check_no_zed_leftovers "concurrent runs leave no lock or temporary files"
+fi
 
 if [ "$failures" -gt 0 ]; then
   echo "$failures failure(s)" >&2

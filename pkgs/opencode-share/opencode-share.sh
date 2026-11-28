@@ -248,7 +248,7 @@ do_mount() {
   # Ensure plans/ exists in source (needed as mount point inside bindfs)
   if ! $DRY_RUN && [[ ! -d "$target_opencode/plans" ]]; then
     info "Creating plans/ in source .opencode"
-    mkdir -p "$SOURCE/plans"
+    mkdir -p "$SOURCE/plans" || { err "Cannot create plans/ in source .opencode: $SOURCE/plans"; return 1; }
   fi
 
   # Create project-local plans directory

@@ -787,7 +787,17 @@ phase_activate() {
     local macfuse_ready=0
     ensure_macfuse && macfuse_ready=1
     local log_dir="$HOME/Library/Logs/nix-services" log
-    mkdir -p "$log_dir"
+    # The system profile already names the new generation at this point,
+    # so a bare `mkdir -p` failing under `set -e` would exit with neither
+    # a switch.begin nor a switch.fail event -- the
+    # registered-but-never-current state from #656/#670, with nothing in
+    # the event log saying where the switch stopped (#2302). Record the
+    # failure as an event before exiting instead.
+    if ! mkdir -p "$log_dir"; then
+      service_event switch.fail system="$system_config" exit=2 log=""
+      echo "activation logging unavailable: could not create $log_dir; the system profile already names $system_config but nothing was activated" >&2
+      return 1
+    fi
     log="$log_dir/switch-$(date +%Y%m%dT%H%M%S).log"
     service_event switch.begin system="$system_config" \
       previous="$(readlink -f /run/current-system)" log="$log"

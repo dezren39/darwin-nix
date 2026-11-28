@@ -13,6 +13,9 @@
 #   non-2xx      -> exit 1, error names the HTTP code
 #   prompt fetch -> exit 1, error names the task and URL
 #   empty prompt -> exit 1, error says the prompt is empty
+#   digest wrong -> exit 1, error says SHA-256 verification failed,
+#                   and nothing is dispatched (no payload recorded)
+#   digest unset -> exit 1, error names INPUT_PROMPT_SHA256
 #   no OIDC env  -> exit 1, error names the missing runner variables
 #   empty token  -> exit 1, error says the mint failed
 #   hung calls   -> each of the three requests is bounded by a
@@ -46,9 +49,11 @@ mkdir -p "$work/bin"
 { printf '#!%s\n' "$(command -v bash)"; cat <<'STUB'
 url=""
 payload=""
+output_file=""
 prev=""
 for a in "$@"; do
   if [ "$prev" = "-d" ]; then payload=$a; fi
+  if [ "$prev" = "-o" ]; then output_file=$a; fi
   case "$a" in http*) url=$a ;; esac
   prev=$a
 done
@@ -75,7 +80,11 @@ fi
 case "$url" in
   *prompts/*)
     [ "${STUB_PROMPT_FAIL:-0}" = "1" ] && exit 22
-    printf '%s' "${STUB_PROMPT-stub prompt body}"
+    if [ -n "$output_file" ]; then
+      printf '%s' "${STUB_PROMPT-stub prompt body}" > "$output_file"
+    else
+      printf '%s' "${STUB_PROMPT-stub prompt body}"
+    fi
     ;;
   *audience=pm-dispatch*)
     if [ "${STUB_TOKEN_EMPTY:-0}" = "1" ]; then
@@ -100,9 +109,11 @@ chmod +x "$work/bin/curl"
 run_launch() { # extra env assignments as args; sets rc, out, err
   : > "$work/github-output"
   : > "$work/deadline-validation"
+  : > "$work/payload.json"
   env -i PATH="$work/bin:$PATH" HOME="$work" \
     INPUT_REPO="dezren39/darwin-nix" INPUT_TASK="bolt" \
     INPUT_PROMPT_URL="https://example.test/prompts/bolt.md" \
+    INPUT_PROMPT_SHA256="d801f7aec918a09accec5c163fcdd2e5f7cc331d988717694007f68f53f2c1ea" \
     ACTIONS_ID_TOKEN_REQUEST_URL="https://example.test/oidc?tok=req" \
     ACTIONS_ID_TOKEN_REQUEST_TOKEN="req-token" \
     GITHUB_OUTPUT="$work/github-output" \
@@ -145,12 +156,45 @@ rc=$(run_launch STUB_PROMPT='')
 grep -q "prompt for task 'bolt' is empty" "$work/err"
 check "empty prompt error says so" "$?"
 
+# --- prompt digest mismatch (#2038) ---------------------------------------------
+rc=$(run_launch INPUT_PROMPT_SHA256=0000000000000000000000000000000000000000000000000000000000000000)
+[ "$rc" -eq 1 ]; check "prompt digest mismatch exits 1" "$?"
+grep -q 'failed SHA-256 verification' "$work/err"
+check "digest mismatch error says verification failed" "$?"
+[ ! -s "$work/payload.json" ]; check "digest mismatch aborts before the dispatch POST" "$?"
+
+# --- prompt digest matches a non-default prompt (#2038) -------------------------
+rc=$(run_launch STUB_PROMPT='custom body' INPUT_PROMPT_SHA256=4cb1e567dac92b55ad040bb99b7e93f559406284a9e22b05f71b2ee4c19e0d41)
+[ "$rc" -eq 0 ]; check "matching digest for a custom prompt exits 0" "$?"
+[ "$(jq -r .prompt "$work/payload.json")" = "custom body" ]; check "payload prompt is the verified custom prompt" "$?"
+
+# --- prompt digest unset (#2038) --------------------------------------------------
+: > "$work/github-output"
+: > "$work/payload.json"
+env -i PATH="$work/bin:$PATH" HOME="$work" \
+  INPUT_REPO="dezren39/darwin-nix" INPUT_TASK="bolt" \
+  INPUT_PROMPT_URL="https://example.test/prompts/bolt.md" \
+  ACTIONS_ID_TOKEN_REQUEST_URL="https://example.test/oidc?tok=req" \
+  ACTIONS_ID_TOKEN_REQUEST_TOKEN="req-token" \
+  GITHUB_OUTPUT="$work/github-output" \
+  STUB_PAYLOAD_FILE="$work/payload.json" \
+  STUB_DEADLINE_VALIDATION_FILE="$work/deadline-validation" \
+  bash "$SCRIPT" > "$work/out" 2> "$work/err"
+rc=$?
+[ "$rc" -eq 1 ]; check "missing prompt digest exits 1" "$?"
+grep -q 'INPUT_PROMPT_SHA256 is not set' "$work/err"
+check "missing digest error names INPUT_PROMPT_SHA256" "$?"
+[ ! -s "$work/payload.json" ]; check "missing digest aborts before the dispatch POST" "$?"
+
 # --- missing OIDC env -----------------------------------------------------------
 : > "$work/github-output"
 env -i PATH="$work/bin:$PATH" HOME="$work" \
   INPUT_REPO="dezren39/darwin-nix" INPUT_TASK="bolt" \
   INPUT_PROMPT_URL="https://example.test/prompts/bolt.md" \
+  INPUT_PROMPT_SHA256="d801f7aec918a09accec5c163fcdd2e5f7cc331d988717694007f68f53f2c1ea" \
   GITHUB_OUTPUT="$work/github-output" \
+  STUB_PAYLOAD_FILE="$work/payload.json" \
+  STUB_DEADLINE_VALIDATION_FILE="$work/deadline-validation" \
   bash "$SCRIPT" > "$work/out" 2> "$work/err"
 rc=$?
 [ "$rc" -eq 1 ]; check "missing OIDC env exits 1" "$?"

@@ -195,5 +195,50 @@ class FailingYdotool(unittest.TestCase):
         self.assertTrue(any("grant OK" in line for line in logged))
 
 
+class FailingCursorposMeasurement(unittest.TestCase):
+    """#2297: a failed cursorpos measurement must not fall back to a
+    guessed 2.45 scale. calibrate() returns None (scale unknown) and
+    grant() aborts with zero click invocations."""
+
+    def test_calibrate_none_when_cursorpos_fails(self):
+        with mock.patch.object(rpa, "ydotool", return_value=True), \
+             mock.patch.object(rpa, "cursorpos", return_value=None), \
+             mock.patch.object(rpa.time, "sleep"):
+            self.assertIsNone(rpa.calibrate())
+
+    def test_calibrate_none_when_cursorpos_reads_zero(self):
+        with mock.patch.object(rpa, "ydotool", return_value=True), \
+             mock.patch.object(rpa, "cursorpos", return_value=(0, 100)), \
+             mock.patch.object(rpa.time, "sleep"):
+            self.assertIsNone(rpa.calibrate())
+
+    def test_calibrate_measures_scale_control(self):
+        with mock.patch.object(rpa, "ydotool", return_value=True), \
+             mock.patch.object(rpa, "cursorpos", return_value=(245, 100)), \
+             mock.patch.object(rpa.time, "sleep"):
+            self.assertEqual(rpa.calibrate(), 2.45)
+
+    def test_grant_aborts_with_zero_clicks_on_measurement_failure(self):
+        ydotool_calls = []
+
+        def fake_ydotool(*args):
+            ydotool_calls.append(args)
+            return True
+
+        logged = []
+        with mock.patch.object(rpa, "ydotool", side_effect=fake_ydotool), \
+             mock.patch.object(rpa, "cursorpos", return_value=None), \
+             mock.patch.object(rpa, "active_ws", return_value=1), \
+             mock.patch.object(rpa.time, "sleep"), \
+             mock.patch.object(rpa, "log",
+                               side_effect=lambda *a: logged.append(" ".join(map(str, a)))):
+            result = rpa.grant(PICKER)
+        self.assertFalse(result)
+        # Only the calibration probe move; no click, no candidate moves.
+        self.assertEqual([c[0] for c in ydotool_calls], ["mousemove"])
+        self.assertFalse(any("grant OK" in line for line in logged))
+        self.assertTrue(any("calibration" in line for line in logged))
+
+
 if __name__ == "__main__":
     unittest.main()

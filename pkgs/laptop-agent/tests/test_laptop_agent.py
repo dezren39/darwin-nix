@@ -1376,6 +1376,119 @@ class StalledHeaderTest(unittest.TestCase):
         self.assertTrue(body["ok"])
 
 
+class StalledResponseReaderTest(unittest.TestCase):
+    """Issue #2309: a client that sends a valid request and then
+    stops reading the response must not pin a handler thread.
+
+    Oracle: with LAPTOP_AGENT_WRITE_TIMEOUT_S=1, a raw socket with a
+    tiny receive buffer that POSTs /exec for a ~3 MiB response, reads
+    only the headers, then stalls is cut off by the server at the
+    write deadline -- when the client finally drains, it reaches EOF
+    with strictly fewer body bytes than the Content-Length promised
+    (the server aborted mid-body instead of delivering it all once
+    reading resumed). A normal full-speed client is unaffected.
+    """
+
+    def setUp(self):
+        self.token = "<MASKED_SECRET_004>"
+        with tempfile.NamedTemporaryFile("w", delete=False) as f:
+            f.write(self.token + "\n")
+            self.token_path = f.name
+        self.port = free_port()
+        env = dict(os.environ,
+                   LAPTOP_AGENT_TOKEN_FILE=self.token_path,
+                   LAPTOP_AGENT_HOST="127.0.0.1",
+                   LAPTOP_AGENT_PORT=str(self.port),
+                   LAPTOP_AGENT_STATE=tempfile.mkdtemp(),
+                   LAPTOP_AGENT_WRITE_TIMEOUT_S="1")
+        self.proc = subprocess.Popen([sys.executable, str(AGENT)], env=env,
+                                     stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE)
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            try:
+                status, body = self._call("GET", "/health")
+                if status == 200 and body.get("ok"):
+                    return
+            except Exception:
+                time.sleep(0.1)
+        self.tearDown()
+        self.fail("agent did not start")
+
+    def tearDown(self):
+        self.proc.terminate()
+        self.proc.wait(timeout=10)
+        os.unlink(self.token_path)
+
+    def _call(self, method, path, body=None):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        conn.request(method, path,
+                     body=json.dumps(body) if body is not None else None,
+                     headers={"X-Agent-Token": self.token})
+        r = conn.getresponse()
+        payload = r.read()
+        conn.close()
+        try:
+            parsed = json.loads(payload) if payload else {}
+        except ValueError:
+            parsed = {}
+        return r.status, parsed
+
+    def test_stalled_reader_is_cut_off_at_write_deadline(self):
+        cmd = {"argv": [sys.executable, "-c",
+                        "import sys; sys.stdout.write('x' * 1000000)"]}
+        payload = json.dumps(
+            {"cmds": [cmd, cmd, cmd]}).encode()
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+        s.settimeout(15)
+        s.connect(("127.0.0.1", self.port))
+        try:
+            s.sendall(b"POST /exec HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                      b"X-Agent-Token: " + self.token.encode() + b"\r\n"
+                      b"Content-Type: application/json\r\n"
+                      b"Content-Length: " + str(len(payload)).encode()
+                      + b"\r\n\r\n" + payload)
+            # Read only the response headers, then stall past the
+            # 1s write deadline without reading any body bytes.
+            buf = b""
+            while b"\r\n\r\n" not in buf:
+                chunk = s.recv(4096)
+                self.assertTrue(chunk, "server closed before headers")
+                buf += chunk
+            head, _, rest = buf.partition(b"\r\n\r\n")
+            self.assertIn(b" 200 ", head.split(b"\r\n", 1)[0])
+            content_length = None
+            for line in head.split(b"\r\n")[1:]:
+                if line.lower().startswith(b"content-length:"):
+                    content_length = int(line.split(b":", 1)[1])
+            self.assertIsNotNone(content_length)
+            self.assertGreater(content_length, 2000000)
+            time.sleep(3)
+            # Now drain: the server must already have aborted, so we
+            # reach EOF with only a fraction of the promised body.
+            received = len(rest)
+            started = time.monotonic()
+            while time.monotonic() - started < 10:
+                try:
+                    chunk = s.recv(65536)
+                except (ConnectionResetError, BrokenPipeError):
+                    break
+                if not chunk:
+                    break
+                received += len(chunk)
+            self.assertLess(received, content_length)
+        finally:
+            s.close()
+        # The daemon itself is unaffected for normal clients.
+        status, body = self._call(
+            "POST", "/exec",
+            body={"cmds": [{"argv": [sys.executable, "-c",
+                                     "print('ok')"]}]})
+        self.assertEqual(status, 200, body)
+        self.assertIn("ok", body["results"][0].get("stdout", ""))
+
+
 class PersistedJobTimestampTest(unittest.TestCase):
     """Issue #1513: non-numeric persisted timestamps must not crash
     startup or poison /jobs reads.

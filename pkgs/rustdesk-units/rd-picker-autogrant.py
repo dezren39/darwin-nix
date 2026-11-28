@@ -94,16 +94,23 @@ def ydotool(*args):
 def calibrate():
     """ydotool absolute moves are scaled (observed x2.45). Measure it.
 
-    Returns None when the calibration move itself fails: the probe move
-    was never injected, so the scale is unknown and every later click
-    would be a guess.
+    Returns None whenever the scale was not actually measured: the
+    calibration move itself failed (the probe move was never injected),
+    or cursorpos() failed afterwards (hyprctl timeout/spawn/parse
+    failure -- the probe move landed but its result is unknown), or
+    cursorpos() read x=0 after a probe move to x=100 (a 0 reading cannot
+    be the observed result of that move, so the measurement failed; x=0
+    is a legal cursor column, not evidence for any particular scale).
+    In every one of those cases the scale is unknown and every later
+    click would be a guess, so no guessed scale (e.g. the old silent
+    2.45 fallback, #2297) is ever returned.
     """
     if not ydotool("mousemove", "--absolute", "-x", "100", "-y", "100"):
         return None
     time.sleep(0.6)
     pos = cursorpos()
     if not pos or pos[0] == 0:
-        return 2.45
+        return None
     return pos[0] / 100.0
 
 def click(x, y, scale):
@@ -185,7 +192,7 @@ def grant(picker):
             return False
     scale = calibrate()
     if scale is None:
-        log("grant FAILED - ydotool calibration move failed; aborting")
+        log("grant FAILED - ydotool calibration failed (move or cursorpos measurement); aborting")
         return False
     log(f"ydotool scale={scale:.3f}")
     gone = None

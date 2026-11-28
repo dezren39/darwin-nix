@@ -573,6 +573,43 @@ grep -q "Shared .opencode mounted at $R_TGT_OK_PART/.opencode" <<<"$out_r4" || f
 grep -q "bindfs $R_TGT_OK_PART/plans $R_TGT_OK_PART/.opencode/plans" "$BINDFS_LOG" || fail "R: same-source partial control never overlaid plans via bindfs"
 [[ $failures -eq $start ]] && ok "R: fully/partially mounted from A + --source B errors naming both sources, counted, no bindfs, no B mutation; same-source full/partial controls unchanged"
 
+# ─── Scenario S (#2296): a failed in-source plans/ mkdir is named ─────────
+# do_mount created $SOURCE/plans with a bare unchecked mkdir: on a
+# read-only source the raw mkdir error scrolled by and the run blamed
+# the downstream plans-overlay bindfs (or, with a permissive bindfs,
+# reported success). The mkdir result is now checked: the run names
+# $SOURCE/plans in an [er] line, returns non-zero, and the target is
+# counted in the dispatch summary. Drives the REAL mount path with
+# scenario R's stub mount table: base mount present from the requested
+# source, plans/ absent, source made unwritable (a regular file sits
+# at $SOURCE/plans too, so mkdir -p fails even for a privileged runner).
+start=$failures
+SRC_S="$TMP_ROOT/src-s"; mkdir -p "$SRC_S"
+touch "$SRC_S/plans"
+chmod a-w "$SRC_S"
+S_TGT="$TMP_ROOT/s-tgt"; mkdir -p "$S_TGT/.opencode"
+printf '%s %s\n' "$SRC_S" "$S_TGT/.opencode" > "$MOUNT_STATE_R"
+out_s="$(run_r "$SRC_S" "$S_TGT")"; rc_s=$?
+chmod u+w "$SRC_S"
+[[ $rc_s -ne 0 ]] || fail "S: read-only source expected non-zero exit, got $rc_s"
+grep -qF "Cannot create plans/ in source .opencode: $SRC_S/plans" <<<"$out_s" || fail "S: failed mkdir not named with the source plans dir; output: $out_s"
+grep -q "1 target(s) had errors" <<<"$out_s" || fail "S: target not counted in the dispatch summary"
+if grep -q "Failed to mount plans overlay" <<<"$out_s"; then
+  fail "S: downstream plans-overlay error still reported instead of the mkdir cause (regression)"
+fi
+if grep -q "bindfs $S_TGT/plans $S_TGT/.opencode/plans" "$BINDFS_LOG"; then
+  fail "S: plans overlay bindfs attempted after the failed mkdir (regression)"
+fi
+# S2: a writable-source target in the same shape still completes.
+SRC_S2="$TMP_ROOT/src-s2"; mkdir -p "$SRC_S2"
+S_TGT2="$TMP_ROOT/s-tgt2"; mkdir -p "$S_TGT2/.opencode"
+printf '%s %s\n' "$SRC_S2" "$S_TGT2/.opencode" > "$MOUNT_STATE_R"
+out_s2="$(run_r "$SRC_S2" "$S_TGT2")"; rc_s2=$?
+[[ $rc_s2 -eq 0 ]] || fail "S: writable-source control expected exit 0, got $rc_s2; output: $out_s2"
+[[ -d "$SRC_S2/plans" ]] || fail "S: writable-source control did not create plans/"
+grep -q "Shared .opencode mounted at $S_TGT2/.opencode" <<<"$out_s2" || fail "S: writable-source control did not complete the mount"
+[[ $failures -eq $start ]] && ok "S: failed in-source plans/ mkdir names $SOURCE/plans, exits non-zero, counted, no overlay attempt; writable control unchanged"
+
 if [[ $failures -gt 0 ]]; then
   echo "$failures failure(s)" >&2
   exit 1

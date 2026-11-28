@@ -70,7 +70,15 @@ health_check() {
       # rather than guessing a path that would name another socket.
       local exec_start config
       exec_start="$(systemctl --user show "$unit" -p ExecStart --value 2>/dev/null || true)"
-      config="$(printf '%s' "$exec_start" | grep -o -- '--config [^ ;]*' | head -n 1 | cut -d' ' -f2 || true)"
+      # ExecStart argv is space-separated text, so a config path
+      # containing spaces arrives quoted (--config "/path with
+      # spaces/..."). Parse that quoted form first and strip the
+      # quotes; the bare [^ ;]* pattern would truncate the path at
+      # its first space and point health at a nonexistent config.
+      config="$(printf '%s' "$exec_start" | grep -o -- '--config "[^"]*"' | head -n 1 | sed 's/^--config "//; s/"$//' || true)"
+      if [ -z "$config" ]; then
+        config="$(printf '%s' "$exec_start" | grep -o -- '--config [^ ;]*' | head -n 1 | cut -d' ' -f2 || true)"
+      fi
       if [ -z "$config" ]; then
         config="$HOME/.config/mcpx/config.json"
       fi

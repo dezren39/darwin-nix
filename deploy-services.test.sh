@@ -14,7 +14,10 @@
 #     back to the previous target and restarts again;
 #   - the mcpx health check asks through the config path the unit
 #     itself was started with (read back from ExecStart), because
-#     the daemon's socket name derives from that path.
+#     the daemon's socket name derives from that path;
+#   - the mcpx health probe is bounded (DEPLOY_HEALTH_TIMEOUT), so
+#     a wedged daemon fails the attempt instead of hanging the
+#     deploy past its rollback budget (#2258).
 #
 # Usage: deploy-services.test.sh <path-to-deploy-service.sh>
 set -euo pipefail
@@ -136,6 +139,7 @@ run_deploy() {
     DEPLOY_HEALTH="$health" \
     DEPLOY_HEALTH_TRIES=3 \
     DEPLOY_HEALTH_DELAY=0.1 \
+    DEPLOY_HEALTH_TIMEOUT="${TEST_HEALTH_TIMEOUT:-5}" \
     HOME="$tmp/home" \
     PATH="$tmp/bin:$PATH" \
     bash "$script" >"$out" 2>&1 && rc=0 || rc=$?
@@ -244,6 +248,30 @@ run_deploy openchamber openchamber.service openchamber/start "$new_target"
 check "non-symlink entrypoint exits non-zero" test "$rc" -ne 0
 check "non-symlink entrypoint is left untouched" grep -q 'hand-maintained' "$oc_link"
 check "non-symlink entrypoint does not restart" test "$(restart_count)" -eq 0
+
+# --- scenario 10: wedged mcpx daemon fails within the bound, rolls back -----
+
+reset_state
+mkdir -p "$(dirname "$mcpx_link")"
+ln -s "$old_target" "$mcpx_link"
+wedge_dir="$tmp/targets/wedge"
+mkdir -p "$wedge_dir"
+cat >"$wedge_dir/bin" <<EOF
+#!$bash_path
+echo "target-wedge \$*" >>"\$STUB_LOG"
+sleep 30
+EOF
+chmod +x "$wedge_dir/bin"
+export TEST_HEALTH_TIMEOUT=1
+start=$SECONDS
+run_deploy mcpx mcpx.service mcpx/bin/mcpx "$wedge_dir/bin"
+elapsed=$((SECONDS - start))
+export TEST_HEALTH_TIMEOUT=5
+check "wedged mcpx exits non-zero" test "$rc" -ne 0
+check "wedged mcpx health attempt is bounded (<25s, not the 30s sleep)" test "$elapsed" -lt 25
+check "wedged mcpx rolls the link back" link_is "$mcpx_link" "$old_target"
+check "wedged mcpx rollback restarts a second time" test "$(restart_count)" -eq 2
+check "wedged mcpx rollback is reported" grep -q 'rolled back' "$out"
 
 # --- verdict -----------------------------------------------------------------
 

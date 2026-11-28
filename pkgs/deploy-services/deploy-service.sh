@@ -49,6 +49,7 @@ state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
 link="$state_home/$link_rel"
 health_tries="${DEPLOY_HEALTH_TRIES:-60}"
 health_delay="${DEPLOY_HEALTH_DELAY:-0.5}"
+health_timeout="${DEPLOY_HEALTH_TIMEOUT:-5}"
 
 fail() {
   echo "$name: $*" >&2
@@ -74,7 +75,14 @@ health_check() {
       if [ -z "$config" ]; then
         config="$HOME/.config/mcpx/config.json"
       fi
-      "$link" --config "$config" health >/dev/null 2>&1
+      # Bound the probe, like the openchamber branch's -m 5: a
+      # wedged daemon that accepts the invocation but never answers
+      # would otherwise hang this one call forever, wait_healthy's
+      # retry budget would never advance, and the rollback path
+      # would never run (#2258). The deploy target is Linux, so GNU
+      # timeout is available; on expiry timeout exits non-zero and
+      # the attempt simply counts as unhealthy.
+      timeout "$health_timeout" "$link" --config "$config" health >/dev/null 2>&1
       ;;
     *)
       echo "$name: unknown DEPLOY_HEALTH kind: $health_kind" >&2

@@ -406,7 +406,7 @@ for i in "${!BROKEN[@]}"; do
     echo -e "  ${GREEN}✅ $original reinstalled${NC}"
     FIXED=$((FIXED + 1))
   else
-    echo -e "  ${RED}⚠️  $original failed (may need sudo)${NC}"
+    echo -e "  ${RED}⚠️  $original failed (see Homebrew error above)${NC}"
     FAILED=$((FAILED + 1))
     FAILED_LIST+=("$original")
   fi
@@ -417,7 +417,7 @@ echo -e "${BOLD}Results:${NC} ${GREEN}${FIXED} fixed${NC}, ${RED}${FAILED} faile
 
 if [[ ${#FAILED_LIST[@]} -gt 0 ]]; then
   echo ""
-  echo -e "${YELLOW}These casks need manual intervention (probably sudo):${NC}"
+  echo -e "${YELLOW}Retry these commands manually; check Homebrew's error above first:${NC}"
   for cask in "${FAILED_LIST[@]}"; do
     echo "  brew reinstall --cask $cask"
   done

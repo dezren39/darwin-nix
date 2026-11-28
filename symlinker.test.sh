@@ -78,6 +78,11 @@
 #          skip-backup keeping its DELETE-diagnostic effect). Scenario
 #          T pins the writer/reader round-trip, including undo-of-undo
 #          and a hand-written header whose strict=true is not adopted.
+#   #2303 — the LOG_DIR mkdir was unchecked (no set -e), so a failed
+#          mkdir (XDG_CACHE_HOME a file / read-only / full) let the
+#          destructive forward path run with no undo/log artifacts at
+#          all, reporting success. It now fails closed before any
+#          mutation. Scenario U pins this.
 # This drives the REAL symlinker.sh (no pasted copies) against temp dirs.
 # The #886 scenario stubs `date` so every invocation lands in the same
 # "second" deterministically.
@@ -915,6 +920,24 @@ rc_none=$?
 
 bash "$SCRIPT" --help >"$S/help.log" 2>&1 || fail "S: --help under the real interpreter exited non-zero"
 check "S: --help still prints usage" grep -q "USAGE" "$S/help.log"
+
+# ─── Scenario U (#2303): failed LOG_DIR mkdir fails closed ───────────────
+# XDG_CACHE_HOME points at a regular file, so $XDG_CACHE_HOME/symlinker
+# can never be created. The run must exit non-zero naming the log dir,
+# and the output tree must be untouched (no symlink, original intact).
+U="$TMP_ROOT/u"; mkdir -p "$U/in" "$U/out"
+printf 'new\n' > "$U/in/item.txt"
+printf 'old\n' > "$U/out/item.txt"
+printf 'not-a-dir\n' > "$U/cachefile"
+if XDG_CACHE_HOME="$U/cachefile" bash "$SCRIPT" --input-dir "$U/in" --output-dir "$U/out" \
+  --force --no-input >"$U/run.log" 2>&1; then
+  fail "U: run with uncreatable LOG_DIR exited zero"
+else
+  echo "ok: U: run with uncreatable LOG_DIR exits non-zero"
+fi
+check "U: error names the log directory" grep -qF "cannot create log directory: $U/cachefile/symlinker" "$U/run.log"
+check "U: output original untouched (no mutation)" grep -qx old "$U/out/item.txt"
+check "U: no symlink created" test ! -L "$U/out/item.txt"
 
 if (( failures > 0 )); then
   echo "symlinker tests: $failures failure(s)" >&2

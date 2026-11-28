@@ -411,7 +411,10 @@ unset _run_id_base
 COMMON_PREFIX=""
 
 # Log directory + file setup for undo (forward path overrides LOG_FILE later)
-mkdir -p "$LOG_DIR"
+# Fail closed (#2303): without the log dir every undo/log artifact write
+# fails silently (no set -e), and the destructive forward path would run
+# with no undo record. Refuse before any mutation instead.
+mkdir -p "$LOG_DIR" || { echo "Error: cannot create log directory: $LOG_DIR" >&2; exit 1; }
 UNDO_LOG_FILE=""
 
 disp() {

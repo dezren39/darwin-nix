@@ -246,9 +246,13 @@ do_mount() {
   fi
 
   # Ensure plans/ exists in source (needed as mount point inside bindfs)
+  # NOTE (#2296): this mkdir used to be the only unchecked setup step in
+  # do_mount. On a read-only source it failed silently and the run went
+  # on to blame the plans overlay (or even report success); name the
+  # source plans dir and return non-zero, per the #1323 rule.
   if ! $DRY_RUN && [[ ! -d "$target_opencode/plans" ]]; then
     info "Creating plans/ in source .opencode"
-    mkdir -p "$SOURCE/plans"
+    mkdir -p "$SOURCE/plans" || { err "Cannot create plans/ in source .opencode: $SOURCE/plans"; return 1; }
   fi
 
   # Create project-local plans directory

@@ -67,6 +67,10 @@ case "$*" in
     n=$(cat "$STUB_DIR/restart-count" 2>/dev/null || echo 0)
     n=$((n + 1))
     echo "$n" >"$STUB_DIR/restart-count"
+    if [ "${RESTART_FAILS_AT:-0}" = "$n" ]; then
+      echo "stub: restart $n fails" >&2
+      exit 1
+    fi
     if [ "${RESTART_CLEARS_AT:-0}" = "$n" ]; then
       rm -f "$STUB_DIR/curl-fail"
     fi
@@ -119,6 +123,7 @@ reset_state() {
     "$STUB_DIR/fail-old" "$STUB_DIR/fail-new" "$STUB_DIR/restart-count"
   : >"$STUB_LOG"
   export RESTART_CLEARS_AT=0
+  export RESTART_FAILS_AT=0
 }
 
 restart_count() {
@@ -244,6 +249,22 @@ run_deploy openchamber openchamber.service openchamber/start "$new_target"
 check "non-symlink entrypoint exits non-zero" test "$rc" -ne 0
 check "non-symlink entrypoint is left untouched" grep -q 'hand-maintained' "$oc_link"
 check "non-symlink entrypoint does not restart" test "$(restart_count)" -eq 0
+
+# --- scenario 10: rollback restart itself fails = named restart failure -----
+
+reset_state
+mkdir -p "$(dirname "$oc_link")"
+ln -s "$old_target" "$oc_link"
+touch "$STUB_DIR/curl-fail"
+export RESTART_FAILS_AT=2
+run_deploy openchamber openchamber.service openchamber/start "$new_target"
+check "failed rollback restart exits non-zero" test "$rc" -ne 0
+check "failed rollback restart still rolls the link back" link_is "$oc_link" "$old_target"
+check "failed rollback restart was attempted" test "$(restart_count)" -eq 2
+check "failed rollback restart is named as the cause" \
+  grep -q 'systemctl --user restart openchamber.service failed' "$out"
+check "failed rollback restart is not reported as merely unhealthy" \
+  bash -c '! grep -q "still not healthy" "$1"' _ "$out"
 
 # --- verdict -----------------------------------------------------------------
 

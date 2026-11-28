@@ -14,7 +14,10 @@
 #     back to the previous target and restarts again;
 #   - the mcpx health check asks through the config path the unit
 #     itself was started with (read back from ExecStart), because
-#     the daemon's socket name derives from that path.
+#     the daemon's socket name derives from that path — including
+#     when that path contains spaces and arrives quoted in
+#     ExecStart, where it must be parsed whole, not truncated at
+#     the first space.
 #
 # Usage: deploy-services.test.sh <path-to-deploy-service.sh>
 set -euo pipefail
@@ -60,7 +63,11 @@ case "$*" in
     exit 0
     ;;
   *show*)
-    printf '{ path=stub ; argv[]=stub daemon --config %s ; }\n' "$STUB_DIR/rendered.json"
+    if [ -f "$STUB_DIR/exec-start-spaced" ]; then
+      printf '{ path=stub ; argv[]=stub daemon --config "%s" ; }\n' "$STUB_DIR/spaced home/config.json"
+    else
+      printf '{ path=stub ; argv[]=stub daemon --config %s ; }\n' "$STUB_DIR/rendered.json"
+    fi
     exit 0
     ;;
   *restart*)
@@ -116,7 +123,8 @@ mcpx_link="$state_home/mcpx/bin/mcpx"
 reset_state() {
   rm -rf "$tmp/home/.local"
   rm -f "$STUB_DIR/curl-fail" "$STUB_DIR/not-active" \
-    "$STUB_DIR/fail-old" "$STUB_DIR/fail-new" "$STUB_DIR/restart-count"
+    "$STUB_DIR/fail-old" "$STUB_DIR/fail-new" "$STUB_DIR/restart-count" \
+    "$STUB_DIR/exec-start-spaced"
   : >"$STUB_LOG"
   export RESTART_CLEARS_AT=0
 }
@@ -244,6 +252,17 @@ run_deploy openchamber openchamber.service openchamber/start "$new_target"
 check "non-symlink entrypoint exits non-zero" test "$rc" -ne 0
 check "non-symlink entrypoint is left untouched" grep -q 'hand-maintained' "$oc_link"
 check "non-symlink entrypoint does not restart" test "$(restart_count)" -eq 0
+
+# --- scenario 10: mcpx health parses a quoted, spaced --config path ---------
+
+reset_state
+mkdir -p "$(dirname "$mcpx_link")"
+ln -s "$old_target" "$mcpx_link"
+touch "$STUB_DIR/exec-start-spaced"
+run_deploy mcpx mcpx.service mcpx/bin/mcpx "$new_target"
+check "mcpx spaced config exits 0" test "$rc" -eq 0
+check "mcpx health uses the full quoted spaced config path" \
+  grep -qF "target-new --config $STUB_DIR/spaced home/config.json health" "$STUB_LOG"
 
 # --- verdict -----------------------------------------------------------------
 

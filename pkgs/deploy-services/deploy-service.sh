@@ -36,7 +36,8 @@
 #
 # systemctl is deliberately NOT one of the app's runtime inputs: the
 # deploy must talk to the host's user manager through the host's
-# systemctl, not a store copy pinned by this flake.
+# systemctl, not a store copy pinned by this flake. Every call to it
+# is bounded by a deadline (run_systemctl below, #2268).
 set -euo pipefail
 
 name="${DEPLOY_NAME:?DEPLOY_NAME is set by the deploy app wrapper}"
@@ -49,10 +50,32 @@ state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
 link="$state_home/$link_rel"
 health_tries="${DEPLOY_HEALTH_TRIES:-60}"
 health_delay="${DEPLOY_HEALTH_DELAY:-0.5}"
+systemctl_bound="${DEPLOY_SYSTEMCTL_TIMEOUT:-5}"
 
 fail() {
   echo "$name: $*" >&2
   exit 1
+}
+
+# run_systemctl <args...>: every host systemctl call goes through
+# here so each one carries a deadline (#2268). A wedged user manager
+# must not hang the deploy forever: wait_healthy's retry budget only
+# advances when health_check returns, and the restart sites have no
+# budget at all. timeout(1) is coreutils — already a runtime input
+# (default.nix) — and these apps only deploy the Linux systemd units,
+# so it is always on hand here (unlike simple-rebuild.sh, which runs
+# on stock macOS and polls by hand, #2101). A timeout (rc 124, or 137
+# when the follow-up KILL was needed) is named on stderr and returned
+# as a plain failure: a timed-out probe counts as unhealthy, and a
+# timed-out restart fails the deploy.
+run_systemctl() {
+  local rc=0
+  timeout --kill-after=1 "$systemctl_bound" systemctl --user "$@" || rc=$?
+  if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+    echo "$name: systemctl --user $* timed out after ${systemctl_bound}s" >&2
+    return 1
+  fi
+  return "$rc"
 }
 
 health_check() {
@@ -63,13 +86,13 @@ health_check() {
       curl -fsS -m 5 -o /dev/null "http://127.0.0.1:3000/" 2>/dev/null
       ;;
     mcpx)
-      systemctl --user is-active --quiet "$unit" || return 1
+      run_systemctl is-active --quiet "$unit" || return 1
       # The daemon's health is keyed by its config path (the socket
       # name derives from it), so ask through the very config the
       # unit itself was started with — read back from ExecStart —
       # rather than guessing a path that would name another socket.
       local exec_start config
-      exec_start="$(systemctl --user show "$unit" -p ExecStart --value 2>/dev/null || true)"
+      exec_start="$(run_systemctl show "$unit" -p ExecStart --value 2>/dev/null || true)"
       config="$(printf '%s' "$exec_start" | grep -o -- '--config [^ ;]*' | head -n 1 | cut -d' ' -f2 || true)"
       if [ -z "$config" ]; then
         config="$HOME/.config/mcpx/config.json"
@@ -114,7 +137,7 @@ repoint() {
 }
 
 restart() {
-  systemctl --user restart "$unit" || fail "systemctl --user restart $unit failed"
+  run_systemctl restart "$unit" || fail "systemctl --user restart $unit failed"
 }
 
 # 1. Validate the target before touching anything.
@@ -163,7 +186,7 @@ fi
 echo "$name: $unit did not become healthy on $target" >&2
 if [ -n "$previous" ]; then
   repoint "$previous"
-  systemctl --user restart "$unit" || true
+  run_systemctl restart "$unit" || true
   if wait_healthy; then
     fail "rolled back to $previous and the service is healthy again; the new build was NOT deployed"
   fi

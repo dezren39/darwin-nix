@@ -137,9 +137,17 @@ is_mounted() {
 }
 
 mount_source() {
-  # The source of the live mount at $1, extracted exactly as do_status
-  # does (#2244). Full-read grep for the same #1455 SIGPIPE reason.
-  mount | grep -F " on $1 (" | awk 'NR==1 {print $1}'
+  # The source of the live mount at $1 (#2244). A mount line is
+  # "<source> on <target> (<options>)"; the source is everything before
+  # the fixed " on $1 (" delimiter, NOT the first whitespace field —
+  # a source path containing spaces was truncated at its first space
+  # and a valid same-source mount then read as a different source
+  # (#2249). awk without exit reads the whole stream (the #1455
+  # SIGPIPE reason a grep -q / head form would reintroduce) and only
+  # the first matching line is printed.
+  mount | awk -v delim=" on $1 (" '
+    !found && index($0, delim) { print substr($0, 1, index($0, delim) - 1); found = 1 }
+  '
 }
 
 check_deps() {
@@ -374,11 +382,11 @@ do_status() {
     warn ".opencode is a symlink -> $link_target (not a bindfs mount)"
   elif is_mounted "$target_opencode"; then
     local mount_src
-    mount_src=$(mount | grep -F " on $target_opencode (" | awk 'NR==1 {print $1}')
+    mount_src=$(mount_source "$target_opencode")
     log ".opencode: mounted (source: $mount_src)"
 
     if is_mounted "$target_opencode/plans"; then
-      mount_src=$(mount | grep -F " on $target_opencode/plans (" | awk 'NR==1 {print $1}')
+      mount_src=$(mount_source "$target_opencode/plans")
       log "plans/:   mounted (source: $mount_src)"
     else
       warn "plans/:   NOT mounted (using shared plans from source)"

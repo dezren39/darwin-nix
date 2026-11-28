@@ -125,6 +125,22 @@ HEADER_TIMEOUT_S = _parse_startup_int(
     os.environ.get("LAPTOP_AGENT_HEADER_TIMEOUT_S", "30"),
     "must be an integer >= 1", 1)
 
+# Response-write deadline (#2309): parse_request restores a blocking
+# socket once the headers are in, and _send then wrote the whole body
+# with one bare wfile.write -- a client that sends a valid request and
+# then stops reading pins its handler thread inside that write
+# forever (responses reach ~2 MiB; ThreadingHTTPServer threads are
+# unbounded, and the /exec SEMA slot is already released, so no other
+# deadline or cap applies). _send therefore writes in chunks under a
+# monotonic deadline of this many seconds; on expiry the write raises
+# TimeoutError, Handler.handle drops the connection, and the thread
+# is released. 30s matches the header deadline: generous for real
+# clients, which read responses promptly.
+WRITE_TIMEOUT_S = _parse_startup_int(
+    "LAPTOP_AGENT_WRITE_TIMEOUT_S",
+    os.environ.get("LAPTOP_AGENT_WRITE_TIMEOUT_S", "30"),
+    "must be an integer >= 1", 1)
+
 JOBS = {}                    # job_id -> dict
 JOBS_LOCK = threading.Lock()
 
@@ -781,8 +797,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             super().handle()
         except TimeoutError:
-            # Header-read deadline expired (#2067): the client stalled
-            # mid-request. Drop the connection quietly -- one journal
+            # A read or write deadline expired (#2067 header reads,
+            # #2309 response writes): the client stalled mid-request
+            # or mid-response. Drop the connection quietly -- one journal
             # traceback per stalled client would bury real errors; the
             # server machinery closes the socket either way.
             self.close_connection = True
@@ -796,7 +813,35 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Connection", "close")
             self.close_connection = True
         self.end_headers()
-        self.wfile.write(body)
+        # Write the body under the response-write deadline (#2309):
+        # chunked writes with a monotonic deadline, so a reader that
+        # trickles just fast enough to reset a per-write socket
+        # timeout still cannot pin this thread past the deadline.
+        # Each chunk's socket timeout is the time remaining, so a
+        # fully stalled reader raises TimeoutError at the deadline;
+        # Handler.handle catches it and drops the connection.
+        deadline = time.monotonic() + WRITE_TIMEOUT_S
+        try:
+            view = memoryview(body)
+            while view:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(
+                        "response write deadline exceeded")
+                self.connection.settimeout(remaining)
+                written = self.wfile.write(view[:65536])
+                if written is None:
+                    written = min(len(view), 65536)
+                view = view[written:]
+                self.wfile.flush()
+        finally:
+            # Restore the blocking socket parse_request established;
+            # on a deadline expiry Handler.handle closes the
+            # connection anyway, so this is best-effort there.
+            try:
+                self.connection.settimeout(None)
+            except OSError:
+                pass
 
     def _authed(self):
         given = self.headers.get("X-Agent-Token") or ""
